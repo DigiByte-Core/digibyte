@@ -75,7 +75,12 @@ void inline  __attribute__((always_inline)) Save(unsigned char* out, __m128i s)
 }
 
 namespace sha256_shani {
-void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks)
+
+uint64_t union_uint32(uint32_t a, uint32_t b){
+    return (uint64_t)a << 32 | (uint64_t)b;
+}
+
+void Transform(uint32_t* s, const uint32_t* k256, const unsigned char* chunk, size_t blocks )
 {
     __m128i m0, m1, m2, m3, s0, s1, so0, so1;
 
@@ -91,39 +96,39 @@ void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks)
 
         /* Load data and transform */
         m0 = Load(chunk);
-        QuadRound(s0, s1, m0, 0xe9b5dba5b5c0fbcfull, 0x71374491428a2f98ull);
+        QuadRound(s0, s1, m0, union_uint32(k256[3], k256[2]) , union_uint32(k256[1], k256[0]));
         m1 = Load(chunk + 16);
-        QuadRound(s0, s1, m1, 0xab1c5ed5923f82a4ull, 0x59f111f13956c25bull);
+        QuadRound(s0, s1, m1, union_uint32(k256[7], k256[6]) , union_uint32(k256[5], k256[4]));
         ShiftMessageA(m0, m1);
         m2 = Load(chunk + 32);
-        QuadRound(s0, s1, m2, 0x550c7dc3243185beull, 0x12835b01d807aa98ull);
+        QuadRound(s0, s1, m2, union_uint32(k256[11], k256[10]) , union_uint32(k256[9], k256[8]));
         ShiftMessageA(m1, m2);
         m3 = Load(chunk + 48);
-        QuadRound(s0, s1, m3, 0xc19bf1749bdc06a7ull, 0x80deb1fe72be5d74ull);
+        QuadRound(s0, s1, m3, union_uint32(k256[15], k256[14]) , union_uint32(k256[13], k256[12]));
         ShiftMessageB(m2, m3, m0);
-        QuadRound(s0, s1, m0, 0x240ca1cc0fc19dc6ull, 0xefbe4786E49b69c1ull);
+        QuadRound(s0, s1, m0, union_uint32(k256[19], k256[18]) , union_uint32(k256[17], k256[16]));
         ShiftMessageB(m3, m0, m1);
-        QuadRound(s0, s1, m1, 0x76f988da5cb0a9dcull, 0x4a7484aa2de92c6full);
+        QuadRound(s0, s1, m1, union_uint32(k256[23], k256[22]) , union_uint32(k256[21], k256[20]));
         ShiftMessageB(m0, m1, m2);
-        QuadRound(s0, s1, m2, 0xbf597fc7b00327c8ull, 0xa831c66d983e5152ull);
+        QuadRound(s0, s1, m2, union_uint32(k256[27], k256[26]) , union_uint32(k256[25], k256[24]));
         ShiftMessageB(m1, m2, m3);
-        QuadRound(s0, s1, m3, 0x1429296706ca6351ull, 0xd5a79147c6e00bf3ull);
+        QuadRound(s0, s1, m3, union_uint32(k256[31], k256[30]) , union_uint32(k256[29], k256[28]));
         ShiftMessageB(m2, m3, m0);
-        QuadRound(s0, s1, m0, 0x53380d134d2c6dfcull, 0x2e1b213827b70a85ull);
+        QuadRound(s0, s1, m0, union_uint32(k256[35], k256[34]) , union_uint32(k256[33], k256[32]));
         ShiftMessageB(m3, m0, m1);
-        QuadRound(s0, s1, m1, 0x92722c8581c2c92eull, 0x766a0abb650a7354ull);
+        QuadRound(s0, s1, m1, union_uint32(k256[39], k256[38]) , union_uint32(k256[37], k256[36]));
         ShiftMessageB(m0, m1, m2);
-        QuadRound(s0, s1, m2, 0xc76c51A3c24b8b70ull, 0xa81a664ba2bfe8a1ull);
+        QuadRound(s0, s1, m2, union_uint32(k256[43], k256[42]) , union_uint32(k256[41], k256[40]));
         ShiftMessageB(m1, m2, m3);
-        QuadRound(s0, s1, m3, 0x106aa070f40e3585ull, 0xd6990624d192e819ull);
+        QuadRound(s0, s1, m3, union_uint32(k256[47], k256[46]) , union_uint32(k256[45], k256[44]));
         ShiftMessageB(m2, m3, m0);
-        QuadRound(s0, s1, m0, 0x34b0bcb52748774cull, 0x1e376c0819a4c116ull);
+        QuadRound(s0, s1, m0, union_uint32(k256[51], k256[50]) , union_uint32(k256[49], k256[48]));
         ShiftMessageB(m3, m0, m1);
-        QuadRound(s0, s1, m1, 0x682e6ff35b9cca4full, 0x4ed8aa4a391c0cb3ull);
+        QuadRound(s0, s1, m1, union_uint32(k256[55], k256[54]) , union_uint32(k256[53], k256[52]));
         ShiftMessageC(m0, m1, m2);
-        QuadRound(s0, s1, m2, 0x8cc7020884c87814ull, 0x78a5636f748f82eeull);
+        QuadRound(s0, s1, m2, union_uint32(k256[59], k256[58]) , union_uint32(k256[57], k256[56]));
         ShiftMessageC(m1, m2, m3);
-        QuadRound(s0, s1, m3, 0xc67178f2bef9A3f7ull, 0xa4506ceb90befffaull);
+        QuadRound(s0, s1, m3, union_uint32(k256[63], k256[62]) , union_uint32(k256[61], k256[60]));
 
         /* Combine with old state */
         s0 = _mm_add_epi32(s0, so0);
