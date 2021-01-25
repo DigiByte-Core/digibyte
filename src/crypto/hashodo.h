@@ -6,12 +6,21 @@
 #ifndef HASH_ODO
 #define HASH_ODO
 
-#include "uint256.h"
 #include "odocrypt.h"
-#include "odo_sha256_param_gen.h"
 #include "sha256.h"
+#include "uint256.h"
 
-template<typename T1>
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+#include "odo_sha256_param_gen.h"
+
+#if defined(__cplusplus)
+}
+#endif
+
+template <typename T1>
 inline uint256 HashOdo(const T1 pbegin, const T1 pend, uint32_t key)
 {
     char cipher[OdoCrypt::DIGEST_SIZE] = {};
@@ -23,11 +32,12 @@ inline uint256 HashOdo(const T1 pbegin, const T1 pend, uint32_t key)
 
     OdoCrypt(key).Encrypt(cipher, cipher);
 
-    ODO_SHA256_PARAM_GEN param(key);
-    CSHA256 sha256(param.sha256_initial_hash_value, param.k256);
+    uint32_t h256[8], k256[64];
+    generate(key, h256, k256);
+    CSHA256 sha256(h256, k256);
 
     uint8_t ucipher[OdoCrypt::DIGEST_SIZE] = {};
-    for(size_t i = 0; i < OdoCrypt::DIGEST_SIZE; i++){
+    for (size_t i = 0; i < OdoCrypt::DIGEST_SIZE; i++) {
         ucipher[i] = cipher[i];
     }
     sha256.Write(ucipher, (size_t)(OdoCrypt::DIGEST_SIZE));
