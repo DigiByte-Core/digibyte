@@ -6,19 +6,11 @@
 #ifndef HASH_ODO
 #define HASH_ODO
 
+#include "odo_sha256_param_gen.h"
 #include "odocrypt.h"
+#include "scrypt.h"
 #include "sha256.h"
 #include "uint256.h"
-
-#if defined(__cplusplus)
-extern "C" {
-#endif
-
-#include "odo_sha256_param_gen.h"
-
-#if defined(__cplusplus)
-}
-#endif
 
 template <typename T1>
 inline uint256 HashOdo(const T1 pbegin, const T1 pend, uint32_t key)
@@ -45,7 +37,7 @@ inline uint256 HashOdo(const T1 pbegin, const T1 pend, uint32_t key)
     uint8_t sha256_out[CSHA256::OUTPUT_SIZE];
     sha256.Finalize(sha256_out);
 
-    memcpy(hash, sha256_out, hash.size());
+    memcpy(&hash, sha256_out, hash.size());
 
     return hash;
 }

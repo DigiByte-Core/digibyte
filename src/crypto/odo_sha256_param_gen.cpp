@@ -3,6 +3,7 @@
 //
 
 #include "odo_sha256_param_gen.h"
+#include <cstddef>
 
 static const uint32_t TABLE_SIZE_BITS = 14;
 static const uint32_t TABLE_SIZE = 16384; //pow(2, TABLE_SIZE_BITS);

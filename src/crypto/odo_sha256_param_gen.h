@@ -12,6 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void generate(uint64_t key, uint32_t h256_out[8], uint32_t k256_out[64]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //ODO_SHA256_PARAM_GEN_H
