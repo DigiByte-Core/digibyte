@@ -6,38 +6,29 @@
 #ifndef HASH_ODO
 #define HASH_ODO
 
-#include "odo_sha256_param_gen.h"
-#include "odocrypt.h"
-#include "scrypt.h"
-#include "sha256.h"
 #include "uint256.h"
+#include "scrypt.h"
+#include "odocrypt.h"
 
-template <typename T1>
+extern "C" {
+    #include "KeccakP-800-SnP.h"
+}
+
+template<typename T1>
 inline uint256 HashOdo(const T1 pbegin, const T1 pend, uint32_t key)
 {
-    char cipher[OdoCrypt::DIGEST_SIZE] = {};
+    char cipher[KeccakP800_stateSizeInBytes] = {};
     uint256 hash;
 
     size_t len = (pend - pbegin) * sizeof(pbegin[0]);
     assert(len <= OdoCrypt::DIGEST_SIZE);
+    assert(OdoCrypt::DIGEST_SIZE < KeccakP800_stateSizeInBytes);
     memcpy(cipher, static_cast<const void*>(&pbegin[0]), len);
+    cipher[len] = 1;
 
     OdoCrypt(key).Encrypt(cipher, cipher);
-
-    uint32_t h256[8], k256[64];
-    generate(key, h256, k256);
-    CSHA256 sha256(h256, k256);
-
-    uint8_t ucipher[OdoCrypt::DIGEST_SIZE] = {};
-    for (size_t i = 0; i < OdoCrypt::DIGEST_SIZE; i++) {
-        ucipher[i] = cipher[i];
-    }
-    sha256.Write(ucipher, (size_t)(OdoCrypt::DIGEST_SIZE));
-
-    uint8_t sha256_out[CSHA256::OUTPUT_SIZE];
-    sha256.Finalize(sha256_out);
-
-    memcpy(&hash, sha256_out, hash.size());
+    KeccakP800_Permute_12rounds(cipher);
+    memcpy(&hash, cipher, hash.size());
 
     return hash;
 }

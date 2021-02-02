@@ -452,6 +452,8 @@ crypto_libbitcoin_crypto_base_a_SOURCES += \
   crypto/sph_skein.h \
   crypto/sph_types.h \
   crypto/scrypt.h \
+  crypto/KeccakP-800-reference.c \
+  crypto/KeccakP-800-SnP.h \
   crypto/odo_sha256_param_gen.cpp \
   crypto/odo_sha256_param_gen.h\
   crypto/bigint.c \
