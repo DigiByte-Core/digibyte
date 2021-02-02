@@ -1,10 +1,9 @@
-// Copyright (c) 2009-2019 The Bitcoin Core developers
-// Copyright (c) 2014-2019 The DigiByte Core developers
+// Copyright (c) 2014-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#ifndef DIGIBYTE_CRYPTO_SHA256_H
-#define DIGIBYTE_CRYPTO_SHA256_H
+#ifndef BITCOIN_CRYPTO_SHA256_H
+#define BITCOIN_CRYPTO_SHA256_H
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -16,7 +15,7 @@ class CSHA256
 private:
     uint32_t s[8];
     unsigned char buf[64];
-    size_t bytes;
+    uint64_t bytes;
 
 public:
     static const size_t OUTPUT_SIZE = 32;
@@ -39,4 +38,4 @@ std::string SHA256AutoDetect();
  */
 void SHA256D64(unsigned char* output, const unsigned char* input, size_t blocks);
 
-#endif // DIGIBYTE_CRYPTO_SHA256_H
+#endif // BITCOIN_CRYPTO_SHA256_H
