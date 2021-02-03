@@ -411,6 +411,8 @@ crypto_libbitcoin_crypto_base_a_SOURCES = \
   crypto/sha1.h \
   crypto/sha256.cpp \
   crypto/sha256.h \
+  crypto/sha256_2.cpp \
+  crypto/sha256_2.h \
   crypto/sha3.cpp \
   crypto/sha3.h \
   crypto/sha512.cpp \
@@ -432,6 +434,7 @@ crypto_libbitcoin_crypto_base_a_SOURCES += \
   crypto/skein.c \
   crypto/hashgroestl.h \
   crypto/hashodo.h \
+  crypto/hashodo_2.h \
   crypto/hashqubit.h \
   crypto/hashskein.h \
   crypto/odocrypt.cpp \
@@ -452,7 +455,11 @@ crypto_libbitcoin_crypto_base_a_SOURCES += \
   crypto/sph_types.h \
   crypto/scrypt.h \
   crypto/KeccakP-800-reference.c \
-  crypto/KeccakP-800-SnP.h
+  crypto/KeccakP-800-SnP.h \
+  crypto/odo_sha256_param_gen.cpp \
+  crypto/odo_sha256_param_gen.h \
+  crypto/bigint.c \
+  crypto/bigint.h
 
 crypto_libbitcoin_crypto_base_a_SOURCES += \
   crypto/randomx/aes_hash.cpp \

@@ -137,6 +137,73 @@ void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks)
     _mm_storeu_si128((__m128i*)s, s0);
     _mm_storeu_si128((__m128i*)(s + 4), s1);
 }
+
+uint64_t union_uint32(uint32_t a, uint32_t b){
+    return (uint64_t)a << 32 | (uint64_t)b;
+}
+
+void Transform_2(uint32_t* s, const uint32_t* k256, const unsigned char* chunk, size_t blocks )
+{
+    __m128i m0, m1, m2, m3, s0, s1, so0, so1;
+
+    /* Load state */
+    s0 = _mm_loadu_si128((const __m128i*)s);
+    s1 = _mm_loadu_si128((const __m128i*)(s + 4));
+    Shuffle(s0, s1);
+
+    while (blocks--) {
+        /* Remember old state */
+        so0 = s0;
+        so1 = s1;
+
+        /* Load data and transform */
+        m0 = Load(chunk);
+        QuadRound(s0, s1, m0, union_uint32(k256[3], k256[2]) , union_uint32(k256[1], k256[0]));
+        m1 = Load(chunk + 16);
+        QuadRound(s0, s1, m1, union_uint32(k256[7], k256[6]) , union_uint32(k256[5], k256[4]));
+        ShiftMessageA(m0, m1);
+        m2 = Load(chunk + 32);
+        QuadRound(s0, s1, m2, union_uint32(k256[11], k256[10]) , union_uint32(k256[9], k256[8]));
+        ShiftMessageA(m1, m2);
+        m3 = Load(chunk + 48);
+        QuadRound(s0, s1, m3, union_uint32(k256[15], k256[14]) , union_uint32(k256[13], k256[12]));
+        ShiftMessageB(m2, m3, m0);
+        QuadRound(s0, s1, m0, union_uint32(k256[19], k256[18]) , union_uint32(k256[17], k256[16]));
+        ShiftMessageB(m3, m0, m1);
+        QuadRound(s0, s1, m1, union_uint32(k256[23], k256[22]) , union_uint32(k256[21], k256[20]));
+        ShiftMessageB(m0, m1, m2);
+        QuadRound(s0, s1, m2, union_uint32(k256[27], k256[26]) , union_uint32(k256[25], k256[24]));
+        ShiftMessageB(m1, m2, m3);
+        QuadRound(s0, s1, m3, union_uint32(k256[31], k256[30]) , union_uint32(k256[29], k256[28]));
+        ShiftMessageB(m2, m3, m0);
+        QuadRound(s0, s1, m0, union_uint32(k256[35], k256[34]) , union_uint32(k256[33], k256[32]));
+        ShiftMessageB(m3, m0, m1);
+        QuadRound(s0, s1, m1, union_uint32(k256[39], k256[38]) , union_uint32(k256[37], k256[36]));
+        ShiftMessageB(m0, m1, m2);
+        QuadRound(s0, s1, m2, union_uint32(k256[43], k256[42]) , union_uint32(k256[41], k256[40]));
+        ShiftMessageB(m1, m2, m3);
+        QuadRound(s0, s1, m3, union_uint32(k256[47], k256[46]) , union_uint32(k256[45], k256[44]));
+        ShiftMessageB(m2, m3, m0);
+        QuadRound(s0, s1, m0, union_uint32(k256[51], k256[50]) , union_uint32(k256[49], k256[48]));
+        ShiftMessageB(m3, m0, m1);
+        QuadRound(s0, s1, m1, union_uint32(k256[55], k256[54]) , union_uint32(k256[53], k256[52]));
+        ShiftMessageC(m0, m1, m2);
+        QuadRound(s0, s1, m2, union_uint32(k256[59], k256[58]) , union_uint32(k256[57], k256[56]));
+        ShiftMessageC(m1, m2, m3);
+        QuadRound(s0, s1, m3, union_uint32(k256[63], k256[62]) , union_uint32(k256[61], k256[60]));
+
+        /* Combine with old state */
+        s0 = _mm_add_epi32(s0, so0);
+        s1 = _mm_add_epi32(s1, so1);
+
+        /* Advance */
+        chunk += 64;
+    }
+
+    Unshuffle(s0, s1);
+    _mm_storeu_si128((__m128i*)s, s0);
+    _mm_storeu_si128((__m128i*)(s + 4), s1);
+}
 }
 
 namespace sha256d64_shani {
