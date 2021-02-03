@@ -424,7 +424,7 @@ void TransformD64Wrapper(unsigned char* out, const unsigned char* in)
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
-    sha256::Initialize(s);
+    sha256_2::Initialize(s);
     tr(s, K_256, in, 1);
     tr(s, K_256, padding1, 1);
     WriteBE32(buffer2 + 0, s[0]);
@@ -435,7 +435,7 @@ void TransformD64Wrapper(unsigned char* out, const unsigned char* in)
     WriteBE32(buffer2 + 20, s[5]);
     WriteBE32(buffer2 + 24, s[6]);
     WriteBE32(buffer2 + 28, s[7]);
-    sha256::Initialize(s);
+    sha256_2::Initialize(s);
     tr(s, K_256, buffer2, 1);
     WriteBE32(out + 0, s[0]);
     WriteBE32(out + 4, s[1]);
