@@ -162,10 +162,6 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
                 }
             }
 
-            if (nExpectedSubsidy < COIN) { // ToDo: Alter consensus
-                nExpectedSubsidy = COIN;
-            }
-
             BOOST_CHECK_EQUAL(nSubsidy, nExpectedSubsidy);
 
             nSum += nSubsidy;

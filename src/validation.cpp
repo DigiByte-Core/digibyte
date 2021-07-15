@@ -1219,7 +1219,7 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
             nSubsidy -= (nSubsidy / 100);
         }
     }
-    else // < ∞
+    else if (nHeight < consensusParams.workFinalBlockSubsidy) // < 40265288
     {
         // (Period VI)
         // Hard Fork Point: 1.43M
@@ -1236,13 +1236,13 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
             nSubsidy *= 98884;
             nSubsidy /= 100000;
         }
-    }
-
-    // Make sure the reward is at least 1 DGB
-    // ToDo: Remove this statement in a future release, along
-    // with a fixed supply curve.
-    if (nSubsidy < COIN) {
-        nSubsidy = COIN;
+    else
+    {
+	// If we've exceeded workFinalBlockSubsidy, we're in 2035-ish
+	// We should have also reached the end of our emissions
+	// This relies on the emissions curve also being fixed elsewhere
+	// However this stops the infinite supply
+	nSubsidy = 0;
     }
 
     return nSubsidy;
