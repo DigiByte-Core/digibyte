@@ -1236,6 +1236,7 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
             nSubsidy *= 98884;
             nSubsidy /= 100000;
         }
+    }
     else
     {
 	// If we've exceeded workFinalBlockSubsidy, we're in 2035-ish
