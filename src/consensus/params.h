@@ -125,6 +125,7 @@ struct Params {
 
     uint256 nMinimumChainWork;
     uint256 defaultAssumeValid;
+    int64_t workFinalBlockSubsidy;
     bool EnableRBF() const { return fRbfEnabled; }
 };
 } // namespace Consensus

@@ -52,13 +52,19 @@
 
 BOOST_FIXTURE_TEST_SUITE(main_tests, TestingSetup)
 
+// checks for:
+// 1. block subsidy in the past hasn't been altered (The past is fixed but the future is malleable)
+// 2. block subsidy never increases, so subsidy(n) <= subsidy(n+1), n is a block height
+// 3. block subsidy eventually hits 0
 static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxBlocks, CAmount* nSumOut)
 {
+    const CAmount BlockHeightVerbatimCheck = 14394800; // ~(2022-01-21)
     CAmount nSum = 0;
     CAmount nInitialSubsidy = 72000 * COIN;
 
     CAmount nPreviousSubsidy = nInitialSubsidy * 2; // for height == 0
     BOOST_CHECK_EQUAL(nPreviousSubsidy, nInitialSubsidy * 2);
+    BOOST_REQUIRE(BlockHeightVerbatimCheck <= nMaxBlocks);  // sanity check
 
     /* Before first hard fork */
 
@@ -67,7 +73,7 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
     {
         int nHeight = nBlocks;
         CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        BOOST_CHECK_EQUAL(nSubsidy, nInitialSubsidy);
+        BOOST_REQUIRE_EQUAL(nSubsidy, nInitialSubsidy);
 
         nSum += nSubsidy;
         DEBUG(nBlocks, nSubsidy);
@@ -78,7 +84,7 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
     {
         int nHeight = nBlocks;
         CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        BOOST_CHECK_EQUAL(nSubsidy, 16000 * COIN);
+        BOOST_REQUIRE_EQUAL(nSubsidy, 16000 * COIN);
 
         nSum += nSubsidy;
         DEBUG(nBlocks, nSubsidy);
@@ -89,7 +95,7 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
     {
         int nHeight = nBlocks;
         CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        BOOST_CHECK_EQUAL(nSubsidy, 8000 * COIN);  
+        BOOST_REQUIRE_EQUAL(nSubsidy, 8000 * COIN);
 
         nSum += nSubsidy;
         DEBUG(nBlocks, nSubsidy);
@@ -108,7 +114,7 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
             nExpectedSubsidy -= nExpectedSubsidy / 200; // dec by 0.5%
         }
 
-        BOOST_CHECK_EQUAL(nSubsidy, nExpectedSubsidy);
+        BOOST_REQUIRE_EQUAL(nSubsidy, nExpectedSubsidy);
 
         nSum += nSubsidy;
         DEBUG(nBlocks, nSubsidy);
@@ -127,7 +133,7 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
             nExpectedSubsidy -= nExpectedSubsidy / 100; // dec by 1% per month
         }
 
-        BOOST_CHECK_EQUAL(nSubsidy, nExpectedSubsidy);
+        BOOST_REQUIRE_EQUAL(nSubsidy, nExpectedSubsidy);
 
         nSum += nSubsidy;
         DEBUG(nBlocks, nSubsidy);
@@ -136,12 +142,11 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
     {
         // Updated dynamic mining rewards from block height 1,430,000 to max block height.
         // Intended blockheight: 41.6 million
-        // Actual blockheight: 110.5 million
         CAmount nExpectedSubsidyStart = 2157 * COIN / 2;
         CAmount nExpectedSubsidy = nExpectedSubsidyStart;
         int nMonthsConsidered = 0;
 
-        for (int nBlocks = consensusParams.workComputationChangeTarget; nBlocks < nMaxBlocks; ++nBlocks) {
+        for (int nBlocks = consensusParams.workComputationChangeTarget; nBlocks < BlockHeightVerbatimCheck; ++nBlocks) {
             int nHeight = nBlocks;
             CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
 
@@ -162,21 +167,30 @@ static void TestBlockSubsidy(const Consensus::Params& consensusParams, int nMaxB
                 }
             }
 
-            if (nExpectedSubsidy < COIN) { // ToDo: Alter consensus
-                nExpectedSubsidy = COIN;
-            }
-
-            BOOST_CHECK_EQUAL(nSubsidy, nExpectedSubsidy);
+            BOOST_REQUIRE_EQUAL(nSubsidy, nExpectedSubsidy);
 
             nSum += nSubsidy;
+            nPreviousSubsidy = nSubsidy;
+            DEBUG(nBlocks, nSubsidy);
+        }
+    }
+
+    {
+        // Future block checks which don't need to exactly match anything
+        for (int nBlocks = BlockHeightVerbatimCheck; nBlocks < nMaxBlocks; ++nBlocks) {
+            int nHeight = nBlocks;
+            CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
+
+            BOOST_REQUIRE_LE(nSubsidy, nPreviousSubsidy);
+
+            nSum += nSubsidy;
+            nPreviousSubsidy = nSubsidy;
             DEBUG(nBlocks, nSubsidy);
         }
     }
 
     CAmount nSubsidy = GetBlockSubsidy(nMaxBlocks, consensusParams);
-    CAmount nExpectedSubsidy = 1 * COIN;
-
-    BOOST_CHECK_EQUAL(nSubsidy, nExpectedSubsidy);
+    BOOST_REQUIRE_EQUAL(nSubsidy, 0);
 
     if (nSumOut != NULL) {
         *nSumOut = nSum;
@@ -190,7 +204,7 @@ BOOST_AUTO_TEST_CASE(block_subsidy_test)
     const auto testChainParams = CreateChainParams(CBaseChainParams::TESTNET);
     TestBlockSubsidy(chainParams->GetConsensus(), END_OF_SUPPLY_CURVE, &sum); // Mainnet
 
-    CAmount nExpectedTotalSupply = 2239167398214795680ULL;
+    CAmount nExpectedTotalSupply = 2100024577003013036ULL;  // this is the maximum supply, not the actual supply
     BOOST_CHECK_EQUAL(sum, nExpectedTotalSupply);
 
 #if OUTPUT_SUPPLY_SAMPLES_ENABLED
