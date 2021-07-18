@@ -81,7 +81,7 @@ public:
         consensus.BIP34Hash = uint256S("0xadd8ca420f557f62377ec2be6e6f47b96cf2e68160d58aeb7b73433de834cca0");
         consensus.BIP65Height = 4394880; // 
         consensus.BIP66Height = 4394880; // 
-	consensus.workFinalBlockSubsidy = 40265288; // Final block before we reach 21bn DGB
+        consensus.workFinalBlockSubsidy = 40266213; // Final block before we reach 21bn DGB @ 2034-05-10 (potential actual supply)
 
         consensus.powLimit = ArithToUint256(~arith_uint256(0) >> 20);
         consensus.initialTarget[ALGO_ODO] = ArithToUint256(~arith_uint256(0) >> 40); // 256 difficulty
