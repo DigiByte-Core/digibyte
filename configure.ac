@@ -35,6 +35,8 @@ if test "x${ARFLAGS+set}" != "xset"; then
   ARFLAGS="cr"
 fi
 
+AM_PROG_AS
+
 AC_CANONICAL_HOST
 
 AH_TOP([#ifndef DIGIBYTE_CONFIG_H])
