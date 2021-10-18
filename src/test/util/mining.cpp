@@ -48,7 +48,7 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const
         block.nBits = params.GenesisBlock().nBits;
         block.nNonce = 0;
 
-        while (!CheckProofOfWork(GetPoWAlgoHash(block), block.nBits, params.GetConsensus())) {
+        while (!CheckProofOfWork(block.GetPoWAlgoHash(height, params.GetConsensus()), block.nBits, params.GetConsensus())) {
             ++block.nNonce;
             assert(block.nNonce);
         }
@@ -58,9 +58,11 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const
 
 CTxIn MineBlock(const NodeContext& node, const CScript& coinbase_scriptPubKey)
 {
+    static int height;
     auto block = PrepareBlock(node, coinbase_scriptPubKey);
 
-    while (!CheckProofOfWork(GetPoWAlgoHash(*block), block->nBits, Params().GetConsensus())) {
+    height++;
+    while (!CheckProofOfWork(block->GetPoWAlgoHash(height, Params().GetConsensus()), block->nBits, Params().GetConsensus())) {
         ++block->nNonce;
         assert(block->nNonce);
     }

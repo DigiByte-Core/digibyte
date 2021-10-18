@@ -246,6 +246,7 @@ void TestChain100Setup::mineBlocks(int num_blocks)
 
 CBlock TestChain100Setup::CreateAndProcessBlock(const std::vector<CMutableTransaction>& txns, const CScript& scriptPubKey)
 {
+    static int height;
     const CChainParams& chainparams = Params();
     CTxMemPool empty_pool;
     CBlock block = BlockAssembler(m_node.chainman->ActiveChainstate(), empty_pool, chainparams).CreateNewBlock(scriptPubKey, ALGO_SCRYPT)->block;
@@ -257,7 +258,8 @@ CBlock TestChain100Setup::CreateAndProcessBlock(const std::vector<CMutableTransa
     }
     RegenerateCommitments(block, *Assert(m_node.chainman));
 
-    while (!CheckProofOfWork(GetPoWAlgoHash(block), block.nBits, chainparams.GetConsensus())) ++block.nNonce;
+    height++;
+    while (!CheckProofOfWork(block.GetPoWAlgoHash(height, chainparams.GetConsensus()), block.nBits, chainparams.GetConsensus())) ++block.nNonce;
 
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     Assert(m_node.chainman)->ProcessNewBlock(chainparams, shared_pblock, true, nullptr);

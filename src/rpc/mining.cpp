@@ -11,6 +11,8 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <crypto/randomx.h>
+#include <crypto/seedman.h>
 #include <deploymentinfo.h>
 #include <deploymentstatus.h>
 #include <key_io.h>
@@ -110,7 +112,7 @@ static RPCHelpMan getnetworkhashps()
     };
 }
 
-static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& max_tries, unsigned int& extra_nonce, uint256& block_hash)
+bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& max_tries, unsigned int& extra_nonce, uint256& block_hash, int algo, int height)
 {
     block_hash.SetNull();
 
@@ -119,26 +121,31 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
     }
 
-    CChainParams chainparams(Params());
+    auto startMining = GetTime();
 
-    while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !CheckProofOfWork(GetPoWAlgoHash(block), block.nBits, chainparams.GetConsensus()) && !ShutdownRequested()) {
+    uint256 powHash;
+    bool valid = false;
+    block.SetAlgo(algo);
+    CChainParams chainparams(Params());
+    while (!valid) {
         ++block.nNonce;
-        --max_tries;
+        powHash = block.GetPoWAlgoHash(height, chainparams.GetConsensus());
+        valid = CheckProofOfWork(powHash, block.nBits, chainparams.GetConsensus());
+        if (valid) break;
+        if (GetTime() - startMining > 15) break;
+        if (ShutdownRequested()) break;
     }
-    if (max_tries == 0 || ShutdownRequested()) {
-        return false;
-    }
-    if (block.nNonce == std::numeric_limits<uint32_t>::max()) {
+
+    if (valid) {
+        std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+        if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
+        }
+        block_hash = block.GetHash();
         return true;
     }
 
-    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
-    if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
-    }
-
-    block_hash = block.GetHash();
-    return true;
+    return false;
 }
 
 static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& mempool, const CScript& coinbase_script, int nGenerate, uint64_t nMaxTries, int algo)
@@ -160,8 +167,9 @@ static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& me
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
         CBlock *pblock = &pblocktemplate->block;
 
+        // we need to pass height plus one to ensure seed change occurs if required (for randomx)
         uint256 block_hash;
-        if (!GenerateBlock(chainman, *pblock, nMaxTries, nExtraNonce, block_hash)) {
+        if (!GenerateBlock(chainman, *pblock, nMaxTries, nExtraNonce, block_hash, algo, nHeight+1)) {
             break;
         }
 
@@ -372,15 +380,14 @@ static RPCHelpMan generateblock()
 
     CChainParams chainparams(Params());
     CBlock block;
+    int algo = miningAlgo;
 
     ChainstateManager& chainman = EnsureChainman(node);
     {
         LOCK(cs_main);
 
         CTxMemPool empty_mempool;
-
-//  Passing Generate Default DGB BLock Type of Scrypt
-        std::unique_ptr<CBlockTemplate> blocktemplate(BlockAssembler(chainman.ActiveChainstate(), empty_mempool, chainparams).CreateNewBlock(coinbase_script,ALGO_SCRYPT));
+        std::unique_ptr<CBlockTemplate> blocktemplate(BlockAssembler(chainman.ActiveChainstate(), empty_mempool, chainparams).CreateNewBlock(coinbase_script, algo));
         if (!blocktemplate) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
         }
@@ -406,7 +413,9 @@ static RPCHelpMan generateblock()
     uint64_t max_tries{DEFAULT_MAX_TRIES};
     unsigned int extra_nonce{0};
 
-    if (!GenerateBlock(chainman, block, max_tries, extra_nonce, block_hash) || block_hash.IsNull()) {
+    int height = chainman.ActiveChain().Tip()->nHeight;
+
+    if (!GenerateBlock(chainman, block, max_tries, extra_nonce, block_hash, algo, height) || block_hash.IsNull()) {
         throw JSONRPCError(RPC_MISC_ERROR, "Failed to make block.");
     }
 
@@ -931,6 +940,9 @@ static RPCHelpMan getblocktemplate()
         aMutable.push_back("version/force");
     }
 
+    int height = pindexPrev->nHeight+1;
+    uint256 seed = seedmanager.GetSeedForHeight(height);
+
     result.pushKV("previousblockhash", pblock->hashPrevBlock.GetHex());
     result.pushKV("transactions", transactions);
     result.pushKV("coinbaseaux", aux);
@@ -955,9 +967,11 @@ static RPCHelpMan getblocktemplate()
     }
     result.pushKV("curtime", pblock->GetBlockTime());
     result.pushKV("bits", strprintf("%08x", pblock->nBits));
-    result.pushKV("height", (int64_t)(pindexPrev->nHeight+1));
+    result.pushKV("height", (int64_t)height);
     if (algo == ALGO_ODO)
         result.pushKV("odokey", (int64_t)OdoKey(consensusParams, pblock->GetBlockTime()));
+    if (algo == ALGO_RANDOMX)
+        result.pushKV("seed", seed.ToString());
 
     if (consensusParams.signet_blocks) {
         result.pushKV("signet_challenge", HexStr(consensusParams.signet_challenge));

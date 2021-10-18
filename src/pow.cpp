@@ -337,7 +337,7 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
     return nullptr;
 }
 
-uint256 GetPoWAlgoHash(const CBlockHeader& block)
+uint256 GetPoWAlgoHash(const CBlockHeader& block, int height)
 {
-    return block.GetPoWAlgoHash(Params().GetConsensus());
+    return block.GetPoWAlgoHash(height, Params().GetConsensus());
 }

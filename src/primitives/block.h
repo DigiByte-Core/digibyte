@@ -22,6 +22,7 @@ enum {
     ALGO_QUBIT    = 4,
     //ALGO_EQUIHASH = 5,
     //ALGO_ETHASH   = 6,
+    ALGO_RANDOMX  = 5,
     ALGO_ODO      = 7,
     NUM_ALGOS_IMPL };
 
@@ -40,6 +41,7 @@ enum {
     BLOCK_VERSION_QUBIT          = (8 << 8),
     //BLOCK_VERSION_EQUIHASH       = (10 << 8),
     //BLOCK_VERSION_ETHASH         = (12 << 8),
+    BLOCK_VERSION_RANDOMX        = (10 << 8),
     BLOCK_VERSION_ODO            = (14 << 8),
 };
 
@@ -65,6 +67,8 @@ inline int GetVersionForAlgo(int algo)
             //return BLOCK_VERSION_EQUIHASH;
         //case ALGO_ETHASH:
             //return BLOCK_VERSION_ETHASH;
+        case ALGO_RANDOMX:
+            return BLOCK_VERSION_RANDOMX;
         case ALGO_ODO:
             return BLOCK_VERSION_ODO;
         default:
@@ -125,7 +129,7 @@ public:
 
     uint256 GetHash() const;
 
-    uint256 GetPoWAlgoHash(const Consensus::Params& params) const;
+    uint256 GetPoWAlgoHash(int height, const Consensus::Params& params, const char* str = __builtin_FUNCTION()) const;
 
     int64_t GetBlockTime() const
     {

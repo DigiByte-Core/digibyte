@@ -440,7 +440,7 @@ libdigibyte_wallet_tool_a_SOURCES = \
   $(DIGIBYTE_CORE_H)
 
 # crypto primitives library
-crypto_libdigibyte_crypto_base_a_CPPFLAGS = $(AM_CPPFLAGS)
+crypto_libdigibyte_crypto_base_a_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES)
 crypto_libdigibyte_crypto_base_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 crypto_libdigibyte_crypto_base_a_SOURCES = \
   crypto/aes.cpp \
@@ -476,8 +476,7 @@ crypto_libdigibyte_crypto_base_a_SOURCES = \
   crypto/siphash.cpp \
   crypto/siphash.h
 
-
-crypto_libbitcoin_crypto_base_a_SOURCES += \
+crypto_libdigibyte_crypto_base_a_SOURCES += \
   crypto/randomx/aes_hash.cpp \
   crypto/randomx/allocator.cpp \
   crypto/randomx/argon2_avx2.c \
@@ -503,7 +502,9 @@ crypto_libbitcoin_crypto_base_a_SOURCES += \
   crypto/randomx/vm_compiled.cpp \
   crypto/randomx/vm_compiled_light.cpp \
   crypto/randomx/vm_interpreted.cpp \
-  crypto/randomx/vm_interpreted_light.cpp
+  crypto/randomx/vm_interpreted_light.cpp \
+  crypto/randomx.cpp \
+  crypto/seedman.cpp
 
 if USE_ASM
 crypto_libdigibyte_crypto_base_a_SOURCES += crypto/sha256_sse4.cpp
@@ -576,6 +577,8 @@ libdigibyte_consensus_a_SOURCES = \
   prevector.h \
   primitives/block.cpp \
   primitives/block.h \
+  primitives/cryptonote.cpp \
+  primitives/cryptonote.h \
   primitives/transaction.cpp \
   primitives/transaction.h \
   pubkey.cpp \
@@ -783,7 +786,7 @@ digibyte_wallet_SOURCES = digibyte-wallet.cpp
 digibyte_wallet_CPPFLAGS = $(digibyte_bin_cppflags)
 digibyte_wallet_CXXFLAGS = $(digibyte_bin_cxxflags)
 digibyte_wallet_LDFLAGS = $(digibyte_bin_ldflags)
-digibyte_wallet_LDADD = $(LIBDIGIBYTE_WALLET_TOOL) $(digibyte_bin_ldadd)
+digibyte_wallet_LDADD = $(EXTRA_LIBRARIES) $(LIBDIGIBYTE_WALLET_TOOL) $(digibyte_bin_ldadd)
 
 if TARGET_WINDOWS
 digibyte_wallet_SOURCES += digibyte-wallet-res.rc
@@ -806,7 +809,8 @@ digibyte_util_LDADD = \
   $(LIBUNIVALUE) \
   $(LIBDIGIBYTE_CONSENSUS) \
   $(LIBDIGIBYTE_CRYPTO) \
-  $(LIBSECP256K1)
+  $(LIBSECP256K1) \
+  $(EXTRA_LIBRARIES)
 
 digibyte_util_LDADD += $(BOOST_LIBS)
 #
@@ -822,7 +826,7 @@ endif
 
 libdigibyteconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
 libdigibyteconsensus_la_LIBADD = $(LIBSECP256K1)
-libdigibyteconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_DIGIBYTE_INTERNAL
+libdigibyteconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_DIGIBYTE_INTERNAL
 libdigibyteconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
 endif

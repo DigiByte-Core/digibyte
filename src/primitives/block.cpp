@@ -5,11 +5,13 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <primitives/block.h>
+#include <primitives/cryptonote.h>
 #include <crypto/common.h>
 #include <crypto/hashgroestl.h>
 #include <crypto/hashodo.h>
 #include <crypto/hashqubit.h>
 #include <crypto/hashskein.h>
+#include <crypto/randomx.h>
 #include <crypto/scrypt.h>
 #include <consensus/consensus.h>
 #include <chainparams.h>
@@ -40,6 +42,8 @@ int CBlockHeader::GetAlgo() const
             //return ALGO_EQUIHASH;
         //case BLOCK_VERSION_ETHASH:
             //return ALGO_ETHASH;
+        case BLOCK_VERSION_RANDOMX:
+            return ALGO_RANDOMX;
         case BLOCK_VERSION_ODO:
             return ALGO_ODO;
     }
@@ -53,7 +57,7 @@ uint32_t OdoKey(const Consensus::Params& params, uint32_t nTime)
 
 }
 
-uint256 CBlockHeader::GetPoWAlgoHash(const Consensus::Params& params) const
+uint256 CBlockHeader::GetPoWAlgoHash(int height, const Consensus::Params& params, const char *str) const
 {
     switch (GetAlgo())
     {
@@ -71,10 +75,12 @@ uint256 CBlockHeader::GetPoWAlgoHash(const Consensus::Params& params) const
             return HashSkein(BEGIN(nVersion), END(nNonce));
         case ALGO_QUBIT:
             return HashQubit(BEGIN(nVersion), END(nNonce));
-        //case ALGO_EQUIHASH:
-            //return HashEquihash(BEGIN(nVersion), END(nNonce));
-        //case ALGO_ETHASH:
-            //return HashEthash(BEGIN(nVersion), END(nNonce));
+        case ALGO_RANDOMX:
+        {
+            uint256 thash = serialize_cryptonote(this, &rxmanager, height);
+            LogPrintf("%s with algo = %s, height = %d, seed = %s, hash = %s, caller = %s\n", __func__, GetAlgoName(GetAlgo()), height, rxmanager.seed.ToString(), thash.ToString(), str);
+            return thash;
+        }
         case ALGO_ODO:
         {
             uint32_t key = OdoKey(params, nTime);
@@ -92,11 +98,10 @@ uint256 CBlockHeader::GetPoWAlgoHash(const Consensus::Params& params) const
 std::string CBlock::ToString(const Consensus::Params& params) const
 {
     std::stringstream s;
-    s << strprintf("CBlock(hash=%s, ver=0x%08x, pow_algo=%d, pow_hash=%s, hashPrevBlock=%s, hashMerkleRoot=%s, nTime=%u, nBits=%08x, nNonce=%u, vtx=%u)\n",
+    s << strprintf("CBlock(hash=%s, ver=0x%08x, pow_algo=%d, hashPrevBlock=%s, hashMerkleRoot=%s, nTime=%u, nBits=%08x, nNonce=%u, vtx=%u)\n",
         GetHash().ToString(),
         nVersion,
         GetAlgo(),
-        GetPoWAlgoHash(params).ToString(),
         hashPrevBlock.ToString(),
         hashMerkleRoot.ToString(),
         nTime, nBits, nNonce,
@@ -125,6 +130,8 @@ std::string GetAlgoName(int Algo)
             //return std::string("equihash");
         //case ALGO_ETHASH:
             //return std::string("ethash");
+        case ALGO_RANDOMX:
+            return std::string("randomx");
         case ALGO_ODO:
             return std::string("odo");
     }
@@ -136,6 +143,8 @@ int GetAlgoByName(std::string strAlgo, int fallback)
     transform(strAlgo.begin(),strAlgo.end(),strAlgo.begin(),::tolower);
     if (strAlgo == "sha" || strAlgo == "sha256" || strAlgo == "sha256d")
         return ALGO_SHA256D;
+    else if (strAlgo == "randomx")
+        return ALGO_RANDOMX;
     else if (strAlgo == "scrypt")
         return ALGO_SCRYPT;
     else if (strAlgo == "groestl" || strAlgo == "groestlsha2")
@@ -148,6 +157,8 @@ int GetAlgoByName(std::string strAlgo, int fallback)
         //return ALGO_EQUIHASH;
     //else if (strAlgo == "ethash")
         //return ALGO_ETHASH;
+    else if (strAlgo == "randomx" || strAlgo == "rx")
+        return ALGO_RANDOMX;
     else if (strAlgo == "odo" || strAlgo == "odosha3")
         return ALGO_ODO;
     else

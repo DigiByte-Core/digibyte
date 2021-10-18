@@ -137,6 +137,7 @@ namespace {
 } // namespace
 
 // Internal stuff from blockstorage ...
+extern ChainstateManager* g_chainman;
 extern RecursiveMutex cs_LastBlockFile;
 extern std::vector<CBlockFileInfo> vinfoBlockFile;
 extern int nLastBlockFile;
@@ -1681,6 +1682,8 @@ VersionBitsCache versionbitscache;
 // exported
 bool IsAlgoActive(const CBlockIndex* pindexPrev, const Consensus::Params& consensus, int algo)
 {
+    return true;
+
     if (!pindexPrev)
         return algo == ALGO_SCRYPT;
 
@@ -3142,9 +3145,18 @@ void CChainState::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pi
 
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
+    // Less than ideal but no choice
+    int height = 0;
+    CBlockIndex* pindex = g_chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    if (pindex)
+        height = pindex->nHeight + 1;
+
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(GetPoWAlgoHash(block), block.nBits, consensusParams))
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    if (fCheckPOW) {
+        uint256 hash = block.GetPoWAlgoHash(height, consensusParams);
+        if (!CheckProofOfWork(hash, block.nBits, consensusParams))
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    }
 
     return true;
 }

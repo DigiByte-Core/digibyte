@@ -16,6 +16,7 @@
 #include <coins.h>
 #include <consensus/validation.h>
 #include <crypto/common.h> // for ReadLE64
+#include <crypto/seedman.h>
 #include <fs.h>
 #include <node/utxo_snapshot.h>
 #include <policy/feerate.h>

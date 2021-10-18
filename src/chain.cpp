@@ -142,6 +142,8 @@ int GetAlgoWorkFactor(int nHeight, int algo)
             return 4 * 6;
         case ALGO_QUBIT:
             return 128 * 8;
+        case ALGO_RANDOMX:
+            return 1;
         default:
             return 1;
     }
