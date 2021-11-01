@@ -3484,7 +3484,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
-    else if (msg_type == NetMsgType::DANDELIONTX)
+
+    if (msg_type == NetMsgType::DANDELIONTX)
     {
         CTransactionRef ptx;
         vRecv >> ptx;
@@ -3530,6 +3531,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
     }
+
+    CheckDandelionEmbargoes();
+
     if (msg_type == NetMsgType::CMPCTBLOCK)
     {
         // Ignore cmpctblock received while importing
