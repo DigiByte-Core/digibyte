@@ -983,7 +983,7 @@ public:
     bool isLocalDandelionDestinationSet() const;
     bool setLocalDandelionDestination();
     CNode* getDandelionDestination(CNode* pfrom);
-    bool localDandelionDestinationPushInventory(const uint256& hash);
+    bool localDandelionDestinationPushInventory(const CInv& inv);
     bool insertDandelionEmbargo(const uint256& hash, const std::chrono::seconds& embargo);
     bool isTxDandelionEmbargoed(const uint256& hash) const;
     bool removeDandelionEmbargo(const uint256& hash);

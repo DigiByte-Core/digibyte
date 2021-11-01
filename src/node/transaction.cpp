@@ -130,7 +130,7 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             auto embargo_timeout = std::chrono::duration_cast<std::chrono::seconds>(nEmbargo - current_time).count();
             LogPrint(BCLog::DANDELION, "dandeliontx %s embargoed for %d seconds\n", txid.ToString(), embargo_timeout);
             CInv inv(MSG_DANDELION_TX, txid);
-            if (!node.connman->localDandelionDestinationPushInventory(inv.hash)) {
+            if (!node.connman->localDandelionDestinationPushInventory(inv)) {
                 return TransactionError::MEMPOOL_ERROR;
             }
             return TransactionError::OK;
