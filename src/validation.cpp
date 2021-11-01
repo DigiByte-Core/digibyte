@@ -131,21 +131,6 @@ arith_uint256 nMinimumChainWork;
 
 CFeeRate minRelayTxFee = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
 
-//FIXDANDELION  Pretty sure this code was depricated
-/*
-CAmount maxTxFee = DEFAULT_MIN_RELAY_TX_FEE;
-
-CBlockPolicyEstimator feeEstimator;
-
-std::atomic_bool g_is_mempool_loaded{false};
-CTxMemPool stempool(&feeEstimator);
-
-
-CScript COINBASE_FLAGS;
-
-const std::string strMessageMagic = "DigiByte Signed Message:\n";
-*//** Constant stuff for coinbase transactions we create: */
-
 // Internal stuff
 namespace {
     CBlockIndex* pindexBestInvalid = nullptr;
@@ -366,25 +351,18 @@ void CChainState::MaybeUpdateMempoolForReorg(
     while (it != disconnectpool.queuedTx.get<insertion_order>().rend()) {
         // ignore validation errors in resurrected transactions
         const MempoolAcceptResult result = AcceptToMemoryPool(*this, *m_mempool, *it, true );
-        const MempoolAcceptResult dresult = AcceptToMemoryPool(*this, *m_stempool, *it, true ); // dandelion
-
-        if (!fAddToMempool || (*it)->IsCoinBase() ||
-            result.m_result_type != MempoolAcceptResult::ResultType::INVALID ||
-            dresult.m_result_type != MempoolAcceptResult::ResultType::INVALID
-        ) {
+        AcceptToMemoryPool(*this, *m_stempool, *it, true);
+        if (!fAddToMempool || (*it)->IsCoinBase() || result.m_result_type != MempoolAcceptResult::ResultType::INVALID) {
             // If the transaction doesn't make it in to the mempool, remove any
             // transactions that depend on it (which would now be orphans).
             m_mempool->removeRecursive(**it, MemPoolRemovalReason::REORG);
             // Changes to mempool should also be made to Dandelion stempool
             m_stempool->removeRecursive(**it, MemPoolRemovalReason::REORG);
-
         } else if (m_mempool->exists((*it)->GetHash()) || m_stempool->exists((*it)->GetHash())) {
             vHashUpdate.push_back((*it)->GetHash());
         }
-
         ++it;
     }
-
     disconnectpool.queuedTx.clear();
     // AcceptToMemoryPool/addUnchecked all assume that new mempool entries have
     // no in-mempool children, which is generally not true when adding
@@ -619,13 +597,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     if (!CheckFinalTx(m_active_chainstate.m_chain.Tip(), tx, STANDARD_LOCKTIME_VERIFY_FLAGS))
         return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "non-final");
 
-    if (m_pool.exists(GenTxid(true, tx.GetWitnessHash()))) {
-        // Exact transaction already exists in the mempool.
+    // is it already in the memory pool?
+    if (m_pool.exists(hash)) {
         return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-already-in-mempool");
-    } else if (m_pool.exists(GenTxid(false, tx.GetHash()))) {
-        // Transaction with the same non-witness data but different witness (same txid, different
-        // wtxid) already exists in the mempool.
-        return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-same-nonwitness-data-in-mempool");
     }
 
     // Check for conflicts with in-memory transactions

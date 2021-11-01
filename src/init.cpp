@@ -1668,6 +1668,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         block_notify_genesis_wait_connection.disconnect();
     }
 
+    LogPrintf("Dandelion transactions %s\n", args.GetBoolArg("-dandelion", DEFAULT_DANDELION) ? "enabled" : "disabled");
+
     if (ShutdownRequested()) {
         return false;
     }

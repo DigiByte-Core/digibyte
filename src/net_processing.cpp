@@ -1671,22 +1671,21 @@ void PeerManagerImpl::_RelayTransaction(const uint256& txid, const uint256& wtxi
 
 void PeerManagerImpl::RelayDandelionTransaction(const CTransaction& tx, CNode& pfrom)
 {
-    const uint256& txHash = tx.GetHash();
+    const uint256& txid = tx.GetHash();
+    const uint256& wtxid = tx.GetWitnessHash();
     FastRandomContext rng;
-
     if (rng.randrange(100) < DANDELION_FLUFF) {
-        LogPrint(BCLog::DANDELION, "Dandelion fluff: %s\n", txHash.ToString());
-        CTransactionRef ptx = m_stempool.get(txHash);
+        LogPrint(BCLog::DANDELION, "Dandelion fluff: %s\n", txid.ToString());
+        CTransactionRef ptx = m_stempool.get(txid);
         std::list<CTransactionRef> lRemovedTxn;
-
-        const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
+        AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
         LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: peer=%d: accepted %s (poolsz %u txn, %u kB)\n",
-                 pfrom.GetId(), txHash.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
-        RelayTransaction(txHash, tx.GetWitnessHash());
+                 pfrom.GetId(), txid.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
+        RelayTransaction(txid, wtxid);
     } else {
         CNode* destination = m_connman.getDandelionDestination(&pfrom);
         if (destination != nullptr) {
-            destination->PushDandelionTxInventory(txHash);
+            destination->PushDandelionTxInventory(txid);
         }
     }
 }
@@ -1698,13 +1697,10 @@ void PeerManagerImpl::CheckDandelionEmbargoes()
         if (m_mempool.exists(iter->first)) {
             LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", iter->first.ToString());
             iter = m_connman.mDandelionEmbargo.erase(iter);
-
         } else if (iter->second < current_time) {
             LogPrint(BCLog::DANDELION, "dandeliontx %s embargo expired\n", iter->first.ToString());
-
             CTransactionRef ptx = m_stempool.get(iter->first);
-            if (ptx)
-            {
+            if (ptx) {
                 std::list<CTransactionRef> lRemovedTxn;
                 const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false  );
                 LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: accepted %s (poolsz %u txn, %u kB)\n",
@@ -1984,8 +1980,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
             if (txinfo.tx && !m_connman.isDandelionInbound(&pfrom) && pfrom.m_tx_relay->setDandelionInventoryTxToSend.count(inv.hash) != 0) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::DANDELIONTX, *txinfo.tx));
                 push = true;
-            }
-            if (inv.hash == DANDELION_DISCOVERYHASH) {
+            } else if (inv.hash == DANDELION_DISCOVERYHASH) {
                 pfrom.fSupportsDandelion = true;
                 LogPrint(BCLog::DANDELION, "Peer %d supports Dandelion\n", pfrom.GetId());
                 push = true;
@@ -2002,7 +1997,6 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 }
             } else if (tx) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *tx));
-                m_mempool.RemoveUnbroadcastTx(tx->GetHash());
                 push = true;
             }
             // As we're going to send tx, make sure its unconfirmed parents are made requestable.
@@ -2296,6 +2290,9 @@ void PeerManagerImpl::ProcessOrphanTx(std::set<uint256>& orphan_work_set)
         const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, porphanTx, false /* bypass_limits */);
         const TxValidationState& state = result.m_state;
 
+        //! mirror changes in stempool
+        AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_stempool, porphanTx, false /* bypass_limits */);
+
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogPrint(BCLog::MEMPOOL, "   accepted orphan tx %s\n", orphanHash.ToString());
             _RelayTransaction(orphanHash, porphanTx->GetWitnessHash());
@@ -2352,6 +2349,7 @@ void PeerManagerImpl::ProcessOrphanTx(std::set<uint256>& orphan_work_set)
         }
     }
     m_mempool.check(m_chainman.ActiveChainstate());
+    m_stempool.check(m_chainman.ActiveChainstate());
 }
 
 bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& peer,
@@ -3331,14 +3329,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const TxValidationState& state = result.m_state;
 
         // Changes to mempool should also be made to Dandelion stempool
-        const MempoolAcceptResult dresult = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_stempool, ptx, false );
+        AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_stempool, ptx, false );
 
         if (m_connman.isTxDandelionEmbargoed(tx.GetHash())) {
             LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", tx.GetHash().ToString());
             m_connman.removeDandelionEmbargo(tx.GetHash());
         }
 
-        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID || dresult.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             m_mempool.check(m_chainman.ActiveChainstate());
             m_stempool.check(m_chainman.ActiveChainstate());
 
@@ -4838,7 +4836,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     vInv.clear();
                 }
             }
-
             pto->m_tx_relay->setDandelionInventoryTxToSend.clear();
 
             // Check whether periodic sends should happen

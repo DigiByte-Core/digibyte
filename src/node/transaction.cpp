@@ -83,20 +83,16 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
                 return HandleATMPError(result.m_state, err_string);
             }
 
-//FIXDANDELION
-/*
-            if (DANDELION_DISABLED == false) {
-                // Add transaction to stempool too
-                AcceptToMemoryPool(node.chainman->ActiveChainstate(), *node.stempool, tx, false ,
-                                   false );                   
-            }            
-*/
+            // Add transaction to stempool too
+            AcceptToMemoryPool(node.chainman->ActiveChainstate(), *node.stempool, tx, false, false);
+
             // Transaction was accepted to the mempool and optionally into the stempool.
 
             if (relay) {
                 // the mempool tracks locally submitted transactions to make a
                 // best-effort of initial broadcast
                 node.mempool->AddUnbroadcastTx(txid);
+                node.stempool->AddUnbroadcastTx(txid);
             }
 
             if (wait_callback) {
@@ -123,6 +119,22 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
     }
 
     if (relay) {
+        if (gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION))
+        {
+            const auto current_time = GetTime<std::chrono::microseconds>();
+            const auto nEmbargo = std::chrono::duration_cast<std::chrono::seconds>(
+                  DANDELION_EMBARGO_MINIMUM +
+                  PoissonNextSend(current_time, DANDELION_EMBARGO_AVG_ADD)
+            );
+            node.connman->insertDandelionEmbargo(txid, nEmbargo);
+            auto embargo_timeout = std::chrono::duration_cast<std::chrono::seconds>(nEmbargo - current_time).count();
+            LogPrint(BCLog::DANDELION, "dandeliontx %s embargoed for %d seconds\n", txid.ToString(), embargo_timeout);
+            CInv inv(MSG_DANDELION_TX, txid);
+            if (!node.connman->localDandelionDestinationPushInventory(inv.hash)) {
+                return TransactionError::MEMPOOL_ERROR;
+            }
+            return TransactionError::OK;
+        }
         node.peerman->RelayTransaction(txid, wtxid);
     }
 
