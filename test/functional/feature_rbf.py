@@ -188,7 +188,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         initial_nValue = 5 * COIN
         tx0_outpoint = self.make_utxo(self.nodes[0], initial_nValue)
 
-        def branch(prevout, initial_value, max_txs, tree_width=5, fee=0.00001 * COIN, _total_txs=None):
+        def branch(prevout, initial_value, max_txs, tree_width=5, fee=0.00011 * COIN, _total_txs=None):
             if _total_txs is None:
                 _total_txs = [0]
             if _total_txs[0] >= max_txs:
@@ -219,7 +219,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
                                   _total_txs=_total_txs):
                     yield x
 
-        fee = int(0.00001 * COIN)
+        fee = int(0.00011 * COIN)
         n = MAX_REPLACEMENT_LIMIT
         tree_txs = list(branch(tx0_outpoint, initial_nValue, n, fee=fee))
         assert_equal(len(tree_txs), n)
@@ -248,7 +248,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         # Try again, but with more total transactions than the "max txs
         # double-spent at once" anti-DoS limit.
         for n in (MAX_REPLACEMENT_LIMIT + 1, MAX_REPLACEMENT_LIMIT * 2):
-            fee = int(0.00001 * COIN)
+            fee = int(0.00011 * COIN)
             tx0_outpoint = self.make_utxo(self.nodes[0], initial_nValue)
             tree_txs = list(branch(tx0_outpoint, initial_nValue, n, fee=fee))
             assert_equal(len(tree_txs), n)
@@ -349,9 +349,9 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         # transactions
 
         # Start by creating a single transaction with many outputs
-        initial_nValue = 10 * COIN
+        initial_nValue = 100 * COIN
         utxo = self.make_utxo(self.nodes[0], initial_nValue)
-        fee = int(0.0001 * COIN)
+        fee = int(0.0011 * COIN)
         split_value = int((initial_nValue - fee) / (MAX_REPLACEMENT_LIMIT + 1))
 
         outputs = []
