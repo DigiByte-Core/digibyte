@@ -1956,7 +1956,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     // Process as many TX items from the front of the getdata queue as
     // possible, since they're common and it's efficient to batch process
     // them.
-    while (it != peer.m_getdata_requests.end() && (it->IsMsgTx() || it->IsGenTxMsg() || it->IsDandelionMsg()))
+    while (it != peer.m_getdata_requests.end() && (it->IsGenTxMsg() || it->IsDandelionMsg()))
     {
         if (interruptMsgProc) return;
         // The send buffer provides backpressure. If there's no space in
@@ -1987,7 +1987,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         }
 
         // handle normal messages
-        if (!push && (inv.IsGenTxMsg() || inv.IsMsgTx())) {
+        if (!push && inv.IsGenTxMsg()) {
             CTransactionRef tx = FindTxForGetData(pfrom, ToGenTxid(inv), mempool_req, now);
             if (tx) {
                 // WTX and WITNESS_TX imply we serialize with witness
@@ -1996,13 +1996,18 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 if (!pfrom.fSupportsDandelion && !m_connman.isDandelionInbound(&pfrom) && pfrom.m_tx_relay->setDandelionInventoryKnown.count(inv.hash)) {
                     auto txinfo = m_stempool.info(inv.hash);
                     if (txinfo.tx) {
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *txinfo.tx));
+                        tx = txinfo.tx;
                         push = true;
                     }
                 } else if (tx) {
-                    m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *tx));
                     push = true;
                 }
+
+                if (push) {
+                    m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *tx));
+                    m_mempool.RemoveUnbroadcastTx(tx->GetHash());
+                }
+
                 // As we're going to send tx, make sure its unconfirmed parents are made requestable.
                 std::vector<uint256> parent_ids_to_add;
                 {
@@ -2026,7 +2031,6 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     }
                 }
             }
-            push = true;
         }
 
         if (!push) {
@@ -2297,10 +2301,8 @@ void PeerManagerImpl::ProcessOrphanTx(std::set<uint256>& orphan_work_set)
 
         const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, porphanTx, false /* bypass_limits */);
         const TxValidationState& state = result.m_state;
-        AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_stempool, porphanTx, false /* bypass_limits */);
 
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-
             LogPrint(BCLog::MEMPOOL, "   accepted orphan tx %s\n", orphanHash.ToString());
             _RelayTransaction(orphanHash, porphanTx->GetWitnessHash());
             m_orphanage.AddChildrenToWorkSet(*porphanTx, orphan_work_set);
@@ -2309,6 +2311,7 @@ void PeerManagerImpl::ProcessOrphanTx(std::set<uint256>& orphan_work_set)
                 AddToCompactExtraTransactions(removedTx);
             }
             break;
+            
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             if (state.IsInvalid()) {
                 LogPrint(BCLog::MEMPOOL, "   invalid orphan tx %s from peer=%d. %s\n",
@@ -2356,7 +2359,7 @@ void PeerManagerImpl::ProcessOrphanTx(std::set<uint256>& orphan_work_set)
         }
     }
     m_mempool.check(m_chainman.ActiveChainstate());
-    // m_stempool.check(m_chainman.ActiveChainstate());
+    m_stempool.check(m_chainman.ActiveChainstate());
 }
 
 bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& peer,
@@ -3357,7 +3360,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_connman.removeDandelionEmbargo(tx.GetHash());
             }
             m_mempool.check(m_chainman.ActiveChainstate());
-            // m_stempool.check(m_chainman.ActiveChainstate());
+            m_stempool.check(m_chainman.ActiveChainstate());
             // As this version of the transaction was acceptable, we can forget about any
             // requests for it.
             m_txrequest.ForgetTxHash(tx.GetHash());
