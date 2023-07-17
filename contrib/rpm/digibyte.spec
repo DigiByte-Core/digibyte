@@ -14,7 +14,7 @@
 %endif
 
 Name:		digibyte
-Version:	7.17.2
+Version:	8.22.0
 Release:	1%{?dist}
 Summary:	Peer to Peer Cryptographic Currency
 
@@ -328,12 +328,12 @@ if [ `%{_sbindir}/sestatus |grep -c "disabled"` -eq 0 ]; then
 for selinuxvariant in %{selinux_variants}; do
 	%{_sbindir}/semodule -s ${selinuxvariant} -i %{_datadir}/selinux/${selinuxvariant}/digibyte.pp &> /dev/null || :
 done
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 8332
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 8333
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 18332
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 18333
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 18443
-%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 18444
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12023
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12024
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12025
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12026
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12027
+%{_sbindir}/semanage port -a -t digibyte_port_t -p tcp 12028
 %{_sbindir}/fixfiles -R digibyte-server restore &> /dev/null || :
 %{_sbindir}/restorecon -R %{_localstatedir}/lib/digibyte || :
 fi
@@ -349,12 +349,12 @@ fi
 # SELinux
 if [ $1 -eq 0 ]; then
 	if [ `%{_sbindir}/sestatus |grep -c "disabled"` -eq 0 ]; then
-	%{_sbindir}/semanage port -d -p tcp 8332
-	%{_sbindir}/semanage port -d -p tcp 8333
-	%{_sbindir}/semanage port -d -p tcp 18332
-	%{_sbindir}/semanage port -d -p tcp 18333
-	%{_sbindir}/semanage port -d -p tcp 18443
-	%{_sbindir}/semanage port -d -p tcp 18444
+	%{_sbindir}/semanage port -d -p tcp 12023
+	%{_sbindir}/semanage port -d -p tcp 12024
+	%{_sbindir}/semanage port -d -p tcp 12025
+	%{_sbindir}/semanage port -d -p tcp 12026
+	%{_sbindir}/semanage port -d -p tcp 12027
+	%{_sbindir}/semanage port -d -p tcp 12028
 	for selinuxvariant in %{selinux_variants}; do
 		%{_sbindir}/semodule -s ${selinuxvariant} -r digibyte &> /dev/null || :
 	done
