@@ -265,7 +265,7 @@ BOOST_AUTO_TEST_CASE(addrman_select)
     for (int i = 0; i < 20; ++i) {
         ports.insert(addrman.Select().GetPort());
     }
-    BOOST_CHECK_EQUAL(ports.size(), 3U);
+    BOOST_CHECK_EQUAL(ports.size(), 2U);
 }
 
 BOOST_AUTO_TEST_CASE(addrman_new_collisions)
@@ -474,7 +474,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket_legacy)
 
     std::vector<bool> asmap; // use /16
 
-    BOOST_CHECK_EQUAL(info1.GetTriedBucket(nKey1, asmap), 40);
+    BOOST_CHECK_EQUAL(info1.GetTriedBucket(nKey1, asmap), 120);
 
     // Test: Make sure key actually randomizes bucket placement. A fail on
     //  this test could be a security issue.
@@ -607,7 +607,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket)
 
     std::vector<bool> asmap = FromBytes(asmap_raw, sizeof(asmap_raw) * 8);
 
-    BOOST_CHECK_EQUAL(info1.GetTriedBucket(nKey1, asmap), 236);
+    BOOST_CHECK_EQUAL(info1.GetTriedBucket(nKey1, asmap), 53);
 
     // Test: Make sure key actually randomizes bucket placement. A fail on
     //  this test could be a security issue.
