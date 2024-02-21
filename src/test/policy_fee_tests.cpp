@@ -13,7 +13,7 @@ BOOST_AUTO_TEST_SUITE(policy_fee_tests)
 
 BOOST_AUTO_TEST_CASE(FeeRounder)
 {
-    FeeFilterRounder fee_rounder{CFeeRate{1000}};
+    FeeFilterRounder fee_rounder{CFeeRate{100000}};
 
     // check that 1000 rounds to 974 or 1071
     std::set<CAmount> results;
