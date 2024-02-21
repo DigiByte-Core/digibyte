@@ -170,8 +170,8 @@ private:
      * invalidates old estimates files. So leave it at 1000 unless it becomes
      * necessary to lower it, and then lower it substantially.
      */
-    static constexpr double MIN_BUCKET_FEERATE = 1000;
-    static constexpr double MAX_BUCKET_FEERATE = 1e7;
+    static constexpr double MIN_BUCKET_FEERATE = 1e5;
+    static constexpr double MAX_BUCKET_FEERATE = 1e10;
 
     /** Spacing of FeeRate buckets
      * We have to lump transactions into buckets based on feerate, but we want to be able
@@ -273,7 +273,7 @@ private:
 class FeeFilterRounder
 {
 private:
-    static constexpr double MAX_FILTER_FEERATE = 1e7;
+    static constexpr double MAX_FILTER_FEERATE = 1e10;
     /** FEE_FILTER_SPACING is just used to provide some quantization of fee
      * filter results.  Historically it reused FEE_SPACING, but it is completely
      * unrelated, and was made a separate constant so the two concepts are not
