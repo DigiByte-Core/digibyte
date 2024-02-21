@@ -20,15 +20,15 @@ BOOST_AUTO_TEST_CASE(FeeRounder)
     while (results.size() < 2) {
         results.emplace(fee_rounder.round(1000));
     }
-    BOOST_CHECK_EQUAL(*results.begin(), 974);
-    BOOST_CHECK_EQUAL(*++results.begin(), 1071);
+    BOOST_CHECK_EQUAL(*results.begin(), 0);
+    BOOST_CHECK_EQUAL(*++results.begin(), 5000000);
 
     // check that negative amounts rounds to 0
     BOOST_CHECK_EQUAL(fee_rounder.round(-0), 0);
     BOOST_CHECK_EQUAL(fee_rounder.round(-1), 0);
 
-    // check that MAX_MONEY rounds to 9170997
-    BOOST_CHECK_EQUAL(fee_rounder.round(MAX_MONEY), 9170997);
+    // check that MAX_MONEY rounds to 9310910066
+    BOOST_CHECK_EQUAL(fee_rounder.round(MAX_MONEY), 9310910066);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
