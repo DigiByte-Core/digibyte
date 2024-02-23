@@ -2312,8 +2312,8 @@ static RPCHelpMan settxfee()
                     RPCResult::Type::BOOL, "", "Returns true if successful"
                 },
                 RPCExamples{
-                    HelpExampleCli("settxfee", "0.00001")
-            + HelpExampleRpc("settxfee", "0.00001")
+                    HelpExampleCli("settxfee", "0.1")
+            + HelpExampleRpc("settxfee", "0.1")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
