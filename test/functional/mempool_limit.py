@@ -64,7 +64,7 @@ class MempoolLimitTest(DigiByteTestFramework):
         tx_to_be_evicted_id = miniwallet.send_self_transfer(from_node=node, fee_rate=relayfee)["txid"]
 
         # Increase the tx fee rate to give the subsequent transactions a higher priority in the mempool
-        # The tx has an approx. vsize of 65k, i.e. multiplying the previous fee rate (in sats/kvB)
+        # The tx has an approx. vsize of 65k, i.e. multiplying the previous fee rate (in dbit/kvB)
         # by 130 should result in a fee that corresponds to 2x of that fee rate
         base_fee = relayfee * 130
 

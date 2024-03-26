@@ -86,21 +86,21 @@ class FeeFilterTest(DigiByteTestFramework):
 
         conn = self.nodes[0].add_p2p_connection(TestP2PConn())
 
-        self.log.info("Test txs paying 20 sat/byte are received by test connection")
+        self.log.info("Test txs paying 20 dbit/byte are received by test connection")
         TX_KEY = 'wtxid' if P2P_VERSION >= WTXID_RELAY_VERSION else 'txid'
         txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.000200'), from_node=node1)[TX_KEY] for _ in range(3)]
         conn.wait_for_invs_to_match(txids)
         conn.clear_invs()
 
-        # Set a fee filter of 0.15 sat/byte on test connection
+        # Set a fee filter of 0.15 dbit/byte on test connection
         conn.send_and_ping(msg_feefilter(150))
 
-        self.log.info("Test txs paying 0.15 sat/byte are received by test connection")
+        self.log.info("Test txs paying 0.15 dbit/byte are received by test connection")
         txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.00000150'), from_node=node1)[TX_KEY] for _ in range(3)]
         conn.wait_for_invs_to_match(txids)
         conn.clear_invs()
 
-        self.log.info("Test txs paying 0.1 sat/byte are no longer received by test connection")
+        self.log.info("Test txs paying 0.1 dbit/byte are no longer received by test connection")
         txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.00000100'), from_node=node1)[TX_KEY] for _ in range(3)]
         self.sync_mempools()  # must be sure node 0 has received all txs
 

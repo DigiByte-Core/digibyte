@@ -320,12 +320,12 @@ class RawTransactionsTest(DigiByteTestFramework):
 
         self.sync_all()
         inputs = [{"txid": txId, "vout": vout['n']}]
-        # Fee 100,000 satoshis, (1 - (100000 sat * 0.00000001 BTC/sat)) = 0.999
+        # Fee 100,000 digibits, (1 - (100000 dbit * 0.00000001 DGB/dbit)) = 0.999
         outputs = {self.nodes[0].getnewaddress(): Decimal("0.9990000")}
         rawTx = self.nodes[2].createrawtransaction(inputs, outputs)
         rawTxSigned = self.nodes[2].signrawtransactionwithwallet(rawTx)
         assert_equal(rawTxSigned['complete'], True)
-        # Fee 10,000 satoshis, ~100 b transaction, fee rate should land around 100 sat/byte = 0.00100000 BTC/kB
+        # Fee 10,000 digibits, ~100 b transaction, fee rate should land around 100 dbit/byte = 0.00100000 DGB/kB
         # Thus, testmempoolaccept should reject
         testres = self.nodes[2].testmempoolaccept([rawTxSigned['hex']], 0.0010000)[0]
         self.log.info(f"testmempoolaccept result: {testres}")
@@ -346,12 +346,12 @@ class RawTransactionsTest(DigiByteTestFramework):
 
         self.sync_all()
         inputs = [{"txid": txId, "vout": vout['n']}]
-        # Fee 2,000,000 satoshis, (1 - (2000000 sat * 0.00000001 BTC/sat)) = 0.98
+        # Fee 2,000,000 digibits, (1 - (2000000 digibit * 0.00000001 DGB/dbit)) = 0.98
         outputs = {self.nodes[0].getnewaddress() : Decimal("0.98000000")}
         rawTx = self.nodes[2].createrawtransaction(inputs, outputs)
         rawTxSigned = self.nodes[2].signrawtransactionwithwallet(rawTx)
         assert_equal(rawTxSigned['complete'], True)
-        # Fee 2,000,000 satoshis, ~100 b transaction, fee rate should land around 20,000 sat/byte = 0.20000000 BTC/kB
+        # Fee 2,000,000 digibits, ~100 b transaction, fee rate should land around 20,000 dbit/byte = 0.20000000 DGB/kB
         # Thus, testmempoolaccept should reject
         testres = self.nodes[2].testmempoolaccept([rawTxSigned['hex']])[0]
         self.log.info(f"testmempoolaccept result (high fee): {testres}")
@@ -436,7 +436,7 @@ class RawTransactionsTest(DigiByteTestFramework):
         # use balance deltas instead of absolute values
         bal = self.nodes[2].getbalance()
 
-        # send 1.2 BTC to msig adr
+        # send 1.2 DGB to msig adr
         txId = self.nodes[0].sendtoaddress(mSigObj, 1.2)
         self.sync_all()
         self.generate(self.nodes[0], 1)

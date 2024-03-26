@@ -28,7 +28,7 @@ from test_framework.script import (
 from test_framework.util import (
     assert_equal,
     hex_str_to_bytes,
-    satoshi_round,
+    digibit_round,
 )
 
 class MiniWalletMode(Enum):
@@ -145,7 +145,7 @@ class MiniWallet:
             vsize = Decimal(96)  # anyone-can-spend
         else:
             vsize = Decimal(168)  # P2PK (73 bytes scriptSig + 35 bytes scriptPubKey + 60 bytes other)
-        send_value = satoshi_round(utxo_to_spend['value'] - fee_rate * (vsize / 1000))
+        send_value = digibit_round(utxo_to_spend['value'] - fee_rate * (vsize / 1000))
         fee = utxo_to_spend['value'] - send_value
         assert send_value > 0
 
