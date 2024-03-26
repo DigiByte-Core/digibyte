@@ -459,7 +459,7 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
         if (fWitness)
         {
             // there is some fudging in these numbers related to the actual virtual transaction size calculation that will keep this estimate from being exact.
-            // usually, the result will be an overestimate within a couple of satoshis so that the confirmation dialog ends up displaying a slightly smaller fee.
+            // usually, the result will be an overestimate within a couple of digibits so that the confirmation dialog ends up displaying a slightly smaller fee.
             // also, the witness stack size value is a variable sized integer. usually, the number of stack items will be well under the single byte var int limit.
             nBytes += 2; // account for the serialized marker and flag bytes
             nBytes += nQuantity; // account for the witness byte that holds the number of stack items for each input.
@@ -542,10 +542,10 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
     // tool tips
     QString toolTipDust = tr("This label turns red if any recipient receives an amount smaller than the current dust threshold.");
 
-    // how many satoshis the estimated fee can vary per byte we guess wrong
+    // how many digibits the estimated fee can vary per byte we guess wrong
     double dFeeVary = (nBytes != 0) ? (double)nPayFee / nBytes : 0;
 
-    QString toolTip4 = tr("Can vary +/- %1 satoshi(s) per input.").arg(dFeeVary);
+    QString toolTip4 = tr("Can vary +/- %1 digibit(s) per input.").arg(dFeeVary);
 
     l3->setToolTip(toolTip4);
     l4->setToolTip(toolTip4);

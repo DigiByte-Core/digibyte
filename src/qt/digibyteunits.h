@@ -3,8 +3,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('bit' for short).
+// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('dbit' for short).
 //       A digibit is the smallest denomination of DigiByte. It is always written lowercase.
+//       Reference: https://dgbwiki.com/index.php?title=DigiByte#Subunits
 
 #ifndef DIGIBYTE_QT_DIGIBYTEUNITS_H
 #define DIGIBYTE_QT_DIGIBYTEUNITS_H

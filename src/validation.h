@@ -189,7 +189,7 @@ struct MempoolAcceptResult {
     // The following fields are only present when m_result_type = ResultType::VALID
     /** Mempool transactions replaced by the tx per BIP 125 rules. */
     const std::optional<std::list<CTransactionRef>> m_replaced_transactions;
-    /** Raw base fees in satoshis. */
+    /** Raw base fees in digibits. */
     const std::optional<CAmount> m_base_fees;
     static MempoolAcceptResult Failure(TxValidationState state) {
         return MempoolAcceptResult(state);

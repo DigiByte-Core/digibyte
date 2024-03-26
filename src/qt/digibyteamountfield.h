@@ -35,13 +35,13 @@ public:
     /** If allow empty is set to false the field will be set to the minimum allowed value if left empty. **/
     void SetAllowEmpty(bool allow);
 
-    /** Set the minimum value in satoshis **/
+    /** Set the minimum value in digibits **/
     void SetMinValue(const CAmount& value);
 
-    /** Set the maximum value in satoshis **/
+    /** Set the maximum value in digibits **/
     void SetMaxValue(const CAmount& value);
 
-    /** Set single step in satoshis **/
+    /** Set single step in digibits **/
     void setSingleStep(const CAmount& step);
 
     /** Make read-only **/

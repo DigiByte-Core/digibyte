@@ -202,7 +202,7 @@ static std::string LabelFromValue(const UniValue& value)
  * @param[in,out] cc                Coin control to be updated
  * @param[in]     conf_target       UniValue integer; confirmation target in blocks, values between 1 and 1008 are valid per policy/fees.h;
  * @param[in]     estimate_mode     UniValue string; fee estimation mode, valid values are "unset", "economical" or "conservative";
- * @param[in]     fee_rate          UniValue real; fee rate in sat/vB;
+ * @param[in]     fee_rate          UniValue real; fee rate in dbit/vB;
  *                                      if present, both conf_target and estimate_mode must either be null, or "unset"
  * @param[in]     override_min_fee  bool; whether to set fOverrideFeeRate to true to disable minimum fee rate checks and instead
  *                                      verify only that fee_rate is greater than 0
@@ -217,7 +217,7 @@ static void SetFeeEstimateMode(const CWallet& wallet, CCoinControl& cc, const Un
         if (!estimate_mode.isNull() && estimate_mode.get_str() != "unset") {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot specify both estimate_mode and fee_rate");
         }
-        // Fee rates in sat/vB cannot represent more than 3 significant digits.
+        // Fee rates in dbit/vB cannot represent more than 3 significant digits.
         cc.m_feerate = CFeeRate{AmountFromValue(fee_rate, /* decimals */ 3)};
         if (override_min_fee) cc.fOverrideFeeRate = true;
         // Default RBF to true for explicit fee_rate, if unset.
@@ -3402,7 +3402,7 @@ RPCHelpMan signrawtransactionwithwallet()
 static RPCHelpMan bumpfee_helper(std::string method_name)
 {
     const bool want_psbt = method_name == "psbtbumpfee";
-    const std::string incremental_fee{CFeeRate(DEFAULT_INCREMENTAL_RELAY_FEE).ToString(FeeEstimateMode::SAT_VB)};
+    const std::string incremental_fee{CFeeRate(DEFAULT_INCREMENTAL_RELAY_FEE).ToString(FeeEstimateMode::DBIT_VB)};
 
     return RPCHelpMan{method_name,
         "\nBumps the fee of an opt-in-RBF transaction T, replacing it with a new transaction B.\n"

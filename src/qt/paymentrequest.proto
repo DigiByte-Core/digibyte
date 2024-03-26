@@ -14,7 +14,7 @@ option java_outer_classname = "Protos";
 
 // Generalized form of "send payment to this/these digibyte addresses"
 message Output {
-	optional uint64 amount = 1 [default = 0]; // amount is integer-number-of-satoshis
+	optional uint64 amount = 1 [default = 0]; // amount is integer-number-of-digibits
 	required bytes script = 2; // usually one of the standard Script forms
 }
 message PaymentDetails {

@@ -3,7 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('bit' for short).
+// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a 'digibit' (abbreviated to 'dbit').
 //       A digibit is the smallest denomination of DigiByte. It is always written lowercase.
 //       Reference: https://dgbwiki.com/index.php?title=DigiByte#Subunits
 
@@ -52,7 +52,7 @@ QString DigiByteUnits::longName(int unit)
     case DGB: return QString("DGB");
     case mDGB: return QString("mDGB");
     case µDGB: return QString::fromUtf8("µDGB");
-    case digibit: return QString("digibit (bit)");
+    case digibit: return QString("digibit (dbit)");
     default: return QString("???");
     }
 }
@@ -62,7 +62,7 @@ QString DigiByteUnits::shortName(int unit)
     switch(unit)
     {
     case µDGB: return QString::fromUtf8("µDGB");
-    case digibit: return QString("bit");
+    case digibit: return QString("dbit");
     default: return longName(unit);
     }
 }
@@ -74,7 +74,7 @@ QString DigiByteUnits::description(int unit)
     case DGB: return QString("DigiBytes");
     case mDGB: return QString("Milli-DigiBytes (1 / 1" THIN_SP_UTF8 "000)");
     case µDGB: return QString("Micro-DigiBytes (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case digibit: return QString("digibit (bit) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case digibit: return QString("digibit (dbit) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
     default: return QString("???");
     }
 }

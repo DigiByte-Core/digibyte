@@ -98,9 +98,9 @@ static const bool DEFAULT_DISABLE_DANDELION = false;
 
 //! -maxtxfee default
 constexpr CAmount DEFAULT_TRANSACTION_MAXFEE{COIN * 100};
-//! Discourage users to set fees higher than this amount (in satoshis) per kB
+//! Discourage users to set fees higher than this amount (in digibits) per kB
 constexpr CAmount HIGH_TX_FEE_PER_KB{COIN};
-//! -maxtxfee will warn if called with a higher fee than this amount (in satoshis)
+//! -maxtxfee will warn if called with a higher fee than this amount (in digibits)
 constexpr CAmount HIGH_MAX_TX_FEE{1000 * HIGH_TX_FEE_PER_KB};
 //! Pre-calculated constants for input size estimation in *virtual size*
 static constexpr size_t DUMMY_NESTED_P2WPKH_INPUT_SIZE = 91;

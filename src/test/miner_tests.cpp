@@ -113,11 +113,11 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     tx.vin[0].prevout.n = 0;
     tx.vout.resize(1);
     tx.vout[0].nValue = 5000000000LL - 1000;
-    // This tx has a low fee: 1000 satoshis
+    // This tx has a low fee: 1000 digibits
     uint256 hashParentTx = tx.GetHash(); // save this txid for later use
     m_node.mempool->addUnchecked(entry.Fee(1000).Time(GetTime()).SpendsCoinbase(true).FromTx(tx));
 
-    // This tx has a medium fee: 10000 satoshis
+    // This tx has a medium fee: 10000 digibits
     tx.vin[0].prevout.hash = txFirst[1]->GetHash();
     tx.vout[0].nValue = 5000000000LL - 10000;
     uint256 hashMediumFeeTx = tx.GetHash();
@@ -125,7 +125,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
 
     // This tx has a high fee, but depends on the first transaction
     tx.vin[0].prevout.hash = hashParentTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 50k satoshi fee
+    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 50k digibit fee
     uint256 hashHighFeeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(50000).Time(GetTime()).SpendsCoinbase(false).FromTx(tx));
 
@@ -197,7 +197,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     // This tx will be mineable, and should cause hashLowFeeTx2 to be selected
     // as well.
     tx.vin[0].prevout.n = 1;
-    tx.vout[0].nValue = 100000000 - 100000; // 10k satoshi fee
+    tx.vout[0].nValue = 100000000 - 100000; // 10k digibit fee
     m_node.mempool->addUnchecked(entry.Fee(100000).FromTx(tx));
     pblocktemplate = AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey, ALGO_SCRYPT);
     BOOST_REQUIRE_EQUAL(pblocktemplate->block.vtx.size(), 9U);
