@@ -108,7 +108,7 @@ class TxnMallTest(DigiByteTestFramework):
         tx1 = self.nodes[0].gettransaction(txid1)
         tx2 = self.nodes[0].gettransaction(txid2)
 
-        # Node0's balance should be starting balance, plus 50BTC for another
+        # Node0's balance should be starting balance, plus 50DGB for another
         # matured block, minus tx1 and tx2 amounts, and minus transaction fees:
         expected += tx1["amount"] + tx1["fee"]
         expected += tx2["amount"] + tx2["fee"]

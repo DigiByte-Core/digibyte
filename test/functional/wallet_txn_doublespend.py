@@ -73,7 +73,7 @@ class TxnMallTest(DigiByteTestFramework):
         # Coins are sent to node1_address
         node1_address = self.nodes[1].getnewaddress()
 
-        # First: use raw transaction API to send 1240 BTC to node1_address,
+        # First: use raw transaction API to send 1240 DGB to node1_address,
         # but don't broadcast:
         doublespend_fee = Decimal('-.2')
         rawtx_input_0 = {}
@@ -102,7 +102,7 @@ class TxnMallTest(DigiByteTestFramework):
         tx1 = self.nodes[0].gettransaction(txid1)
         tx2 = self.nodes[0].gettransaction(txid2)
 
-        # Node0's balance should be starting balance, plus 50BTC for another
+        # Node0's balance should be starting balance, plus 50DGB for another
         # matured block, minus 40, minus 20, and minus transaction fees:
         expected = starting_balance + fund_foo_tx["fee"] + fund_bar_tx["fee"]
         if self.options.mine_block:

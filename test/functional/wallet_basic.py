@@ -55,7 +55,7 @@ class WalletTest(DigiByteTestFramework):
 
 
     # Get newly matured utxo with min_amount
-    # DigiByte specific: COINBASE_MATURITY is set to 8 instead of 100 (in BTC).
+    # DigiByte specific: COINBASE_MATURITY is set to 8 instead of 100 (in DGB).
     # During this test suite, more and more coinbase utxos are maturing.
     # This helper function collects them.
     def get_matured_utxos(self, node_index, utxo_seen_map = None, allow_none_coinbase = False, min_amount = Decimal('72000')):
@@ -188,7 +188,7 @@ class WalletTest(DigiByteTestFramework):
         # Have node1 generate 101 blocks (so node0 can recover the fee)
         self.generate(self.nodes[1], COINBASE_MATURITY_2 + 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
-        # node0 should end up with 100 btc in block rewards plus fees, but
+        # node0 should end up with 100 dgb in block rewards plus fees, but
         # minus the 21 plus fees sent to node2
         assert_equal(self.nodes[0].getbalance(), 2 * 72000 - 21)
         assert_equal(self.nodes[2].getbalance(), 21)
@@ -261,28 +261,28 @@ class WalletTest(DigiByteTestFramework):
         assert_equal(self.nodes[2].getbalance(), node_2_bal)
         node_0_bal = self.check_fee_amount(self.nodes[0].getbalance(), node_0_bal + Decimal('10'), fee_per_byte, self.get_vsize(self.nodes[2].gettransaction(txid)['hex']))
 
-        self.log.info("Test sendmany with fee_rate param (explicit fee rate in sat/vB)")
-        fee_rate_sat_vb = 10000
-        fee_rate_btc_kvb = fee_rate_sat_vb * 1e3 / 1e8
-        explicit_fee_rate_btc_kvb = Decimal(fee_rate_btc_kvb) / 1000
+        self.log.info("Test sendmany with fee_rate param (explicit fee rate in dbit/vB)")
+        fee_rate_dbit_vb = 10000
+        fee_rate_dgb_kvb = fee_rate_dbit_vb * 1e3 / 1e8
+        explicit_fee_rate_dgb_kvb = Decimal(fee_rate_dgb_kvb) / 1000
 
         # Test passing fee_rate as a string
-        txid = self.nodes[2].sendmany(amounts={address: 10}, fee_rate=str(fee_rate_sat_vb))
+        txid = self.nodes[2].sendmany(amounts={address: 10}, fee_rate=str(fee_rate_dbit_vb))
         self.generate(self.nodes[2], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
         balance = self.nodes[2].getbalance()
-        node_2_bal = self.check_fee_amount(balance, node_2_bal - Decimal('10'), explicit_fee_rate_btc_kvb, self.get_vsize(self.nodes[2].gettransaction(txid)['hex']))
+        node_2_bal = self.check_fee_amount(balance, node_2_bal - Decimal('10'), explicit_fee_rate_dgb_kvb, self.get_vsize(self.nodes[2].gettransaction(txid)['hex']))
         assert_equal(balance, node_2_bal)
         node_0_bal += Decimal('10')
         assert_equal(self.nodes[0].getbalance(), node_0_bal)
 
         # Test passing fee_rate as an integer
         amount = Decimal("0.1")
-        txid = self.nodes[2].sendmany(amounts={address: amount}, fee_rate=fee_rate_sat_vb)
+        txid = self.nodes[2].sendmany(amounts={address: amount}, fee_rate=fee_rate_dbit_vb)
         self.generate(self.nodes[2], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
         balance = self.nodes[2].getbalance()
-        node_2_bal = self.check_fee_amount(balance, node_2_bal - amount, explicit_fee_rate_btc_kvb, self.get_vsize(self.nodes[2].gettransaction(txid)['hex']))
+        node_2_bal = self.check_fee_amount(balance, node_2_bal - amount, explicit_fee_rate_dgb_kvb, self.get_vsize(self.nodes[2].gettransaction(txid)['hex']))
         assert_equal(balance, node_2_bal)
         node_0_bal += amount
         assert_equal(self.nodes[0].getbalance(), node_0_bal)
@@ -291,12 +291,12 @@ class WalletTest(DigiByteTestFramework):
             assert_raises_rpc_error(-8, "Unknown named parameter key", self.nodes[2].sendtoaddress, address=address, amount=1, fee_rate=1, key=1)
 
         # Test setting explicit fee rate just below the minimum.
-        self.log.info("Test sendmany raises 'fee rate too low' if fee_rate of 100 sat/vB is passed")
-        assert_raises_rpc_error(-6, "Fee rate (100.000 sat/vB) is lower than the minimum fee rate setting (10000.000 sat/vB)",
+        self.log.info("Test sendmany raises 'fee rate too low' if fee_rate of 100 dbit/vB is passed")
+        assert_raises_rpc_error(-6, "Fee rate (100.000 dbit/vB) is lower than the minimum fee rate setting (10000.000 dbit/vB)",
             self.nodes[2].sendmany, amounts={address: 10}, fee_rate=100)
 
         self.log.info("Test sendmany raises if fee_rate of 0 or -1 is passed")
-        assert_raises_rpc_error(-6, "Fee rate (0.000 sat/vB) is lower than the minimum fee rate setting (10000.000 sat/vB)",
+        assert_raises_rpc_error(-6, "Fee rate (0.000 dbit/vB) is lower than the minimum fee rate setting (10000.000 dbit/vB)",
             self.nodes[2].sendmany, amounts={address: 10}, fee_rate=0)
 
         assert_raises_rpc_error(-3, OUT_OF_RANGE, self.nodes[2].sendmany, amounts={address: 10}, fee_rate=-1)
@@ -305,7 +305,7 @@ class WalletTest(DigiByteTestFramework):
         for target, mode in product([-1, 0, 1009], ["economical", "conservative"]):
             assert_raises_rpc_error(-8, "Invalid conf_target, must be between 1 and 1008",  # max value of 1008 per src/policy/fees.h
                 self.nodes[2].sendmany, amounts={address: 1}, conf_target=target, estimate_mode=mode)
-        for target, mode in product([-1, 0], ["btc/kb", "sat/b"]):
+        for target, mode in product([-1, 0], ["dgb/kb", "dbit/b"]):
             assert_raises_rpc_error(-8, 'Invalid estimate_mode parameter, must be one of: "unset", "economical", "conservative"',
                 self.nodes[2].sendmany, amounts={address: 1}, conf_target=target, estimate_mode=mode)
 
@@ -454,16 +454,16 @@ class WalletTest(DigiByteTestFramework):
             self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
 
-            self.log.info("Test sendtoaddress with fee_rate param (explicit fee rate in sat/vB)")
+            self.log.info("Test sendtoaddress with fee_rate param (explicit fee rate in dbit/vB)")
             self.get_matured_utxos(2, utxo_seen[2]) # clear
             prebalance = self.nodes[2].getbalance()
             assert prebalance > 2
             address = self.nodes[1].getnewaddress()
             amount = 3
-            fee_rate_sat_vb = 10000
-            fee_rate_btc_kvb = fee_rate_sat_vb * 1e3 / 1e8
+            fee_rate_dbit_vb = 10000
+            fee_rate_dgb_kvb = fee_rate_dbit_vb * 1e3 / 1e8
             # Test passing fee_rate as an integer
-            txid = self.nodes[2].sendtoaddress(address=address, amount=amount, fee_rate=fee_rate_sat_vb)
+            txid = self.nodes[2].sendtoaddress(address=address, amount=amount, fee_rate=fee_rate_dbit_vb)
             tx_size = self.get_vsize(self.nodes[2].gettransaction(txid)['hex'])
             self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
@@ -474,15 +474,15 @@ class WalletTest(DigiByteTestFramework):
             postbalance -= sum(utxo['amount'] for utxo in maturedUtxos)
 
             fee = prebalance - postbalance - Decimal(amount)
-            assert_fee_amount(fee, tx_size, Decimal(fee_rate_btc_kvb))
+            assert_fee_amount(fee, tx_size, Decimal(fee_rate_dgb_kvb))
 
             prebalance = self.nodes[2].getbalance()
             amount = Decimal("0.1")
-            fee_rate_sat_vb = 10000
-            fee_rate_btc_kvb = fee_rate_sat_vb * 1e3 / 1e8
+            fee_rate_dbit_vb = 10000
+            fee_rate_dgb_kvb = fee_rate_dbit_vb * 1e3 / 1e8
 
             # Test passing fee_rate as a string
-            txid = self.nodes[2].sendtoaddress(address=address, amount=amount, fee_rate=str(fee_rate_sat_vb))
+            txid = self.nodes[2].sendtoaddress(address=address, amount=amount, fee_rate=str(fee_rate_dbit_vb))
             tx_size = self.get_vsize(self.nodes[2].gettransaction(txid)['hex'])
             self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
@@ -495,17 +495,17 @@ class WalletTest(DigiByteTestFramework):
             fee = prebalance - postbalance - amount + maturedValue
             tx_obj = self.nodes[2].gettransaction(txid)
 
-            assert_fee_amount(fee, tx_size, Decimal(fee_rate_btc_kvb))
+            assert_fee_amount(fee, tx_size, Decimal(fee_rate_dgb_kvb))
 
             for key in ["totalFee", "feeRate"]:
                 assert_raises_rpc_error(-8, "Unknown named parameter key", self.nodes[2].sendtoaddress, address=address, amount=1, fee_rate=1, key=1)
 
             # Test setting explicit fee rate just below the minimum.
             self.log.info("Test sendtoaddress raises 'fee rate too low' if fee_rate of 99.999 is passed")
-            assert_raises_rpc_error(-6, "Fee rate (99.999 sat/vB) is lower than the minimum fee rate setting (10000.000 sat/vB)", 
+            assert_raises_rpc_error(-6, "Fee rate (99.999 dbit/vB) is lower than the minimum fee rate setting (10000.000 dbit/vB)", 
                 self.nodes[2].sendtoaddress, address=address, amount=1, fee_rate=99.999)
             self.log.info("Test sendtoaddress raises if fee_rate of 0 or -1 is passed")
-            assert_raises_rpc_error(-6, "Fee rate (0.000 sat/vB) is lower than the minimum fee rate setting (10000.000 sat/vB)",
+            assert_raises_rpc_error(-6, "Fee rate (0.000 dbit/vB) is lower than the minimum fee rate setting (10000.000 dbit/vB)",
                 self.nodes[2].sendtoaddress, address=address, amount=10, fee_rate=0)
             assert_raises_rpc_error(-3, OUT_OF_RANGE, self.nodes[2].sendtoaddress, address=address, amount=1.0, fee_rate=-1)
 
@@ -513,7 +513,7 @@ class WalletTest(DigiByteTestFramework):
             for target, mode in product([-1, 0, 1009], ["economical", "conservative"]):
                 assert_raises_rpc_error(-8, "Invalid conf_target, must be between 1 and 1008",  # max value of 1008 per src/policy/fees.h
                     self.nodes[2].sendtoaddress, address=address, amount=1, conf_target=target, estimate_mode=mode)
-            for target, mode in product([-1, 0], ["btc/kb", "sat/b"]):
+            for target, mode in product([-1, 0], ["dgb/kb", "dbit/b"]):
                 assert_raises_rpc_error(-8, 'Invalid estimate_mode parameter, must be one of: "unset", "economical", "conservative"',
                     self.nodes[2].sendtoaddress, address=address, amount=1, conf_target=target, estimate_mode=mode)
 

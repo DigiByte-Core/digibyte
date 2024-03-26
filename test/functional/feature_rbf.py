@@ -18,7 +18,7 @@ from test_framework.messages import (
 )
 from test_framework.script import CScript, OP_DROP
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error, satoshi_round
+from test_framework.util import assert_equal, assert_raises_rpc_error, digibit_round
 from test_framework.script_util import DUMMY_P2WPKH_SCRIPT, DUMMY_2_P2WPKH_SCRIPT
 from test_framework.wallet import MiniWallet
 
@@ -52,11 +52,11 @@ class ReplaceByFeeTest(DigiByteTestFramework):
                     unconfirmed otherwise.
         """
         fee = 1 * COIN
-        while node.getbalance() < satoshi_round((amount + fee) / COIN):
+        while node.getbalance() < digibit_round((amount + fee) / COIN):
             self.generate(node, COINBASE_MATURITY)
 
         new_addr = node.getnewaddress()
-        txid = node.sendtoaddress(new_addr, satoshi_round((amount + fee) / COIN))
+        txid = node.sendtoaddress(new_addr, digibit_round((amount + fee) / COIN))
         tx1 = node.getrawtransaction(txid, 1)
         txid = int(txid, 16)
         i, _ = next(filter(lambda vout: new_addr == vout[1]['scriptPubKey']['address'], enumerate(tx1['vout'])))
@@ -154,7 +154,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         # This will raise an exception due to insufficient fee
         assert_raises_rpc_error(-26, "insufficient fee", self.nodes[0].sendrawtransaction, tx1b_hex, 0)
 
-        # Extra 0.1 BTC fee
+        # Extra 0.1 DGB fee
         tx1b = CTransaction()
         tx1b.vin = [CTxIn(tx0_outpoint, nSequence=0)]
         tx1b.vout = [CTxOut(int(0.9 * COIN), DUMMY_P2WPKH_SCRIPT)]
@@ -189,7 +189,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
             prevout = COutPoint(int(txid, 16), 0)
 
         # Whether the double-spend is allowed is evaluated by including all
-        # child fees - 40 BTC - so this attempt is rejected.
+        # child fees - 40 DGB - so this attempt is rejected.
         dbl_tx = CTransaction()
         dbl_tx.vin = [CTxIn(tx0_outpoint, nSequence=0)]
         dbl_tx.vout = [CTxOut(initial_nValue - 30 * COIN, DUMMY_P2WPKH_SCRIPT)]
@@ -259,7 +259,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         # This will raise an exception due to insufficient fee
         assert_raises_rpc_error(-26, "insufficient fee", self.nodes[0].sendrawtransaction, dbl_tx_hex, 0)
 
-        # 1 BTC fee is enough
+        # 1 DGB fee is enough
         dbl_tx = CTransaction()
         dbl_tx.vin = [CTxIn(tx0_outpoint, nSequence=0)]
         dbl_tx.vout = [CTxOut(initial_nValue - fee * n - 1 * COIN, DUMMY_P2WPKH_SCRIPT)]
@@ -638,7 +638,7 @@ class ReplaceByFeeTest(DigiByteTestFramework):
         tx = wallet.send_self_transfer(from_node=self.nodes[0])['tx']
 
         # Higher fee, higher feerate, different txid, but the replacement does not provide a relay
-        # fee conforming to node's `incrementalrelayfee` policy of 1000 sat per KB.
+        # fee conforming to node's `incrementalrelayfee` policy of 1000 dbit per KB.
         tx.vout[0].nValue -= 1
         assert_raises_rpc_error(-26, "insufficient fee", self.nodes[0].sendrawtransaction, tx.serialize().hex())
 

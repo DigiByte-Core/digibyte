@@ -189,13 +189,13 @@ class PSBTTest(DigiByteTestFramework):
         assert_equal(walletprocesspsbt_out['complete'], True)
         self.nodes[1].sendrawtransaction(self.nodes[1].finalizepsbt(walletprocesspsbt_out['psbt'])['hex'])
 
-        self.log.info("Test walletcreatefundedpsbt fee rate of 10000 sat/vB and 0.1 DGB/kvB produces a total fee at or slightly below -maxtxfee (~0.05290000)")
+        self.log.info("Test walletcreatefundedpsbt fee rate of 10000 dbit/vB and 0.1 DGB/kvB produces a total fee at or slightly below -maxtxfee (~0.05290000)")
         res1 = self.nodes[1].walletcreatefundedpsbt(inputs, outputs, 0, {"fee_rate": 100000, "add_inputs": True})
         assert_approx(res1["fee"], 0.0055, 0.5)
         res2 = self.nodes[1].walletcreatefundedpsbt(inputs, outputs, 0, {"feeRate": "0.1", "add_inputs": True})
         assert_approx(res2["fee"], 0.0055, 0.5)
 
-        self.log.info("Test min fee rate checks with walletcreatefundedpsbt are bypassed, e.g. a fee_rate under 1 sat/vB is allowed")
+        self.log.info("Test min fee rate checks with walletcreatefundedpsbt are bypassed, e.g. a fee_rate under 1 dbit/vB is allowed")
         res3 = self.nodes[1].walletcreatefundedpsbt(inputs, outputs, 0, {"fee_rate": "0.999", "add_inputs": True})
         assert_approx(res3["fee"], 0.00000381, 0.0000001)
         res4 = self.nodes[1].walletcreatefundedpsbt(inputs, outputs, 0, {"feeRate": 0.00000999, "add_inputs": True})
@@ -217,13 +217,13 @@ class PSBTTest(DigiByteTestFramework):
             for invalid_value in ["", 0.000000001, 1e-09, 1.111111111, 1111111111111111, "31.999999999999999999999"]:
                 assert_raises_rpc_error(-3, "Invalid amount",
                     self.nodes[1].walletcreatefundedpsbt, inputs, outputs, 0, {param: invalid_value, "add_inputs": True})
-        # Test fee_rate values that cannot be represented in sat/vB.
+        # Test fee_rate values that cannot be represented in dbit/vB.
         for invalid_value in [0.0001, 0.00000001, 0.00099999, 31.99999999, "0.0001", "0.00000001", "0.00099999", "31.99999999"]:
             assert_raises_rpc_error(-3, "Invalid amount",
                 self.nodes[1].walletcreatefundedpsbt, inputs, outputs, 0, {"fee_rate": invalid_value, "add_inputs": True})
 
         self.log.info("- raises RPC error if both feeRate and fee_rate are passed")
-        assert_raises_rpc_error(-8, "Cannot specify both fee_rate (sat/vB) and feeRate (DGB/kvB)",
+        assert_raises_rpc_error(-8, "Cannot specify both fee_rate (dbit/vB) and feeRate (DGB/kvB)",
             self.nodes[1].walletcreatefundedpsbt, inputs, outputs, 0, {"fee_rate": 0.1, "feeRate": 0.1, "add_inputs": True})
 
         self.log.info("- raises RPC error if both feeRate and estimate_mode passed")

@@ -9,7 +9,7 @@ Tests:
 1. Resistance to active probing:
     Stem:    0 --> 1 --> 2 --> 0 where each node has argument "-dandelion=1"
     Probe: TestNode --> 0
-    Node 0 generates a Dandelion transaction "tx": 1.0 BTC from Node 0 to Node 2
+    Node 0 generates a Dandelion transaction "tx": 1.0 DGB from Node 0 to Node 2
     TestNode immediately sends getdata for tx to Node 0
     Assert that Node 0 does not reply with tx
 

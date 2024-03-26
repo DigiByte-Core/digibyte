@@ -15,7 +15,7 @@ from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
     chain_transaction,
-    satoshi_round,
+    digibit_round,
 )
 
 # default limits
@@ -197,10 +197,10 @@ class MempoolPackagesTest(DigiByteTestFramework):
         for x in reversed(chain):
             descendant_fees += mempool[x]['fee']
             if (x == chain[-1]):
-                assert_equal(mempool[x]['modifiedfee'], mempool[x]['fee']+satoshi_round(0.00002))
-                assert_equal(mempool[x]['fees']['modified'], mempool[x]['fee']+satoshi_round(0.00002))
+                assert_equal(mempool[x]['modifiedfee'], mempool[x]['fee']+digibit_round(0.00002))
+                assert_equal(mempool[x]['fees']['modified'], mempool[x]['fee']+digibit_round(0.00002))
             assert_equal(mempool[x]['descendantfees'], descendant_fees * COIN + 2000)
-            assert_equal(mempool[x]['fees']['descendant'], descendant_fees+satoshi_round(0.00002))
+            assert_equal(mempool[x]['fees']['descendant'], descendant_fees+digibit_round(0.00002))
 
         # Check that node1's mempool is as expected (-> custom ancestor limit)
         mempool0 = self.nodes[0].getrawmempool(False)
@@ -296,7 +296,7 @@ class MempoolPackagesTest(DigiByteTestFramework):
         value = utxo[0]['amount']
         vout = utxo[0]['vout']
 
-        send_value = satoshi_round((value - fee)/2)
+        send_value = digibit_round((value - fee)/2)
         inputs = [ {'txid' : txid, 'vout' : vout} ]
         outputs = {}
         for _ in range(2):
