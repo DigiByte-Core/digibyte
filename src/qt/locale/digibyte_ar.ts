@@ -800,7 +800,7 @@ Signing is only possible with addresses of the type 'legacy'.</source>
         <translation>يتحول هذا الملصق إلى اللون الأحمر إذا تلقى أي مستلم كمية أصغر من عتبة الغبار الحالية.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
         <translation>يمكن أن يختلف +/- %1 من ساتوشي(s) لكل إدخال.</translation>
     </message>
     <message>

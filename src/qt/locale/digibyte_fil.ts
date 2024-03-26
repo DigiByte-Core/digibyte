@@ -741,8 +741,8 @@
         <translation>Ang label na ito ay magiging pula kung ang sinumang tatanggap ay tumanggap ng halagang mas mababa sa kasalukuyang dust threshold.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Maaaring magbago ng +/- %1 satoshi(s) kada input.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Maaaring magbago ng +/- %1 digibit(s) kada input.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2119,10 +2119,10 @@
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Tumukoy ng custom fee kada kB (1,000 bytes) ng virtual size ng transaksyon.
 
-Tandaan: Dahil ang bayad  ay kinakalkula sa bawat-byte na batayan, ang bayad ng "100 satoshis kada kB" para sa transaksyon na 500 bytes (kalahati ng 1 kB) ay magkakaroon ng bayad na 50 lamang na satoshi.</translation>
+Tandaan: Dahil ang bayad  ay kinakalkula sa bawat-byte na batayan, ang bayad ng "100 digibits kada kB" para sa transaksyon na 500 bytes (kalahati ng 1 kB) ay magkakaroon ng bayad na 50 lamang na digibits.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

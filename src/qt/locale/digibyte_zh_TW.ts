@@ -798,8 +798,8 @@ Signing is only possible with addresses of the type 'legacy'.</source>
         <translation>當任何一個收款金額小於目前的灰塵金額上限時，文字會變紅色。</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>每組輸入可能有 +/- %1 個 satoshi 的誤差。</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>每組輸入可能有 +/- %1 個 digibit 的誤差。</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2343,10 +2343,10 @@ Signing is only possible with addresses of the type 'legacy'.</source>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>指定每一千位元祖(kB)擬真大小的交易所要付出的手續費。
 
-注意: 交易手續費是以位元組為單位來計算。因此當指定手續費為每千位元組 100 個 satoshi 時，對於一筆大小為 500 位元組(一千位元組的一半)的交易，其手續費會只有  50 個 satoshi。</translation>
+注意: 交易手續費是以位元組為單位來計算。因此當指定手續費為每千位元組 100 個 digibit 時，對於一筆大小為 500 位元組(一千位元組的一半)的交易，其手續費會只有  50 個 digibit。</translation>
     </message>
     <message>
         <source>per kilobyte</source>

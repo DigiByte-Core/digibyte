@@ -807,8 +807,8 @@ Somente é possível assinar com endereços do tipo 'legado'.</translation>
         <translation>Este texto fica vermelho se qualquer destinatário receber uma quantidade menor que o limite atual para poeira.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Pode variar +/- %1 satoshi(s) por entrada</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Pode variar +/- %1 digibit(s) por entrada</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2404,10 +2404,10 @@ Somente é possível assinar com endereços do tipo 'legado'.</translation>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Especifique uma taxa personalizada por kB (1.000 bytes) do tamanho virtual da transação.
 
-Nota:  Como a taxa é calculada por byte, uma taxa de "100 satoshis por kB" por uma transação de 500 bytes (metade de 1 kB) teria uma taxa final de apenas 50 satoshis.</translation>
+Nota:  Como a taxa é calculada por byte, uma taxa de "100 digibits por kB" por uma transação de 500 bytes (metade de 1 kB) teria uma taxa final de apenas 50 digibits.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

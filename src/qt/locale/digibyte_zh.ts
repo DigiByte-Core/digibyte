@@ -745,8 +745,8 @@
         <translation>如果任何接收方接收到的金额小于当前粉尘交易的阈值，则此标签将变为红色。</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>每个输入可以改变+/- %1 satoshi(s)。</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>每个输入可以改变+/- %1 digibit(s)。</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -1182,9 +1182,9 @@
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>指定交易虚拟大小的每kB(1,000字节)的自定义费用。
-注意:由于费用是按字节计算的，对于大小为500字节(1 kB的一半)的交易，“每kB 100 satoshis”的费用最终只会产生50 satoshis的费用。</translation>
+注意:由于费用是按字节计算的，对于大小为500字节(1 kB的一半)的交易，“每kB 100 digibits”的费用最终只会产生50 digibits的费用。</translation>
     </message>
     <message>
         <source>Hide</source>

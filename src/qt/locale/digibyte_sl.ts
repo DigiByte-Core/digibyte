@@ -807,8 +807,8 @@ Podpisovanje je možno le s podedovanimi ("legacy") naslovi.</translation>
         <translation>Ta oznaka se spremeni v rdeče, če katerikoli prejemnik prejme znesek, ki je manjši od trenutnega praga za prah.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Se lahko razlikuje +/- %1 satoši(jev) na vhod.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Se lahko razlikuje +/- %1 digibit(jev) na vhod.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2404,10 +2404,10 @@ Podpisovanje je možno le s podedovanimi ("legacy") naslovi.</translation>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Določite poljubno provizijo na kB (1000 bajtov) navidezne velikosti transakcije.
 
-Opomba: Ker se provizija izračuna na bajt, bi provizija "100 satoshijev na kB" za transakcijo velikosti 500 bajtov (polovica enega kB) znašala 50 satošijev.</translation>
+Opomba: Ker se provizija izračuna na bajt, bi provizija "100 digibitjev na kB" za transakcijo velikosti 500 bajtov (polovica enega kB) znašala 50 digibitjev.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

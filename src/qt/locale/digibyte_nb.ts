@@ -761,8 +761,8 @@
         <translation>Denne merkelappen blir rød hvis en mottaker får mindre enn gjeldende støvterskel.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Kan variere +/- %1 satoshi(er) per input.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Kan variere +/- %1 digibit(er) per input.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2190,10 +2190,10 @@
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Spesifiser en tilpasset avgift per kB (1000 byte) av transaksjonens virtuelle størrelse.
 
-Merk: Siden avgiften er beregnet per byte-basis, vil et gebyr på "100 satoshis per kB" for en transaksjonsstørrelse på 500 byte (halvparten av 1 kB) til slutt gi et gebyr på bare 50 satoshis.</translation>
+Merk: Siden avgiften er beregnet per byte-basis, vil et gebyr på "100 digibits per kB" for en transaksjonsstørrelse på 500 byte (halvparten av 1 kB) til slutt gi et gebyr på bare 50 digibits.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

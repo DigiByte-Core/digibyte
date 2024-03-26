@@ -807,8 +807,8 @@ Només és possible firmar amb adreces del tipus "legacy".</translation>
         <translation>Aquesta etiqueta es torna vermella si cap recipient rep un import inferior al llindar de polsim actual.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Pot variar en +/- %1 satoshi(s) per entrada.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Pot variar en +/- %1 digibit(s) per entrada.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2285,10 +2285,10 @@ Això és ideal per a carteres de mode només lectura.</translation>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Especifiqui una comissió personalitzada per kB (1.000 bytes) de la mida virtual de la transacció.
 
-Nota: Com que la comissió es calcula en funció dels bytes, una comissió de "100 satoshis per cada kB" per una transacció de mida 500 bytes (la meitat de 1 kB) comportaria finalment una comissió de la transacció de només 50 satoshis.</translation>
+Nota: Com que la comissió es calcula en funció dels bytes, una comissió de "100 digibits per cada kB" per una transacció de mida 500 bytes (la meitat de 1 kB) comportaria finalment una comissió de la transacció de només 50 digibits.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

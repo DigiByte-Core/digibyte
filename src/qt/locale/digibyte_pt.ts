@@ -785,8 +785,8 @@
         <translation>Esta etiqueta fica vermelha se qualquer destinatário recebe um valor menor que o limite de dinheiro.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Pode variar +/- %1 satoshi(s) por input.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Pode variar +/- %1 digibit(s) por input.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2360,10 +2360,10 @@ ID transação: %1</translation>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Especifique uma taxa personalizada por kB (1.000 bytes) do tamanho virtual da transação.
 
-Nota: como a taxa é calculada por byte, uma taxa de "100 satoshis por kB" por uma transação de 500 bytes (metade de 1 kB) teria uma taxa final de apenas 50 satoshis.</translation>
+Nota: como a taxa é calculada por byte, uma taxa de "100 digibits por kB" por uma transação de 500 bytes (metade de 1 kB) teria uma taxa final de apenas 50 digibits.</translation>
     </message>
     <message>
         <source>per kilobyte</source>

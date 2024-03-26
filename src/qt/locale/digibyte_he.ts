@@ -805,7 +805,7 @@ Signing is only possible with addresses of the type 'legacy'.</source>
         <translation>תווית זו הופכת לאדומה אם מישהו מהנמענים מקבל סכום נמוך יותר מסף האבק הנוכחי.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
         <translation>יכול להשתנות במגמה של +/- %1 סנטושי לקלט.</translation>
     </message>
     <message>
@@ -2394,7 +2394,7 @@ Signing is only possible with addresses of the type 'legacy'.</source>
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>ציינו עמלה מותאמת אישית פר קילובייט (1000 בתים) של הגודל הוירטואלי של העסקה.
 
 לתשומת לבכם: מאחר והעמלה מחושבת על בסיס פר-בית, עמלה של "100 סטושי פר קילובייט" עבור עסקה בגודל 500 בתים (חצי קילובייט) תפיק בסופו של דבר עמלה של 50 סטושי בלבד.</translation>

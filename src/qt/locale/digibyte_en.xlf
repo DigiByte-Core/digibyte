@@ -3579,7 +3579,7 @@ For more information on using this console, type %6.
       <trans-unit id="_msg648">
         <source xml:space="preserve">Specify a custom fee per kB (1,000 bytes) of the transaction&apos;s virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee rate of &quot;100 satoshis per kvB&quot; for a transaction size of 500 virtual bytes (half of 1 kvB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee rate of &quot;100 digibits per kvB&quot; for a transaction size of 500 virtual bytes (half of 1 kvB) would ultimately yield a fee of only 50 digibits.</source>
         <target xml:space="preserve"></target>
         <context-group purpose="location"><context context-type="linenumber">851</context></context-group>
       </trans-unit>

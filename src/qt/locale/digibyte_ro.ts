@@ -745,8 +745,8 @@
         <translation>Această etichetă devine roşie, dacă orice beneficiar primeşte o sumă mai mică decât pragul curent pentru praf.</translation>
     </message>
     <message>
-        <source>Can vary +/- %1 satoshi(s) per input.</source>
-        <translation>Poate varia +/- %1 satoshi pentru fiecare intrare.</translation>
+        <source>Can vary +/- %1 digibit(s) per input.</source>
+        <translation>Poate varia +/- %1 digibit pentru fiecare intrare.</translation>
     </message>
     <message>
         <source>(no label)</source>
@@ -2074,10 +2074,10 @@
     <message>
         <source>Specify a custom fee per kB (1,000 bytes) of the transaction's virtual size.
 
-Note:  Since the fee is calculated on a per-byte basis, a fee of "100 satoshis per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 satoshis.</source>
+Note:  Since the fee is calculated on a per-byte basis, a fee of "100 digibits per kB" for a transaction size of 500 bytes (half of 1 kB) would ultimately yield a fee of only 50 digibits.</source>
         <translation>Specificati o taxa anume pe kB (1000 byte) din marimea virtuala a tranzactiei. 
 
-Nota: Cum taxa este calculata per byte, o taxa de "100 satoshi per kB" pentru o tranzactie de 500 byte (jumatate de kB) va produce o taxa de doar 50 satoshi.</translation>
+Nota: Cum taxa este calculata per byte, o taxa de "100 digibit per kB" pentru o tranzactie de 500 byte (jumatate de kB) va produce o taxa de doar 50 digibit.</translation>
     </message>
     <message>
         <source>per kilobyte</source>
