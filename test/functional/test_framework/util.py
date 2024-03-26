@@ -226,7 +226,7 @@ def ceildiv(a, b):
 
 def get_fee(tx_size, feerate_dgb_kvb):
     """Calculate the fee in DGB given a feerate is DGB/kvB. Reflects CFeeRate::GetFee"""
-    feerate_dbit_kvb = int(feerate_dgb_kvb * Decimal(1e8)) # Fee in digibit/kvb as an int to avoid float precision errors
+    feerate_dbit_kvb = int(feerate_dgb_kvb * Decimal(1e8)) # Fee in dbit/kvb as an int to avoid float precision errors
     target_fee_dbit = ceildiv(feerate_dbit_kvb * tx_size, 1000) # Round calculated fee up to nearest digibit
     return digibit_round(target_fee_dbit / Decimal(1e8)) # Truncate DGB result to nearest digibit
 
