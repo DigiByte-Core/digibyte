@@ -3,6 +3,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('bit' for short).
+//       A digibit is the smallest denomination of DigiByte. It is always written lowercase.
+
 #ifndef DIGIBYTE_QT_DIGIBYTEUNITS_H
 #define DIGIBYTE_QT_DIGIBYTEUNITS_H
 
@@ -37,14 +40,14 @@ public:
     explicit DigiByteUnits(QObject *parent);
 
     /** DigiByte units.
-      @note Source: https://en.digibyte.it/wiki/Units . Please add only sensible ones
+      @note Source: https://dgbwiki.com/index.php?title=DigiByte#Subunits . Please add only sensible ones
      */
     enum Unit
     {
         DGB,
         mDGB,
-        uDGB,
-        SAT
+        µDGB,
+        digibit
     };
 
     enum class SeparatorStyle
@@ -68,7 +71,7 @@ public:
     static QString shortName(int unit);
     //! Longer description
     static QString description(int unit);
-    //! Number of Satoshis (1e-8) per unit
+    //! Number of digibit (1e-8) per unit
     static qint64 factor(int unit);
     //! Number of decimals left
     static int decimals(int unit);
@@ -104,7 +107,7 @@ public:
         return text;
     }
 
-    //! Return maximum number of base units (Satoshis)
+    //! Return maximum number of base units (digibit)
     static CAmount maxMoney();
 
 private:

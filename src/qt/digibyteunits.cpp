@@ -3,6 +3,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('bit' for short).
+//       A digibit is the smallest denomination of DigiByte. It is always written lowercase.
+//       Reference: https://dgbwiki.com/index.php?title=DigiByte#Subunits
+
 #include <qt/digibyteunits.h>
 
 #include <QStringList>
@@ -22,8 +26,8 @@ QList<DigiByteUnits::Unit> DigiByteUnits::availableUnits()
     QList<DigiByteUnits::Unit> unitlist;
     unitlist.append(DGB);
     unitlist.append(mDGB);
-    unitlist.append(uDGB);
-    unitlist.append(SAT);
+    unitlist.append(µDGB);
+    unitlist.append(digibit);
     return unitlist;
 }
 
@@ -33,8 +37,8 @@ bool DigiByteUnits::valid(int unit)
     {
     case DGB:
     case mDGB:
-    case uDGB:
-    case SAT:
+    case µDGB:
+    case digibit:
         return true;
     default:
         return false;
@@ -47,8 +51,8 @@ QString DigiByteUnits::longName(int unit)
     {
     case DGB: return QString("DGB");
     case mDGB: return QString("mDGB");
-    case uDGB: return QString::fromUtf8("µDGB (bits)");
-    case SAT: return QString("Satoshi (sat)");
+    case µDGB: return QString::fromUtf8("µDGB");
+    case digibit: return QString("digibit (bit)");
     default: return QString("???");
     }
 }
@@ -57,8 +61,8 @@ QString DigiByteUnits::shortName(int unit)
 {
     switch(unit)
     {
-    case uDGB: return QString::fromUtf8("bits");
-    case SAT: return QString("sat");
+    case µDGB: return QString::fromUtf8("µDGB");
+    case digibit: return QString("bit");
     default: return longName(unit);
     }
 }
@@ -69,8 +73,8 @@ QString DigiByteUnits::description(int unit)
     {
     case DGB: return QString("DigiBytes");
     case mDGB: return QString("Milli-DigiBytes (1 / 1" THIN_SP_UTF8 "000)");
-    case uDGB: return QString("Micro-DigiBytes (bits) (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case SAT: return QString("Satoshi (sat) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case µDGB: return QString("Micro-DigiBytes (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case digibit: return QString("digibit (bit) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
     default: return QString("???");
     }
 }
@@ -81,8 +85,8 @@ qint64 DigiByteUnits::factor(int unit)
     {
     case DGB: return 100000000;
     case mDGB: return 100000;
-    case uDGB: return 100;
-    case SAT: return 1;
+    case µDGB: return 100;
+    case digibit: return 1;
     default: return 100000000;
     }
 }
@@ -93,8 +97,8 @@ int DigiByteUnits::decimals(int unit)
     {
     case DGB: return 8;
     case mDGB: return 5;
-    case uDGB: return 2;
-    case SAT: return 0;
+    case µDGB: return 2;
+    case digibit: return 0;
     default: return 0;
     }
 }
