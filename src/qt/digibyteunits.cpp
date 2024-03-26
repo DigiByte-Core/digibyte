@@ -27,7 +27,7 @@ QList<DigiByteUnits::Unit> DigiByteUnits::availableUnits()
     unitlist.append(DGB);
     unitlist.append(mDGB);
     unitlist.append(µDGB);
-    unitlist.append(digibit);
+    unitlist.append(dbit);
     return unitlist;
 }
 
@@ -38,7 +38,7 @@ bool DigiByteUnits::valid(int unit)
     case DGB:
     case mDGB:
     case µDGB:
-    case digibit:
+    case dbit:
         return true;
     default:
         return false;
@@ -52,7 +52,7 @@ QString DigiByteUnits::longName(int unit)
     case DGB: return QString("DGB");
     case mDGB: return QString("mDGB");
     case µDGB: return QString::fromUtf8("µDGB");
-    case digibit: return QString("digibit (dbit)");
+    case dbit: return QString("digibit (dbit)");
     default: return QString("???");
     }
 }
@@ -62,7 +62,7 @@ QString DigiByteUnits::shortName(int unit)
     switch(unit)
     {
     case µDGB: return QString::fromUtf8("µDGB");
-    case digibit: return QString("dbit");
+    case dbit: return QString("dbit");
     default: return longName(unit);
     }
 }
@@ -74,7 +74,7 @@ QString DigiByteUnits::description(int unit)
     case DGB: return QString("DigiBytes");
     case mDGB: return QString("Milli-DigiBytes (1 / 1" THIN_SP_UTF8 "000)");
     case µDGB: return QString("Micro-DigiBytes (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case digibit: return QString("digibit (dbit) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case dbit: return QString("digibit (dbit) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
     default: return QString("???");
     }
 }
@@ -86,7 +86,7 @@ qint64 DigiByteUnits::factor(int unit)
     case DGB: return 100000000;
     case mDGB: return 100000;
     case µDGB: return 100;
-    case digibit: return 1;
+    case dbit: return 1;
     default: return 100000000;
     }
 }
@@ -98,7 +98,7 @@ int DigiByteUnits::decimals(int unit)
     case DGB: return 8;
     case mDGB: return 5;
     case µDGB: return 2;
-    case digibit: return 0;
+    case dbit: return 0;
     default: return 0;
     }
 }

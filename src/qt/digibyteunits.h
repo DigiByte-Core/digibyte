@@ -3,7 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a digibit ('dbit' for short).
+// Note: The DigiByte equivalent of a Satoshi, as used by Bitcoin, is a 'digibit' (abbreviated to 'dbit').
 //       A digibit is the smallest denomination of DigiByte. It is always written lowercase.
 //       Reference: https://dgbwiki.com/index.php?title=DigiByte#Subunits
 
@@ -48,7 +48,7 @@ public:
         DGB,
         mDGB,
         µDGB,
-        digibit
+        dbit
     };
 
     enum class SeparatorStyle
