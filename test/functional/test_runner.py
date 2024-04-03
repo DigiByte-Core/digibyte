@@ -87,7 +87,7 @@ EXTENDED_SCRIPTS = [
 BASE_SCRIPTS = [
     # Scripts that are run by default.
     # Longest test should go first, to favor running tests in parallel
-    #'p2p_dandelion.py', # p2p dandelion anonymous tx test
+    'p2p_dandelion.py', # p2p dandelion anonymous tx test
     'wallet_hd.py --legacy-wallet',
     'wallet_hd.py --descriptors',
     'wallet_backup.py --legacy-wallet',

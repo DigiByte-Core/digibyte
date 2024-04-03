@@ -28,7 +28,8 @@ Tests:
 
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.blocktools import COINBASE_MATURITY
+from decimal import Decimal
+from test_framework.blocktools import COINBASE_MATURITY_2
 from test_framework.messages import (
     CTransaction,
     tx_from_hex,
@@ -36,7 +37,9 @@ from test_framework.messages import (
     CInv,
 )
 
-import time                                                                                                         # sleep
+import time
+import logging
+import sys                                                                                                      # sleep
 
 class TestP2PConn(P2PInterface):
     def __init__(self):
@@ -53,7 +56,7 @@ class DandelionTest(DigiByteTestFramework):
         self.num_nodes = 3
         self.extra_args = []
         for i in range(self.num_nodes):
-            self.extra_args.append(["-dandelion=1"]) # ,"-debug=dandelion","-printtoconsole=1"
+            self.extra_args.append(["-dandelion=1", "-debug=dandelion", "-printtoconsole=1"])
 
     def setup_network(self):
         self.setup_nodes()
@@ -84,7 +87,15 @@ class DandelionTest(DigiByteTestFramework):
             self.generatetoaddress(node, 1, w0.getnewaddress(), sync_fun=self.no_op)
 
         # Generate funds for node0
-        self.generate(node0, COINBASE_MATURITY + 1)
+        self.generate(node0, COINBASE_MATURITY_2 + 1)
+
+        # Configure logging
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
+        logger = logging.getLogger('TestFramework')
+
+        # Set transaction fee to 0.1 DGB for all nodes
+        for node in self.nodes:
+            node.settxfee(Decimal('0.1'))
 
         # Tests 1,2,3
         # There is a low probability that one of these tests will fail even if
@@ -99,8 +110,10 @@ class DandelionTest(DigiByteTestFramework):
             tries_left -= 1
             # Test 1: Resistance to active probing
             test_node0.message_count['notfound'] = 0
-            node0_txid = node0.sendtoaddress(node2.getnewaddress(), 1.0)
+            logger.debug(f"Test 1: Sending transaction from node0 to node2")
+            node0_txid = node0.sendtoaddress(node2.getnewaddress(), 1.0, "", "", False, True, 100)  # Set fee_rate to 100 DGB/kB
             node0_tx = tx_from_hex(node0.gettransaction(node0_txid)['hex'])
+            logger.debug(f"Test 1: Sending getdata for the transaction to node0")
             test_node0.send_dandeliontx_getdata(node0_tx.calc_sha256(True))
             time.sleep(1)
 
@@ -108,14 +121,17 @@ class DandelionTest(DigiByteTestFramework):
                 assert(test_node0.message_count['notfound']==1)
                 if not test_1_passed:
                     test_1_passed = True
-                    self.log.info('Success: resistance to active probing')
+                    logger.info('Success: resistance to active probing')
             except AssertionError:
                 if not test_1_passed and tries_left == 0:
-                    self.log.info('Failed: resistance to active probing')
+                    logger.error('Failed: resistance to active probing')
+                    logger.debug(f"Test 1: message_count['notfound'] = {test_node0.message_count['notfound']}")
 
             # Test 2: Loop behavior
             test_node0.message_count['notfound'] = 0
-            time.sleep(3)
+            logger.debug(f"Test 2: Waiting for 5 seconds")
+            time.sleep(5)
+            logger.debug(f"Test 2: Sending getdata for the transaction to node0")
             test_node0.send_dandeliontx_getdata(node0_tx.calc_sha256(True))
             time.sleep(1)
 
@@ -123,24 +139,28 @@ class DandelionTest(DigiByteTestFramework):
                 assert(test_node0.message_count['notfound']==1)
                 if not test_2_passed:
                     test_2_passed = True
-                    self.log.info('Success: loop behavior')
+                    logger.info('Success: loop behavior')
             except AssertionError:
                 if not test_2_passed and tries_left == 0:
-                    self.log.info('Failed: loop behavior')
+                    logger.error('Failed: loop behavior')
+                    logger.debug(f"Test 2: message_count['notfound'] = {test_node0.message_count['notfound']}")
 
             # Test 3: Resistance to black holes
             test_node0.message_count['tx'] = 0
-            time.sleep(44)
+            logger.debug(f"Test 3: Waiting for 45 seconds")
+            time.sleep(45)
+            logger.debug(f"Test 3: Sending getdata for the transaction to node0")
             test_node0.send_dandeliontx_getdata(node0_tx.calc_sha256(True))
             time.sleep(1)
             try:
                 assert(test_node0.message_count['tx']==1)
                 if not test_3_passed:
                     test_3_passed = True
-                    self.log.info('Success: resistance to black holes')
+                    logger.info('Success: resistance to black holes')
             except AssertionError:
                 if not test_3_passed and tries_left == 0:
-                    self.log.info('Failed: resistance to black holes')
+                    logger.error('Failed: resistance to black holes')
+                    logger.debug(f"Test 3: message_count['tx'] = {test_node0.message_count['tx']}")
 
         all_tests_passed = test_1_passed and test_2_passed and test_3_passed
         assert(all_tests_passed)
