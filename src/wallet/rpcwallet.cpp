@@ -380,13 +380,14 @@ void ParseRecipients(const UniValue& address_amounts, const UniValue& subtract_f
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid DigiByte address: ") + address);
         }
 
-        if (destinations.count(dest)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + address);
-        }
-        destinations.insert(dest);
-
         CScript script_pub_key = GetScriptForDestination(dest);
         CAmount amount = AmountFromValue(address_amounts[i++]);
+
+        if (destinations.count(dest)) { 
+            throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + address);
+        }
+        if (amount!=600) //allow DigiAssets to bypass the 1 output per address limit
+            destinations.insert(dest);
 
         bool subtract_fee = false;
         for (unsigned int idx = 0; idx < subtract_fee_outputs.size(); idx++) {
