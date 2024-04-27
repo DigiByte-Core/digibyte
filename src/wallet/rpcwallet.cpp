@@ -384,7 +384,7 @@ void ParseRecipients(const UniValue& address_amounts, const UniValue& subtract_f
             throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + address);
         }
         destinations.insert(dest);
-        
+
         CScript script_pub_key = GetScriptForDestination(dest);
         CAmount amount = AmountFromValue(address_amounts[i++]);
 
