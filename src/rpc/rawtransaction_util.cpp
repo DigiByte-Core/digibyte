@@ -118,13 +118,13 @@ CMutableTransaction ConstructTransaction(const UniValue& inputs_in, const UniVal
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid DigiByte address: ") + name_);
             }
 
-            if (!destinations.insert(destination).second) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + name_);
-            }
-
             CScript scriptPubKey = GetScriptForDestination(destination);
             CAmount nAmount = AmountFromValue(outputs[name_]);
 
+            if ((nAmount!=600) && (!destinations.insert(destination).second)) { //if not a DigiAsset only allow 1 output per asset
+                throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + name_);
+            }
+            
             CTxOut out(nAmount, scriptPubKey);
             rawTx.vout.push_back(out);
         }
