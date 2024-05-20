@@ -50,10 +50,12 @@ CreateWalletDialog::CreateWalletDialog(QWidget* parent) :
         ui->encrypt_wallet_checkbox->setEnabled(!checked);
         ui->blank_wallet_checkbox->setEnabled(!checked);
         ui->disable_privkeys_checkbox->setEnabled(!checked);
+        ui->descriptor_checkbox->setEnabled(!checked);
 
         // The external signer checkbox is only enabled when a device is detected.
         // In that case it is checked by default. Toggling it restores the other
         // options to their default.
+        ui->descriptor_checkbox->setChecked(checked);
         ui->encrypt_wallet_checkbox->setChecked(false);
         ui->disable_privkeys_checkbox->setChecked(checked);
         // The blank check box is ambiguous. This flag is always true for a
@@ -149,6 +151,11 @@ bool CreateWalletDialog::isDisablePrivateKeysChecked() const
 bool CreateWalletDialog::isMakeBlankWalletChecked() const
 {
     return ui->blank_wallet_checkbox->isChecked();
+}
+
+bool CreateWalletDialog::isDescriptorWalletChecked() const
+{
+    return ui->descriptor_checkbox->isChecked();
 }
 
 bool CreateWalletDialog::isExternalSignerChecked() const
