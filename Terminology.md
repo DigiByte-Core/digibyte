@@ -176,22 +176,175 @@ TO BE WRITTEN
 
 Terminology related to DigiByte Blockchain technology and implementations.
 
-## **DigiShield**
+## DigiShield
 
-_DigiShield_ is the name of a hard fork, activated in February 2014, to protect the DigiByte Blockchain against a multi-pool vulnerability, which in essence means pools were able to mine large amount of DigiBytes at a low difficulty. They way it achieves this is by applying a [Difficulty Adjustment](#difficulty-adjustment) between every block rather than every 2016 blocks, which it was originally.
+#### Overview
+**Activation Date:** February 2014.
 
-Not only does this implementation protect against an unfair amount of DigiByte being mined at a low difficulty, but it also makes for a fair mining distribution for the remaining miners once a big amount of [hash power](#hash-power) leaves the network.
+_DigiShield_ is a hard fork implemented to protect the DigiByte blockchain from a multi-pool vulnerability. This vulnerability allowed mining pools to mine large amounts of DigiByte at low difficulty levels.
 
-The dangers imposed when a big amount of hash power leaves a network is best described as a potential temporary freeze of the chain, a result of the difficulty being too high in relation to the remaining hash power provided. In simple terms, miners are far less likely to be able to validate a block and this can result in transactions not being able to be broadcasted on the network until the difficulty comes back down to viable levels.
+#### Purpose
+- **Difficulty Adjustment:** DigiShield adjusts the mining difficulty between every block, instead of every 2016 blocks as originally designed.
+- **Fair Mining Distribution:** It ensures fair mining distribution by preventing an unfair amount of DigiByte from being mined at low difficulty and stabilizing the network when large amounts of hash power leave.
 
-During the time of the implementation of this solution, multi-pool “attacks” was common on many [Proof-of-Work](#pow) chains, which was the reason for the rapid development and deployment of the _DigiShield_ implementation. Once implemented, a reported decrease of unfairly mined coins was in the range of 50-80% less than prior to its implementation.
+#### Technical Details
+- **Protection Against Chain Freeze:** By adjusting difficulty more frequently, DigiShield prevents potential temporary freezes of the blockchain, which can occur if the difficulty remains too high relative to the available hash power.
+- **Reduction in Unfair Mining:** After implementation, there was a reported 50-80% decrease in unfairly mined coins.
+- **Multi-Algorithm Support:** Initially, DigiByte used one algorithm, but with the addition of four more algorithms, DigiShield has evolved into MultiShield to provide protection across all algorithms.
 
-At the time of implementation, DigiByte was using only one algorithm. Since then, 4 more algorithms has been added, and as such, the _DigiShield_ code has been further developed and advanced to provide the same protection on all algorithms. The advanced implementation of _DigiShield_ is now called [MultiShield](#multishield), to better reflect the multi-algo protection.
+#### Historical Context
+- **Multi-Pool Attacks:** At the time of DigiShield’s implementation, multi-pool attacks were common on many Proof of Work chains, prompting the rapid development and deployment of this solution.
 
 ## MultiAlgo
 
-_MultiAlgo_ is the common term for a hard fork, used to describe the DigiByte Core Protocol's utilization of different [PoW](#pow) mining methods to accommodate mining through more hardware types.
+#### Overview
+_MultiAlgo_ is a term used to describe a hard fork in the DigiByte Core Protocol that incorporates multiple Proof of Work (PoW) mining methods. This approach allows for mining through various types of hardware.
 
-Originally, DigiByte launched to the public with one mining algorithm, called Scrypt, which could be used to mine using computer's Central Processing Units, commonly known as CPU's. With the implementation of _MultiAlgo_, the doors were opened to facilitate mining with Graphical Processing Units, commonly known as GPU's, as well as the more recent [ASIC miners](#asic-mining). To facilitate this, 4 more mining algorithms were introduced to the DigiByte Core protocol, SHA-256D, Qubit, Skein & Groestl.
+#### Initial Implementation
+DigiByte was initially launched with a single mining algorithm, **Scrypt**, which was compatible with Central Processing Units (CPUs).
 
-To this day, DigiByte still uses a 5-mining-algorithm approach, although on July 2, 2019, the algorithm known as Groestl was replaced with [OdoCrypt](#odocrypt), in a attempt to combat ASIC miner dominance and centralization.
+#### Expansion to MultiAlgo
+With the introduction of MultiAlgo, DigiByte expanded its mining capabilities to include Graphical Processing Units (GPUs) and ASIC miners. To support this expansion, four additional mining algorithms were integrated into the DigiByte Core Protocol:
+- **SHA-256D**
+- **Qubit**
+- **Skein**
+- **Groestl**
+
+#### Current Usage
+DigiByte continues to utilize a five-algorithm approach. However, on July 2, 2019, the **Groestl** algorithm was replaced with **OdoCrypt** to mitigate ASIC miner dominance and centralization.
+
+## MultiShield
+
+#### Overview
+_MultiShield_ is a critical network upgrade within the DigiByte blockchain ecosystem.
+
+#### Background
+- Originally, DigiShield was designed for single-algorithm blockchains. However, DigiByte's multi-algorithm approach required a more sophisticated solution.
+- MultiShield was introduced on December 10, 2014, at block height 400,000.
+
+#### Real-Time Difficulty Adjustment
+- MultiShield dynamically adjusts mining difficulty across all five DigiByte algorithms.
+- This ensures consistent block timings and protects against sudden hash-power fluctuations.
+
+#### Defense Against Attacks
+- MultiShield guards against 51% attacks, where an attacker controls the majority of hash power.
+- By increasing difficulty for the algorithm that finds a block and decreasing it for others, it prevents single-algorithm takeovers.
+- Even if an attacker controlled significant hash power on one algorithm, MultiShield thwarts their efforts.
+
+#### Impervious to Malicious Hash Power
+- If an ASIC manufacturer inserted a backdoor into miners, MultiShield would prevent that hash rate from affecting block production.
+- Unlike single-algorithm chains, DigiByte remains resilient.
+
+#### Rented Attacks and Global Hash Power
+- Rented attacks are common but ineffective against MultiShield.
+- DigiByte's global hash power dominance, especially in Qubit, Myr-Gr, Skein, and Odocrypt, reinforces its security.
+
+#### Seamless Upgrades
+- MultiShield was the third successful network upgrade executed by DigiByte.
+
+**Summary**
+MultiShield enhances DigiByte's security, stability, and resistance to attacks, making it a robust and forward-thinking blockchain platform.
+
+## DigiSpeed
+
+#### Overview
+_DigiSpeed_ is a pivotal network upgrade within the DigiByte ecosystem that significantly enhanced the blockchain's performance.
+
+#### Background
+- DigiByte initially boasted a fast block-timing of 60 seconds (by UTXO standards).
+- Inspired by research from Microsoft Research Labs and ETH Zurich, the development team aimed to further improve efficiency.
+
+#### The Upgrade
+- On December 4, 2015, at block height 1,430,000, the DigiSpeed upgrade was implemented.
+- Result: Block timing was halved from 30 to 15 seconds, making DigiByte the fastest Proof-of-Work blockchain.
+
+#### Transaction Capacity Boost
+- DigiSpeed introduced a forward-thinking approach: block-size doubling every two years.
+- Purpose: Consistently increase transaction processing capacity.
+- Goal: Maintain scalability and avoid limitations due to insufficient block size.
+
+#### SegWit Integration
+- The block-size doubling aspect was grandfathered into the Segregated Witness (SegWit) upgrade.
+- SegWit provided a 4X weighted capacity increase.
+- Expectations: Further refinement and reimplementation in the future.
+
+**Summary**
+DigiSpeed propelled DigiByte's speed, scalability, and adaptability, positioning it as a cutting-edge blockchain platform.
+
+## Segregated Witness (SegWit)
+
+#### Overview
+**_Segregated Witness (SegWit)_** was activated on the DigiByte blockchain in April 2017. DigiByte was the first major blockchain to implement SegWit, preceding Litecoin by several weeks and Bitcoin by several months.
+
+#### Purpose
+- **Data Optimization:** SegWit optimizes data storage by segregating part of the transaction data.
+- **Transaction Malleability:** It resolves transaction malleability issues, enhancing the security and reliability of transactions.
+
+#### Technical Details
+- **Increased Block Capacity:** By segregating the signatures from the transaction data, SegWit effectively increases the block capacity by approximately 4 times.
+- **Atomic Swaps:** SegWit facilitates safe Atomic Swaps between DigiByte and various other blockchains.
+- **N-Version Bits Upgrade:** The N-Version Bits upgrade was included alongside the SegWit activation.
+
+## Digi-ID
+
+**_Digi-ID_** is a fast and secure authentication method designed to replace standard usernames, passwords, two-factor timed one-time passwords (TOTP), building swipe-cards, and more. It addresses many vulnerabilities associated with traditional security methods, such as SIM-swapping, insecure SMS authentication, and phishing for rolling TOTP codes.
+
+#### Applications
+Digi-ID can be used for both traditional and non-traditional authentication purposes, including:
+- Games
+- Phone/PC applications
+- Building security
+
+It eliminates the need for multiple accounts by authorizing access to different aspects of a website, building, product, or platform with a single Digi-ID. This means users do not need separate logins for personal and company use.
+
+#### Anonymity and Compliance
+Digi-ID ensures anonymity by not storing or transmitting any information via the blockchain. No personally identifiable information is kept within the DigiByte mobile applications, and there is no data-logging. This design facilitates easy compliance with GDPR regulations.
+
+#### Implementation
+Digi-ID has been integrated into the Coinomi application suite and several other authenticator applications. This broad implementation lowers barriers to entry for new users and enhances audience penetration with existing software.
+
+## DigiAssets
+
+**_DigiAssets_** is a platform developed by DigiByte that enables the creation and management of digital assets on the blockchain. These assets can be either fungible or non-fungible and include a wide range of items such as:
+- Tokens
+- Credits
+- Shares
+- Event tickets
+- Coins
+- Trading cards
+- Property deeds or titles
+- Travel tickets
+
+#### Verification and Transparency
+DigiAssets are verified on the DigiByte blockchain, ensuring they are immutable, unforgeable, and transparent in terms of supply and ownership. This verification allows users to trade, send, or receive DigiAssets globally with ease.
+
+#### Capabilities
+DigiAssets offer standard features expected by users, including:
+- The ability to burn asset supply
+- Adding additional metadata to assets using key-value pairs
+
+#### Platform Strengths
+With DigiByte’s on-chain scalability, robust security, and strong decentralization, DigiAssets provides an ideal platform for launching any type of digital asset.
+
+## Dandelion++
+
+**_Dandelion++_** was introduced as the default transaction transmission method in the DigiByte 7.17.2 protocol upgrade. It is fully backwards-compatible with non-Dandelion supporting nodes. Due to the Odocrypt upgrade, all Core Wallets now support Dandelion.
+
+#### Functionality
+Dandelion++ works by initially distributing a transaction to a single connected node, rather than broadcasting it to all connected nodes as in the traditional mempool dispersion method. The individual node then has a 10% chance (determined by a virtual coin flip) to send the transaction to another single node. This process continues until the transaction is eventually broadcasted to the network, resembling the flowering of a dandelion.
+
+#### Privacy Protection
+Dandelion++ enhances user privacy by masking the source IP address from any snooping nodes. This makes it difficult for observers to determine the origin of a transaction with any certainty.
+
+#### Impact on Transaction Speed
+While Dandelion++ does not affect DigiByte's 15-second block timing, transactions may take slightly longer to reach the mempool. For transactions requiring additional speed, Dandelion++ can be disabled on a per-transaction basis.
+
+## Odocrypt
+
+**_Odocrypt_** is a unique mining algorithm used exclusively by the DigiByte blockchain. This exclusivity means there is no hash-power available for rent from third-party services, reinforcing DigiByte's dominance and enhancing network security.
+
+#### Accessibility and Encouragement for Home Users
+The hardware required for Odocrypt mining is not prohibitively expensive, unlike costly ASICs. This affordability encourages home users to participate in mining by downloading the blockchain through the DigiByte Core application. 
+
+#### Documentation and Software
+Odocrypt was launched with comprehensive documentation and software, enabling users to mine both solo and in pools. This focus on hobby mining helps distribute the blockchain more widely and contributes to the overall security of the DigiByte network.
