@@ -15,6 +15,21 @@ Welcome to the DigiByte Blockchain Community Wiki! This space is dedicated to pr
 
 DigiByte is a decentralized blockchain platform designed to provide a secure, fast, and scalable environment for various use cases. Launched on January 10, 2014, with a genesis block that contained the message: "USA TODAY: 10/Jan/2014, Target: Data stolen from up to 110M customers," DigiByte has gained recognition for its commitment to decentralization and security.
 
+## 0.5% Premine
+
+**Overview:**
+The DigiByte blockchain, known for its security and speed, had a minimal premine of 0.5% of its total supply. This premine was strategically allocated to support the initial development and community engagement.
+
+**Details**
+**Premine Amount:** 0.5% of the total DigiByte (DGB) supply, equivalent to 105 million DGB.
+
+- **Allocation:** Core Wallet Development: 0.25% of the premine was dedicated to funding the creation and enhancement of the DigiByte Core Wallet.
+- **Community Distribution:** The remaining 0.25% was distributed to early community members to foster growth and participation.
+- **Launch:** DigiByte was fairly launched with a countdown timer, ensuring transparency and fairness.
+- **No Founders’ Stash:** Unlike many other cryptocurrencies, DigiByte did not reserve any portion of the premine for its founders.
+- **Significance:**
+The premine played a crucial role in establishing the DigiByte ecosystem, ensuring the necessary tools and community support were in place from the outset. This approach helped DigiByte maintain a fair and decentralized distribution of its coins.
+
 ## Key Features
 
 ### 1. Multi-Algo Consensus
