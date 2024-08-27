@@ -1,0 +1,25 @@
+# List of fixed seed nodes for DigiByte testnet
+
+# IP4 Full Nodes added from digibyteseed.com 2023-11-28
+
+198.58.124.101:12026		
+157.245.63.215:12026
+37.59.20.42:12026
+86.144.61.189:12026
+8.214.25.169:12026
+217.72.6.241:12026
+99.233.25.27:12026
+86.144.61.212:12026
+89.217.169.40:12026
+
+
+# Onion / I2P Nodes
+
+# We should add these! Examples:
+
+# 2g5qfdkn2vvcbqhzcyvyiitg4ceukybxklraxjnu7atlhd22gdwywaid.onion:8333
+# 2jmtxvyup3ijr7u6uvu7ijtnojx4g5wodvaedivbv74w4vzntxbrhvad.onion:8333
+# 72l3ucjkuscrbiiepoehuwqgknyzgo7zuix5ty4puwrkyhtmnsga.b32.i2p:0
+# c4gfnttsuwqomiygupdqqqyy5y5emnk5c73hrfvatri67prd7vyq.b32.i2p:0
+# etc.
+

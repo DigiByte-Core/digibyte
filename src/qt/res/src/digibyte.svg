@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generator: Adobe Illustrator 27.1.1, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
+<svg version="1.1"
+	 id="svg2" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" xmlns:svg="http://www.w3.org/2000/svg" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:cc="http://creativecommons.org/ns#" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:dc="http://purl.org/dc/elements/1.1/" inkscape:version="0.48.2 r9819" sodipodi:docname="digibyte-logo-noshadow.svg"
+	 xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 1024 1024"
+	 style="enable-background:new 0 0 1024 1024;" xml:space="preserve">
+<style type="text/css">
+	.st0{fill:#0066CC;}
+	.st1{fill:#002352;}
+	.st2{fill:#FFFFFF;}
+</style>
+<g>
+	<path class="st0" d="M512,0C229.2,0,0,229.3,0,512s229.3,512,512,512s512-229.3,512-512S794.8,0,512,0z"/>
+	<circle class="st1" cx="512" cy="512" r="416"/>
+</g>
+<path class="st2" d="M639.9,303.2l14.8-38.5c1.5-3.9-1.4-8.1-5.5-8.1h-54.9L577,301.7h-24.3l14.2-37c1.5-3.9-1.4-8.1-5.5-8.1h-54.9
+	l-17.3,45.1H317.6c-7.8,0-15.1,4.2-18.9,11L256,388.2h59.8h260.8c10.6,0,21.2,2,31,6c18.9,7.8,41.3,25.4,35.6,65.1
+	c-9.4,66.5-77.1,184.3-224.1,186.1l76-197.9c3.2-8.2-2.9-16.8-11.6-16.8h-102L258.4,733.2c0,0,24.8,3.1,63.7,3.1L309.9,768h56
+	c4.4,0,8.5-2.8,10.1-6.9l10.5-27.4c8.3-0.7,16.6-1.6,25.3-2.6l-14,36.9h56c4.4,0,8.5-2.8,10.1-6.9l16-41.7
+	c92.1-21,191.1-66.7,249.8-163.1C848.4,362,725.1,311.8,639.9,303.2z"/>
+</svg>
