@@ -21,7 +21,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'java-kotlin', 'python', 'javascript' ]
+        include:
+          - language: cpp
+            build-mode: manual
+          - language: java-kotlin
+            build-mode: autobuild
+          - language: python
+            build-mode: autobuild
+          - language: javascript
+            build-mode: autobuild
 
     steps:
       - name: Checkout repository
@@ -32,18 +40,18 @@ jobs:
         uses: github/codeql-action/init@v2
         with:
           languages: ${{ matrix.language }}
-          # Enable if you want to include security-extended queries
-          # queries: security-extended,security-and-quality
+          queries: security-extended,security-and-quality
+          dependency-caching: true
 
       # Autobuild attempts to build any compiled languages (C/C++, C#, Go, or Java)
       # If this step fails, then you should remove it and run the build manually
       - name: Autobuild
-        if: matrix.language != 'cpp'
+        if: matrix.build-mode == 'autobuild'
         uses: github/codeql-action/autobuild@v2
 
       # Manual build steps for C++
       - name: Manual build for C++
-        if: matrix.language == 'cpp'
+        if: matrix.build-mode == 'manual'
         run: |
           # Cache management from your existing workflow
           sudo apt-get update
