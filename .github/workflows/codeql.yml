@@ -25,9 +25,9 @@ jobs:
           - language: cpp
             build-mode: manual
           - language: java-kotlin
-            build-mode: none
+            build-mode: autobuild
           - language: python
-            build-mode: none
+            build-mode: autobuild
           - language: javascript
             build-mode: none
 
