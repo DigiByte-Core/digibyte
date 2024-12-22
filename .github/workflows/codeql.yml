@@ -72,7 +72,7 @@ jobs:
 
           # Configure and Build
           ./autogen.sh
-          CONFIG_SITE=$PWD/depends/x86_64-linux-gnu/share/config.site ./configure --with-bdb --with-sqlite --with-gui=yes --with-zmq
+          CONFIG_SITE=$PWD/depends/x86_64-linux-gnu/share/config.site ./configure --with-incompatible-bdb --with-sqlite --with-gui=yes --with-zmq
           make -j$(nproc)
 
       - name: Perform CodeQL Analysis
