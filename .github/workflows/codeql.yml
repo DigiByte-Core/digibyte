@@ -1,0 +1,72 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "develop", "master" ]
+  pull_request:
+    branches: [ "develop", "master" ]
+  schedule:
+    - cron: '30 1 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp', 'java-kotlin', 'python' ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Initializes the CodeQL tools for scanning
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: ${{ matrix.language }}
+          # Enable if you want to include security-extended queries
+          # queries: security-extended,security-and-quality
+
+      # Autobuild attempts to build any compiled languages (C/C++, C#, Go, or Java)
+      # If this step fails, then you should remove it and run the build manually
+      - name: Autobuild
+        if: matrix.language != 'cpp'
+        uses: github/codeql-action/autobuild@v2
+
+      # Manual build steps for C++
+      - name: Manual build for C++
+        if: matrix.language == 'cpp'
+        run: |
+          # Cache management from your existing workflow
+          sudo apt-get update
+          sudo apt-get install -y build-essential libtool autotools-dev automake pkg-config python3 \
+          libssl-dev bsdmainutils libevent-dev \
+          libboost-dev libboost-system-dev libboost-filesystem-dev libboost-test-dev \
+          libsqlite3-dev \
+          libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools \
+          libqrencode-dev python3-zmq
+
+          # Install BerkeleyDB
+          ./contrib/install_db4.sh `pwd` --enable-cxx
+
+          # Build Dependencies
+          cd depends
+          make -j$(nproc) HOST=x86_64-linux-gnu
+          cd ..
+
+          # Configure and Build
+          ./autogen.sh
+          CONFIG_SITE=$PWD/depends/x86_64-linux-gnu/share/config.site ./configure --with-bdb --with-sqlite --with-gui=yes --with-zmq
+          make -j$(nproc)
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          category: "/language:${{matrix.language}}"
