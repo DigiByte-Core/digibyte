@@ -1967,18 +1967,28 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         bool push = false;
 
         // handle dandelion messages
-        if (!push && inv.IsDandelionMsg()) {
+        if (inv.IsDandelionMsg()) {
             int nSendFlags = (inv.type == MSG_DANDELION_TX ? SERIALIZE_TRANSACTION_NO_WITNESS : 0);
+            // Possibly find the tx in the stempool
             auto txinfo = m_stempool.info(inv.hash);
-            LOCK(pfrom.m_tx_relay->cs_tx_inventory);
-            if (txinfo.tx && !m_connman.isDandelionInbound(&pfrom) && pfrom.m_tx_relay->setDandelionInventoryKnown.count(inv.hash)!=0) {
-                m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::DANDELIONTX, *txinfo.tx));
-            } else if (inv.hash == DANDELION_DISCOVERYHASH) {
-                LogPrint(BCLog::DANDELION, "Peer %d supports Dandelion\n", pfrom.GetId());
-                pfrom.fSupportsDandelion = true;
+
+            // Before deciding to send the transaction, check the embargo:
+            if (m_connman.isTxDandelionEmbargoed(inv.hash)) {
+                // Embargo is in effect => respond with NOTFOUND
+                vNotFound.push_back(inv);
+                continue;
             }
-            push = true;
+
+            // If not embargoed, proceed with normal "send the tx" if we actually have it
+            if (txinfo.tx && pfrom.m_tx_relay->setDandelionInventoryKnown.count(inv.hash) != 0) {
+                m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::DANDELIONTX, *txinfo.tx));
+            } else {
+                // If we do not have it, or it's not known, respond with NOTFOUND
+                vNotFound.push_back(inv);
+            }
+            continue;
         }
+
 
         // handle normal messages
         if (!push && inv.IsGenTxMsg()) {

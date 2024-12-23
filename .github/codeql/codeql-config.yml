@@ -1,0 +1,9 @@
+paths-ignore:
+  - 'depends/**'
+  - 'contrib/**'
+paths-filter:
+  - exclude: 
+      - 'depends/**/*.cpp'
+      - 'depends/**/*.h'
+      - 'contrib/**/*.cpp'
+      - 'contrib/**/*.h'

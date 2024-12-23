@@ -80,7 +80,7 @@ static const int64_t DEFAULT_PEER_CONNECT_TIMEOUT = 60;
 /** Number of file descriptors required for message capture **/
 static const int NUM_FDS_MESSAGE_CAPTURE = 1;
 /** The default setting for dandelion transactions */
-static const bool DEFAULT_DANDELION = false;
+static const bool DEFAULT_DANDELION = true;
 
 static const bool DEFAULT_FORCEDNSSEED = false;
 static const bool DEFAULT_DNSSEED = true;

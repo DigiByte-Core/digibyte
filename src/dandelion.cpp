@@ -65,27 +65,37 @@ bool CConnman::insertDandelionEmbargo(const uint256& hash, std::chrono::microsec
 
 bool CConnman::isTxDandelionEmbargoed(const uint256& hash) const
 {
-    auto pair = mDandelionEmbargo.find(hash);
-    if (pair != mDandelionEmbargo.end()) {
-        return true;
-    } else {
+    auto it = mDandelionEmbargo.find(hash);
+    if (it == mDandelionEmbargo.end()) {
         return false;
     }
+    // Compare current time with stored embargo time
+    auto now = GetTime<std::chrono::microseconds>();
+    if (now < it->second) {
+        // Embargo not yet expired
+        return true;
+    }
+    // Otherwise, embargo expired — best practice is to remove it here or in CheckDandelionEmbargoes()
+    // We'll just return false, so that net_processing can proceed and eventually remove it.
+    return false;
 }
+
 
 bool CConnman::removeDandelionEmbargo(const uint256& hash)
 {
     bool removed = false;
-    for (auto iter = mDandelionEmbargo.begin(); iter != mDandelionEmbargo.end();) {
+    for (auto iter = mDandelionEmbargo.begin(); iter != mDandelionEmbargo.end(); )
+    {
         if (iter->first == hash) {
             iter = mDandelionEmbargo.erase(iter);
             removed = true;
         } else {
-            iter++;
+            ++iter;
         }
     }
     return removed;
 }
+
 
 CNode* CConnman::SelectFromDandelionDestinations() const
 {

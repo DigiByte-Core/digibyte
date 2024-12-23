@@ -28,7 +28,7 @@ Tests:
 
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.blocktools import COINBASE_MATURITY
+from test_framework.blocktools import COINBASE_MATURITY_2
 from test_framework.messages import (
     CTransaction,
     tx_from_hex,
@@ -84,7 +84,7 @@ class DandelionTest(DigiByteTestFramework):
             self.generatetoaddress(node, 1, w0.getnewaddress(), sync_fun=self.no_op)
 
         # Generate funds for node0
-        self.generate(node0, COINBASE_MATURITY + 1)
+        self.generate(node0, COINBASE_MATURITY_2 + 1)
 
         # Tests 1,2,3
         # There is a low probability that one of these tests will fail even if
