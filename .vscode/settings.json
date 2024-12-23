@@ -1,5 +1,6 @@
 {
   "files.associations": {
+    "*.tfvars": "terraform",
     "chrono": "cpp",
     "initializer_list": "cpp",
     "cctype": "cpp",
@@ -25,7 +26,12 @@
     "thread": "cpp",
     "cinttypes": "cpp",
     "typeindex": "cpp",
-    "ios": "cpp"
+    "ios": "cpp",
+    "limits": "cpp",
+    "map": "cpp",
+    "algorithm": "cpp",
+    "stdexcept": "cpp",
+    "__locale": "cpp"
   },
   "cmake.ignoreCMakeListsMissing": true
 }

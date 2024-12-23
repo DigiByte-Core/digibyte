@@ -6,11 +6,11 @@
 #ifndef DIGIBYTE_SUPPORT_LOCKEDPOOL_H
 #define DIGIBYTE_SUPPORT_LOCKEDPOOL_H
 
-#include <stdint.h>
+#include <cstddef>
 #include <list>
 #include <map>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 /**
