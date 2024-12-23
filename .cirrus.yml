@@ -51,7 +51,7 @@ depends_sdk_cache_template: &DEPENDS_SDK_CACHE_TEMPLATE
 compute_credits_template: &CREDITS_TEMPLATE
   # https://cirrus-ci.org/pricing/#compute-credits
   # Only use credits for pull requests to the main repo
-  use_compute_credits: $CIRRUS_REPO_FULL_NAME == 'digibyte/digibyte' && $CIRRUS_PR != ""
+  use_compute_credits: $CIRRUS_REPO_FULL_NAME == 'digibyte-core/digibyte' && $CIRRUS_PR != ""
 
 #task:
 #  name: "Windows"
@@ -153,6 +153,7 @@ task:
 
 task:
   name: '[no depends, sanitizers: fuzzer,address,undefined,integer] [focal]'
+  only_if: $CIRRUS_BRANCH == $CIRRUS_DEFAULT_BRANCH || $CIRRUS_BASE_BRANCH == $CIRRUS_DEFAULT_BRANCH
   << : *GLOBAL_TASK_TEMPLATE
   container:
     image: ubuntu:focal
@@ -201,7 +202,7 @@ task:
 task:
   name: 'macOS 12 native [gui, system sqlite only] [no depends]'
   brew_install_script:
-    - brew install boost libevent qt@5 miniupnpc libnatpmp ccache zeromq qrencode libtool automake gnu-getopt
+    - brew install boost libevent berkeley-db4 qt@5 miniupnpc libnatpmp ccache zeromq qrencode sqlite libtool automake pkg-config gnu-getopt
   << : *GLOBAL_TASK_TEMPLATE
   osx_instance:
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #
+# Copyright (c) 2018-2020 The Bitcoin Core developers
 # Copyright (c) 2018-2020 The DigiByte Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -33,7 +34,7 @@ fi
 
 if [[ ${USE_MEMORY_SANITIZER} == "true" ]]; then
   # Use BDB compiled using install_db4.sh script to work around linking issue when using BDB
-  # from depends. See https://github.com/digibyte/digibyte/pull/18288#discussion_r433189350 for
+  # from depends. See https://github.com/bitcoin/bitcoin/pull/18288#discussion_r433189350 for
   # details.
   DOCKER_EXEC "contrib/install_db4.sh \$(pwd) --enable-umrw CC=clang CXX=clang++ CFLAGS='${MSAN_FLAGS}' CXXFLAGS='${MSAN_AND_LIBCXX_FLAGS}'"
 fi

@@ -115,14 +115,11 @@ brew install berkeley-db@4
 
 ###### Descriptor Wallet Support
 
-sqlite` is required to support for descriptor wallets.
+`sqlite` is required to support for descriptor wallets.
 
 macOS ships with a useable `sqlite` package, meaning you don't need to
 install anything.
 
-``` bash
-brew install sqlite
-```
 ---
 
 #### GUI Dependencies
@@ -146,7 +143,7 @@ brew uninstall qt
 ```
 
 Note: Building with Qt binaries downloaded from the Qt website is not officially supported.
-See the notes in [#7714](https://github.com/digibyte-core/digibyte/issues/7714).
+See the notes in [#7714](https://github.com/bitcoin/bitcoin/issues/7714).
 
 ###### qrencode
 
