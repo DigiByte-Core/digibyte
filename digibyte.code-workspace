@@ -33,7 +33,9 @@
 			"cinttypes": "cpp",
 			"typeindex": "cpp",
 			"ios": "cpp",
-			"*.ipp": "cpp"
+			"*.ipp": "cpp",
+			"stdexcept": "cpp",
+			"utility": "cpp"
 		},
 		"github.copilot.advanced": {
 			"projectDirectories": [
