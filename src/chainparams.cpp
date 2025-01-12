@@ -636,13 +636,15 @@ public:
         consensus.alwaysUpdateDiffChangeTarget = 400; // Block 400,000 MultiShield Hard Fork
         consensus.workComputationChangeTarget = 1430; // Block 1,430,000 DigiSpeed Hard Fork
         consensus.algoSwapChangeTarget = 2000; // Block 9,000,000 Odo PoW Hard Fork
-        consensus.nRuleChangeActivationThreshold = 168; // 70% of 240
-        consensus.nMinerConfirmationWindow = 240; // 1 hour in RegTest
-        consensus.fRbfEnabled = false;
 
+        // Soft fork Threshhold Regtest
+        consensus.nRuleChangeActivationThreshold = 70; // 70% of 100
+        consensus.nMinerConfirmationWindow = 100; // 1 hour in RegTest
+
+
+        consensus.fRbfEnabled = false;
         consensus.nOdoShapechangeInterval = 4; // 1 minute
         consensus.fPowNoRetargeting = true;
-
         consensus.initialTarget[ALGO_ODO] = ArithToUint256(~arith_uint256(0) >> 38); // 4 difficulty
 
         // Old 1% monthly DGB Reward before 15 secon block change
@@ -684,11 +686,11 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
 
-        // Activation of Taproot (BIPs 340-342)
+        // Configure Taproot Test Deployment
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].bit = 2;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 0; // Start at genesis
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 10;
 
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
