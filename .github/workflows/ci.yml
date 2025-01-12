@@ -88,7 +88,7 @@ jobs:
       - name: Configure and Build
         run: |
           ./autogen.sh
-          CONFIG_SITE=$PWD/depends/x86_64-linux-gnu/share/config.site ./configure --with-bdb --with-sqlite --with-gui=yes --with-zmq
+          CONFIG_SITE=$PWD/depends/x86_64-linux-gnu/share/config.site ./configure --with-bdb --with-sqlite --with-gui=no --with-zmq
           make -j$(nproc)
 
       - name: Run Tests
