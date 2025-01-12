@@ -68,3 +68,4 @@ index 5c4e1e45..65bb4e0d 100644
 +if test "x${ZMQ_ASAN}" = "xyes"; then
      CFLAGS="${CFLAGS} -fsanitize=address"
      CXXFLAGS="${CXXFLAGS} -fsanitize=address"
+ 
