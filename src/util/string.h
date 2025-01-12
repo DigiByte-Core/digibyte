@@ -9,12 +9,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <locale>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <cstdint>
 
 [[nodiscard]] inline std::string TrimString(const std::string& str, const std::string& pattern = " \f\n\r\t\v")
 {
