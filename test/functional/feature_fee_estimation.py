@@ -187,7 +187,9 @@ class EstimateFeeTest(DigiByteTestFramework):
         self.stop_nodes()
 
     def transact_and_mine(self, numblocks, mining_node):
-        min_fee = Decimal("0.0002")
+        # Increase minimum fee to 0.00021 DGB to exceed minimum relay fee
+        min_fee = Decimal("0.00021")  # Changed from 0.0002
+        
         # We will now mine numblocks blocks generating on average 100 transactions between each block
         # We shuffle our confirmed txout set before each set of transactions
         # small_txpuzzle_randfee will use the transactions that have inputs already in the chain when possible
