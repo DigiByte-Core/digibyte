@@ -412,6 +412,11 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
 
 const CBlockIndex* GetLastBlockIndexForAlgoFast(const CBlockIndex* pindex, const Consensus::Params& params, int algo)
 {
+    // Validate algo parameter to prevent out-of-bounds array access
+    if (algo < 0 || algo >= NUM_ALGOS_IMPL) {
+        return nullptr;
+    }
+    
     for (; pindex; pindex = pindex->lastAlgoBlocks[algo])
     {
         if (pindex->GetAlgo() != algo)

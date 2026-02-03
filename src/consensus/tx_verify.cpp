@@ -5,6 +5,7 @@
 #include <consensus/tx_verify.h>
 
 #include <chain.h>
+#include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
@@ -180,7 +181,9 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         assert(!coin.IsSpent());
 
         // If prev is coinbase, check that it's matured
-        if (coin.IsCoinBase() && nSpendHeight - coin.nHeight < (coin.nHeight < 145000 ? COINBASE_MATURITY : COINBASE_MATURITY_2)) {
+        // Use consensus parameter instead of hardcoded value for network compatibility
+        const int64_t multiAlgoDiffChangeTarget = Params().GetConsensus().multiAlgoDiffChangeTarget;
+        if (coin.IsCoinBase() && nSpendHeight - coin.nHeight < (coin.nHeight < multiAlgoDiffChangeTarget ? COINBASE_MATURITY : COINBASE_MATURITY_2)) {
             return state.Invalid(TxValidationResult::TX_PREMATURE_SPEND, "bad-txns-premature-spend-of-coinbase",
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }

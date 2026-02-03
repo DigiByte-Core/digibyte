@@ -333,7 +333,11 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // Use memcpy to copy the entire array at once.
     if (pindexNew->pprev) {
         memcpy(pindexNew->lastAlgoBlocks, pindexNew->pprev->lastAlgoBlocks, sizeof(pindexNew->lastAlgoBlocks));
-        pindexNew->lastAlgoBlocks[pindexNew->GetAlgo()] = pindexNew;
+        // Only update lastAlgoBlocks if GetAlgo() returns a valid index (not ALGO_UNKNOWN = -1)
+        int algo = pindexNew->GetAlgo();
+        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
+            pindexNew->lastAlgoBlocks[algo] = pindexNew;
+        }
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
@@ -564,7 +568,11 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         // Use memcpy to copy the entire array at once.
         if (pindex->pprev) {
             memcpy(pindex->lastAlgoBlocks, pindex->pprev->lastAlgoBlocks, sizeof(pindex->lastAlgoBlocks));
-            pindex->lastAlgoBlocks[pindex->GetAlgo()] = pindex;
+            // Only update lastAlgoBlocks if GetAlgo() returns a valid index (not ALGO_UNKNOWN = -1)
+            int algo = pindex->GetAlgo();
+            if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
+                pindex->lastAlgoBlocks[algo] = pindex;
+            }
         }
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
