@@ -366,4 +366,444 @@ The overall security posture of the codebase is reasonable, with most critical p
 
 ---
 
+## Detailed Remediation Plans
+
+### Remediation Plan: DGB-SEC-001 (Integer Overflow - HIGH)
+
+**Objective:** Prevent integer overflow in collateral ratio validation to ensure DigiDollar positions are always properly collateralized.
+
+#### Step 1: Identify All Affected Code Paths
+```bash
+# Search for similar patterns in the codebase
+grep -rn "collateralAmount \* oraclePrice" src/
+grep -rn "ddAmount \* requiredRatio" src/
+```
+
+**Files to modify:**
+- `src/consensus/digidollar_transaction_validation.cpp` (primary)
+- Review any callers of `ValidateCollateralRatio`
+
+#### Step 2: Implement the Fix
+
+**File:** `src/consensus/digidollar_transaction_validation.cpp`
+
+```cpp
+// BEFORE (vulnerable)
+bool ValidateCollateralRatio(CAmount ddAmount, CAmount collateralAmount, CAmount oraclePrice, int requiredRatio) {
+    if (oraclePrice <= 0) return false;
+    if (ddAmount <= 0) return false;
+    if (collateralAmount <= 0) return false;
+
+    CAmount requiredUSDCents = (ddAmount * requiredRatio) / 100;
+    CAmount collateralValueCents = (collateralAmount * oraclePrice) / COIN;
+
+    return collateralValueCents >= requiredUSDCents;
+}
+
+// AFTER (fixed)
+bool ValidateCollateralRatio(CAmount ddAmount, CAmount collateralAmount, CAmount oraclePrice, int requiredRatio) {
+    if (oraclePrice <= 0) return false;
+    if (ddAmount <= 0) return false;
+    if (collateralAmount <= 0) return false;
+    if (requiredRatio <= 0) return false;
+
+    // Use 128-bit arithmetic to prevent overflow
+    // Maximum values: collateralAmount=2.1×10^18, oraclePrice=10^6
+    // Product: 2.1×10^24, which exceeds int64_t max (9.2×10^18)
+    __int128 requiredUSDCents = (static_cast<__int128>(ddAmount) * requiredRatio) / 100;
+    __int128 collateralValueCents = (static_cast<__int128>(collateralAmount) * oraclePrice) / COIN;
+
+    // Sanity check: ensure values are within reasonable bounds after calculation
+    if (requiredUSDCents < 0 || collateralValueCents < 0) {
+        return false;  // Indicates overflow or invalid input
+    }
+
+    return collateralValueCents >= requiredUSDCents;
+}
+```
+
+#### Step 3: Add Unit Tests
+
+**File:** `src/test/digidollar_validation_tests.cpp` (create or modify)
+
+```cpp
+BOOST_AUTO_TEST_CASE(validate_collateral_ratio_overflow_protection)
+{
+    // Test case 1: Normal operation
+    BOOST_CHECK(ValidateCollateralRatio(10000, 100*COIN, 100000, 200)); // $100 DD, 100 DGB, $1 price, 200%
+
+    // Test case 2: Near-maximum collateral (should not overflow)
+    CAmount maxCollateral = MAX_MONEY;  // 2.1×10^18
+    CAmount highPrice = 1000000;        // $10 per DGB
+    // This would overflow without fix: 2.1×10^18 × 10^6 = 2.1×10^24
+    BOOST_CHECK_NO_THROW(ValidateCollateralRatio(1000000, maxCollateral, highPrice, 100));
+
+    // Test case 3: Edge case with zero/negative values
+    BOOST_CHECK(!ValidateCollateralRatio(0, 100*COIN, 100000, 200));
+    BOOST_CHECK(!ValidateCollateralRatio(10000, 0, 100000, 200));
+    BOOST_CHECK(!ValidateCollateralRatio(10000, 100*COIN, 0, 200));
+    BOOST_CHECK(!ValidateCollateralRatio(10000, 100*COIN, 100000, 0));
+}
+```
+
+#### Step 4: Verification Steps
+
+```bash
+# Build the project
+make -j$(nproc)
+
+# Run specific tests
+./src/test/test_digibyte --run_test=digidollar_validation_tests
+
+# Run all related tests
+./src/test/test_digibyte --run_test=digidollar*
+```
+
+#### Step 5: Code Review Checklist
+- [ ] All arithmetic operations using `CAmount` with large multipliers use `__int128`
+- [ ] Input validation rejects zero/negative values
+- [ ] Unit tests cover overflow scenarios
+- [ ] No regression in existing functionality
+
+**Timeline:** 1-2 days implementation, 1 day testing
+
+---
+
+### Remediation Plan: DGB-SEC-002 (Division by Zero - MEDIUM)
+
+**Objective:** Prevent division by zero in DCA health calculation when DD supply is very low.
+
+#### Step 1: Implement the Fix
+
+**File:** `src/consensus/dca.cpp`
+
+```cpp
+// BEFORE (vulnerable)
+if (collateralValueCents > maxSafeDividend) {
+    healthCalculation = (collateralValueCents / 1000) * 100 / (totalDD / 1000);
+} else {
+    healthCalculation = (collateralValueCents * 100) / totalDD;
+}
+
+// AFTER (fixed)
+if (collateralValueCents > maxSafeDividend) {
+    // Ensure denominator is at least 1 to prevent division by zero
+    // This occurs when totalDD < 1000 (less than $10 in circulation)
+    CAmount scaledDD = totalDD / 1000;
+    if (scaledDD == 0) {
+        // With very low DD supply and high collateral, health is effectively unlimited
+        // Cap at maximum reasonable value (30000% = 300x collateralized)
+        healthCalculation = 30000;
+    } else {
+        healthCalculation = (collateralValueCents / 1000) * 100 / scaledDD;
+    }
+} else {
+    healthCalculation = (collateralValueCents * 100) / totalDD;
+}
+```
+
+#### Step 2: Add Unit Tests
+
+```cpp
+BOOST_AUTO_TEST_CASE(calculate_system_health_low_dd_supply)
+{
+    // Test case 1: Normal operation
+    int health = DynamicCollateralAdjustment::CalculateSystemHealth(1000*COIN, 100000, 100000);
+    BOOST_CHECK(health > 0);
+
+    // Test case 2: Very low DD supply (500 cents = $5.00)
+    // Should not crash with division by zero
+    CAmount lowDD = 500;  // $5 in circulation
+    CAmount highCollateral = MAX_MONEY / 2;  // Trigger overflow protection path
+    BOOST_CHECK_NO_THROW(
+        DynamicCollateralAdjustment::CalculateSystemHealth(highCollateral, lowDD, 100000)
+    );
+
+    // Test case 3: Minimum DD supply (1 cent)
+    BOOST_CHECK_NO_THROW(
+        DynamicCollateralAdjustment::CalculateSystemHealth(100*COIN, 1, 100000)
+    );
+}
+```
+
+#### Step 3: Verification
+
+```bash
+./src/test/test_digibyte --run_test=dca_tests
+```
+
+**Timeline:** 0.5 day implementation, 0.5 day testing
+
+---
+
+### Remediation Plan: DGB-SEC-003 (Oracle Timestamp Weakness - MEDIUM)
+
+**Objective:** Prevent oracle price manipulation through timestamp abuse and add rate limiting.
+
+#### Step 1: Define Constants
+
+**File:** `src/oracle/bundle_manager.h`
+
+```cpp
+// Add to class or namespace
+static constexpr int64_t ORACLE_MAX_FUTURE_TIMESTAMP = 300;    // 5 minutes
+static constexpr int64_t ORACLE_MIN_UPDATE_INTERVAL = 60;      // 1 minute cooldown
+static constexpr int64_t ORACLE_MAX_AGE = 3600;                // 1 hour max age
+```
+
+#### Step 2: Implement Validation
+
+**File:** `src/oracle/bundle_manager.cpp`
+
+```cpp
+bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
+{
+    LogPrintf("Oracle: AddOracleMessage called for oracle_id=%d, price=%llu, timestamp=%d\n",
+             message.oracle_id, message.price_micro_usd, message.timestamp);
+
+    if (!enabled) {
+        LogPrintf("Oracle: Manager not enabled, rejecting message\n");
+        return false;
+    }
+
+    // NEW: Timestamp reasonableness validation
+    int64_t currentTime = GetTime();
+    
+    // Reject messages with far-future timestamps
+    if (message.timestamp > currentTime + ORACLE_MAX_FUTURE_TIMESTAMP) {
+        LogPrintf("Oracle: Rejecting message with future timestamp from oracle %d "
+                  "(message: %d, current: %d, max_future: %d)\n",
+                  message.oracle_id, message.timestamp, currentTime, 
+                  currentTime + ORACLE_MAX_FUTURE_TIMESTAMP);
+        return false;
+    }
+    
+    // Reject stale messages
+    if (message.timestamp < currentTime - ORACLE_MAX_AGE) {
+        LogPrintf("Oracle: Rejecting stale message from oracle %d (age: %d seconds)\n",
+                  message.oracle_id, currentTime - message.timestamp);
+        return false;
+    }
+
+    if (!IsValidOracleMessage(message)) {
+        LogPrintf("Oracle: Invalid oracle message from oracle %d\n", message.oracle_id);
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+
+    // NEW: Rate limiting - enforce minimum interval between updates
+    auto it = pending_messages.find(message.oracle_id);
+    if (it != pending_messages.end()) {
+        int64_t timeSinceLastUpdate = message.timestamp - it->second.timestamp;
+        
+        // Reject messages with timestamps earlier than or equal to existing message
+        // This prevents replay attacks and out-of-order timestamp manipulation
+        if (timeSinceLastUpdate <= 0) {
+            LogPrintf("Oracle: Rejecting message with non-increasing timestamp from oracle %d "
+                      "(new: %d, existing: %d)\n",
+                      message.oracle_id, message.timestamp, it->second.timestamp);
+            return false;
+        }
+        
+        // Enforce minimum interval between updates
+        if (timeSinceLastUpdate < ORACLE_MIN_UPDATE_INTERVAL) {
+            LogPrintf("Oracle: Rate limiting oracle %d (interval: %d < %d required)\n",
+                      message.oracle_id, timeSinceLastUpdate, ORACLE_MIN_UPDATE_INTERVAL);
+            return false;
+        }
+    }
+
+    // ... rest of existing implementation ...
+}
+```
+
+#### Step 3: Add Unit Tests
+
+```cpp
+BOOST_AUTO_TEST_CASE(oracle_timestamp_validation)
+{
+    OracleBundleManager manager;
+    manager.Enable();
+
+    // Test 1: Normal timestamp
+    COraclePriceMessage validMsg;
+    validMsg.oracle_id = 1;
+    validMsg.price_micro_usd = 100000;
+    validMsg.timestamp = GetTime();
+    // Sign the message...
+    BOOST_CHECK(manager.AddOracleMessage(validMsg));
+
+    // Test 2: Far-future timestamp (should be rejected)
+    COraclePriceMessage futureMsg;
+    futureMsg.oracle_id = 2;
+    futureMsg.price_micro_usd = 100000;
+    futureMsg.timestamp = GetTime() + 3600;  // 1 hour in future
+    BOOST_CHECK(!manager.AddOracleMessage(futureMsg));
+
+    // Test 3: Rate limiting - rapid updates should be rejected
+    COraclePriceMessage rapidMsg;
+    rapidMsg.oracle_id = 1;
+    rapidMsg.price_micro_usd = 110000;
+    rapidMsg.timestamp = GetTime() + 10;  // Only 10 seconds later
+    BOOST_CHECK(!manager.AddOracleMessage(rapidMsg));
+
+    // Test 4: Out-of-order timestamp (earlier than existing) should be rejected
+    COraclePriceMessage backwardsMsg;
+    backwardsMsg.oracle_id = 1;
+    backwardsMsg.price_micro_usd = 90000;
+    backwardsMsg.timestamp = GetTime() - 10;  // 10 seconds BEFORE the first message
+    BOOST_CHECK(!manager.AddOracleMessage(backwardsMsg));
+
+    // Test 5: Same timestamp as existing message should be rejected
+    COraclePriceMessage sameTimeMsg;
+    sameTimeMsg.oracle_id = 1;
+    sameTimeMsg.price_micro_usd = 95000;
+    sameTimeMsg.timestamp = validMsg.timestamp;  // Exact same timestamp
+    BOOST_CHECK(!manager.AddOracleMessage(sameTimeMsg));
+
+    // Test 6: Valid update after cooldown period
+    COraclePriceMessage validUpdate;
+    validUpdate.oracle_id = 1;
+    validUpdate.price_micro_usd = 105000;
+    validUpdate.timestamp = validMsg.timestamp + 120;  // 2 minutes later (> 60s cooldown)
+    BOOST_CHECK(manager.AddOracleMessage(validUpdate));
+}
+```
+
+**Timeline:** 1 day implementation, 1 day testing
+
+---
+
+### Remediation Plan: DGB-SEC-004 (Unbounded Script Execution - LOW)
+
+**Objective:** Add operation limits to DD script execution for defense-in-depth.
+
+#### Step 1: Implement Operation Counting
+
+**File:** `src/consensus/digidollar_transaction_validation.cpp`
+
+```cpp
+// Add constant at top of file
+static const int MAX_DD_SCRIPT_OPS = 201;  // Same as MAX_OPS_PER_SCRIPT
+
+ScriptExecutionResult ExecuteDDScript(const CScript& script) {
+    ScriptExecutionResult result;
+    result.success = false;
+    result.stackSize = 0;
+
+    // Empty script is valid and succeeds
+    if (script.empty()) {
+        result.success = true;
+        result.stackSize = 0;
+        return result;
+    }
+
+    // NEW: Operation counter for DoS protection
+    int nOpCount = 0;
+    
+    std::vector<std::vector<unsigned char>> stack;
+
+    try {
+        CScript::const_iterator pc = script.begin();
+        while (pc != script.end()) {
+            // NEW: Enforce operation limit
+            if (++nOpCount > MAX_DD_SCRIPT_OPS) {
+                LogPrint(BCLog::DIGIDOLLAR, "DD Script: Exceeded max operations (%d)\n", MAX_DD_SCRIPT_OPS);
+                result.success = false;
+                return result;
+            }
+
+            opcodetype opcode;
+            if (!script.GetOp(pc, opcode)) {
+                break;
+            }
+            // ... rest of switch statement ...
+        }
+        // ... rest of function ...
+    } catch (...) {
+        result.success = false;
+    }
+
+    return result;
+}
+```
+
+**Timeline:** 0.5 day implementation, 0.5 day testing
+
+---
+
+### Remediation Plan: DGB-SEC-005 (Verbose Logging - INFORMATIONAL)
+
+**Objective:** Change unconditional logging to category-based logging for production deployments.
+
+#### Step 1: Modify Logging Calls
+
+**File:** `src/consensus/tx_verify.cpp`
+
+```cpp
+// BEFORE
+if (IsDigiDollarTransaction(tx)) {
+    LogPrintf("CheckTxInputs: DigiDollar tx %s - nValueIn=%s, value_out=%s, fee=%s\n",
+             tx.GetHash().ToString(), FormatMoney(nValueIn), FormatMoney(value_out), FormatMoney(txfee_aux));
+    for (size_t i = 0; i < tx.vout.size(); i++) {
+        LogPrintf("  vout[%d]: %s\n", i, FormatMoney(tx.vout[i].nValue));
+    }
+}
+
+// AFTER
+if (IsDigiDollarTransaction(tx)) {
+    LogPrint(BCLog::DIGIDOLLAR, "CheckTxInputs: DigiDollar tx %s - nValueIn=%s, value_out=%s, fee=%s\n",
+             tx.GetHash().ToString(), FormatMoney(nValueIn), FormatMoney(value_out), FormatMoney(txfee_aux));
+    for (size_t i = 0; i < tx.vout.size(); i++) {
+        LogPrint(BCLog::DIGIDOLLAR, "  vout[%d]: %s\n", i, FormatMoney(tx.vout[i].nValue));
+    }
+}
+```
+
+#### Step 2: Search for Other Instances
+
+```bash
+# Find all LogPrintf in DigiDollar-related files
+grep -rn "LogPrintf.*DigiDollar\|LogPrintf.*DD" src/
+grep -rn "LogPrintf" src/consensus/digidollar* src/digidollar/
+```
+
+**Timeline:** 0.5 day implementation
+
+---
+
+## Implementation Priority Matrix
+
+| Phase | Issue | Effort | Risk if Unpatched | Dependencies |
+|-------|-------|--------|-------------------|--------------|
+| **Phase 1 (Immediate)** | DGB-SEC-001 | 2 days | CRITICAL | None |
+| **Phase 2 (Short-term)** | DGB-SEC-002 | 1 day | MEDIUM | None |
+| **Phase 2 (Short-term)** | DGB-SEC-003 | 2 days | MEDIUM | None |
+| **Phase 3 (Long-term)** | DGB-SEC-004 | 1 day | LOW | None |
+| **Phase 3 (Long-term)** | DGB-SEC-005 | 0.5 day | MINIMAL | None |
+
+**Total Estimated Effort:** 6.5 days
+
+## Testing Strategy
+
+### Pre-Deployment Testing
+1. **Unit Tests**: Run all new and existing unit tests
+2. **Integration Tests**: Test DigiDollar mint/transfer/redeem flows with edge case values
+3. **Fuzz Testing**: Use existing fuzz infrastructure with crafted inputs targeting overflow conditions
+4. **Regression Testing**: Ensure no change in behavior for normal operations
+
+### Staging/Testnet Deployment
+1. Deploy to testnet first
+2. Monitor for 1 week minimum
+3. Conduct adversarial testing with crafted transactions
+4. Verify logging behavior under high transaction volume
+
+### Production Deployment
+1. Coordinate release with DigiByte Core team
+2. Prepare security advisory (if needed for HIGH severity)
+3. Monitor network for anomalies post-deployment
+
+---
+
 *Report generated as part of security audit process. All findings require verification in a controlled test environment before applying fixes to production.*
