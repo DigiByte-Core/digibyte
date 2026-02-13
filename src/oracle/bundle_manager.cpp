@@ -32,6 +32,29 @@ int32_t GetBestHeight() {
     return 0;
 }
 
+/**
+ * Verify an oracle price message against the chain-configured oracle pubkey.
+ *
+ * SECURITY (DGB-SEC-002): Oracle messages arrive via P2P with an embedded pubkey
+ * that is attacker-controlled. We must never verify the signature against that
+ * embedded key — instead, look up the trusted pubkey from chainparams by oracle_id,
+ * rebind it onto the message, and then verify the Phase 2 Schnorr signature.
+ *
+ * @param message  The oracle price message to verify
+ * @return true if the message's signature is valid against the chainparams pubkey
+ */
+static bool VerifyOracleMessageWithChainparamsKey(const COraclePriceMessage& message)
+{
+    const CChainParams& params = Params();
+    const OracleNodeInfo* oracle_config = params.GetOracleNode(message.oracle_id);
+    if (!oracle_config) {
+        return false;
+    }
+    COraclePriceMessage bound_msg = message;
+    bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
+    return bound_msg.VerifyPhase2();
+}
+
 //! Global oracle bundle manager instance
 std::unique_ptr<OracleBundleManager> g_oracle_bundle_manager;
 
@@ -1042,36 +1065,12 @@ bool OracleBundleManager::IsValidOracleMessage(const COraclePriceMessage& messag
         // Field validation (timestamp freshness, price range) via IsValid()
         if (!message.IsValid()) return false;
 
-        // SECURITY FIX (DGB-SEC-002): Bind authorized pubkey from chainparams
-        // before signature verification, same as Phase 2. Previously this path
-        // called message.VerifyPhase2() using the message's embedded pubkey,
-        // allowing an attacker to forge messages with their own keypair.
-        const CChainParams& params = Params();
-        const OracleNodeInfo* oracle_config = params.GetOracleNode(message.oracle_id);
-        if (!oracle_config) {
-            return false;
-        }
-        COraclePriceMessage bound_msg = message;
-        bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
-        return bound_msg.VerifyPhase2();
+        // SECURITY FIX (DGB-SEC-002): Verify against chainparams pubkey
+        return VerifyOracleMessageWithChainparamsKey(message);
     }
 
-    // Phase Two (min_oracle_count > 1): Use Phase 2 signature hash
-    // Verify oracle ID is in valid range and matches chainparams
-    const CChainParams& params = Params();
-    const OracleNodeInfo* oracle_config = params.GetOracleNode(message.oracle_id);
-    if (!oracle_config) {
-        return false;
-    }
-
-    // SECURITY: Bind pubkey from chainparams before verification.
-    // The message may contain an attacker-supplied pubkey — we must verify
-    // against the authorized key, not whatever was deserialized from P2P.
-    COraclePriceMessage bound_msg = message;
-    bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
-
-    // Verify Phase 2 Schnorr signature against chainparams pubkey
-    return bound_msg.VerifyPhase2();
+    // Phase Two (min_oracle_count > 1): Verify against chainparams pubkey
+    return VerifyOracleMessageWithChainparamsKey(message);
 }
 
 std::vector<uint32_t> OracleBundleManager::GetActiveOraclesForEpoch(int32_t epoch) const
@@ -1360,18 +1359,15 @@ bool OracleDataValidator::ValidateOracleMessage(const COraclePriceMessage& messa
         return false;
     }
 
-    // Verify oracle is authorized
+    // Verify oracle is authorized and active
     const CChainParams& chainparams = Params();
     const OracleNodeInfo* oracle_config = chainparams.GetOracleNode(message.oracle_id);
     if (!oracle_config || !oracle_config->is_active) {
         return false;
     }
 
-    // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification.
-    // Never verify against the message's embedded pubkey — it may be attacker-supplied.
-    COraclePriceMessage bound_msg = message;
-    bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
-    return bound_msg.VerifyPhase2();
+    // SECURITY (DGB-SEC-002): Verify against chainparams pubkey
+    return VerifyOracleMessageWithChainparamsKey(message);
 }
 
 bool OracleDataValidator::ValidateOracleBundle(const COracleBundle& bundle, int32_t epoch, const Consensus::Params& params)
@@ -1465,17 +1461,9 @@ bool OracleBundleManager::ValidatePhaseOneBundle(const COracleBundle& bundle, co
 
     // Phase One: Schnorr signature verification (if signature is present)
     if (!msg.schnorr_sig.empty()) {
-        // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification
-        const CChainParams& chainparams = Params();
-        const OracleNodeInfo* oracle_config = chainparams.GetOracleNode(msg.oracle_id);
-        if (!oracle_config) {
-            LogPrintf("Oracle: Phase One oracle %d not found in chainparams\n", msg.oracle_id);
-            return false;
-        }
-        COraclePriceMessage bound_msg = msg;
-        bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
-        if (!bound_msg.VerifyPhase2()) {
-            LogPrintf("Oracle: Phase One signature verification failed\n");
+        // SECURITY (DGB-SEC-002): Verify against chainparams pubkey
+        if (!VerifyOracleMessageWithChainparamsKey(msg)) {
+            LogPrintf("Oracle: Phase One signature verification failed for oracle %d\n", msg.oracle_id);
             return false;
         }
     }
@@ -1526,16 +1514,8 @@ bool OracleBundleManager::ValidatePhaseTwoBundle(const COracleBundle& bundle, co
 
         // Verify Schnorr signature using Phase 2 hash (oracle_id + price + timestamp only)
         if (!msg.schnorr_sig.empty()) {
-            // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification
-            const CChainParams& chainparams_p2 = Params();
-            const OracleNodeInfo* oracle_config_p2 = chainparams_p2.GetOracleNode(msg.oracle_id);
-            if (!oracle_config_p2) {
-                LogPrintf("Oracle: Phase Two oracle %d not found in chainparams\n", msg.oracle_id);
-                continue;
-            }
-            COraclePriceMessage bound_msg = msg;
-            bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config_p2->pubkey);
-            if (!bound_msg.VerifyPhase2()) {
+            // SECURITY (DGB-SEC-002): Verify against chainparams pubkey
+            if (!VerifyOracleMessageWithChainparamsKey(msg)) {
                 LogPrintf("Oracle: Phase Two signature verification failed for oracle %d\n", msg.oracle_id);
                 continue;  // Skip message with invalid signature
             }
