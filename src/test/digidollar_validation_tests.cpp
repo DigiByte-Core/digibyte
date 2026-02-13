@@ -454,24 +454,43 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_valid_basic_mint, DigiDollarValidationTe
     int64_t lockBlocks = 30 * 24 * 60 * 4; // 30 days
     CAmount requiredCollateral = (static_cast<uint64_t>(ddAmount) * COIN * 500 * 100) / mockOraclePrice; // 500% for 30 days
 
-    // Add collateral output (P2TR with proper lock script)
+    // Add collateral output (P2TR with NUMS internal key for security)
     DigiDollar::MintParams params;
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(requiredCollateral, collateralScript);
+
+    // DD OP_RETURN with owner pubkey (required for NUMS verification)
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)  // lockTier 1 = 30 days
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(requiredCollateral, collateralScript);
 
     // Add DD token output (0 DGB value)
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
+
+    // Debug: check what the validator calculates
+    CAmount calcRequired = DigiDollar::CalculateRequiredCollateral(ddAmount, params.lockHeight, validationContext);
+    BOOST_TEST_MESSAGE("DEBUG: ddAmount=" + std::to_string(ddAmount) +
+        " lockHeight=" + std::to_string(params.lockHeight) +
+        " oraclePrice=" + std::to_string(mockOraclePrice) +
+        " calcRequired=" + std::to_string(calcRequired) +
+        " testProvided=" + std::to_string(requiredCollateral));
 
     // This should pass when implementation is complete
     bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
@@ -502,15 +521,26 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_insufficient_collateral, DigiDollarValid
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(insufficientCollateral, collateralScript);
+
+    // DD OP_RETURN with owner pubkey (required for NUMS verification)
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(insufficientCollateral, collateralScript);
 
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
@@ -724,15 +754,26 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_dca_multiplier_adjustment, DigiDollarVal
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(adjustedCollateral, collateralScript);
+
+    // DD OP_RETURN with owner pubkey (required for NUMS verification)
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(adjustedCollateral, collateralScript);
 
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
@@ -748,7 +789,7 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_dca_multiplier_adjustment, DigiDollarVal
 
     // Test with original 500% collateral - should fail
     CAmount originalCollateral = (static_cast<uint64_t>(ddAmount) * COIN * 500 * 100) / mockOraclePrice;
-    mtx.vout[0].nValue = originalCollateral;
+    mtx.vout[1].nValue = originalCollateral;
     CTransaction tx2(mtx);
     TxValidationState state2;
 
@@ -852,15 +893,26 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_dust_collateral, DigiDollarValidationTes
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(100, collateralScript); // Below dust threshold
+
+    // DD OP_RETURN with owner pubkey (required for NUMS verification)
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(100, collateralScript); // Below dust threshold
 
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
@@ -887,15 +939,25 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_edge_case_exact_minimum, DigiDollarValid
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(exactCollateral, collateralScript);
+
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(exactCollateral, collateralScript);
 
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
@@ -928,15 +990,25 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_edge_case_exact_maximum, DigiDollarValid
     params.ddAmount = ddAmount;
     params.lockHeight = mockHeight + lockBlocks;
     params.ownerKey = testXOnlyKey;
-    params.internalKey = testXOnlyKey;
+    params.internalKey = DigiDollar::GetCollateralNUMSKey();
     params.oracleKeys = DigiDollar::GetOracleKeys(15);
 
     CScript collateralScript = DigiDollar::CreateCollateralP2TR(params);
-    mtx.vout.resize(2);
-    mtx.vout[0] = CTxOut(requiredCollateral, collateralScript);
+
+    CScript opReturn = CScript() << OP_RETURN
+                                 << std::vector<unsigned char>{'D', 'D'}
+                                 << CScriptNum(1)
+                                 << CScriptNum(ddAmount)
+                                 << CScriptNum(params.lockHeight)
+                                 << CScriptNum(1)
+                                 << std::vector<unsigned char>(testXOnlyKey.begin(), testXOnlyKey.end());
+
+    mtx.vout.resize(3);
+    mtx.vout[0] = CTxOut(0, opReturn);
+    mtx.vout[1] = CTxOut(requiredCollateral, collateralScript);
 
     CScript ddScript = DigiDollar::CreateDigiDollarP2TR(testXOnlyKey, ddAmount);
-    mtx.vout[1] = CTxOut(0, ddScript);
+    mtx.vout[2] = CTxOut(0, ddScript);
 
     CTransaction tx(mtx);
     TxValidationState state;
@@ -3208,8 +3280,10 @@ BOOST_FIXTURE_TEST_CASE(bug4_collateral_release_partial, DigiDollarValidationTes
 
     bool result = DigiDollar::ValidateCollateralReleaseAmount(tx, ctxWithCoins, ddBurned, state);
 
-    // Should PASS: burning half DD, releasing half collateral
-    BOOST_CHECK_MESSAGE(result, "Partial collateral release should pass, got: " + state.GetRejectReason());
+    // SECURITY [T2-03]: Partial burn now REJECTED — collateral UTXO is indivisible,
+    // excess becomes miner fee enabling collateral theft. Must burn full DD amount.
+    BOOST_CHECK_MESSAGE(!result, "Partial collateral release should now be rejected [T2-03 fix]");
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-collateral-release-partial-burn");
 }
 
 BOOST_FIXTURE_TEST_CASE(bug4_collateral_release_nullptr_fallback, DigiDollarValidationTestSetup)

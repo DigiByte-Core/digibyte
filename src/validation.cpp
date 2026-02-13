@@ -1839,13 +1839,11 @@ CAmount GetOraclePriceForTransaction(const CTransaction& tx, int nHeight) {
         }
     }
 
-    // Fallback to safe default if oracle system unavailable
-    // $0.0065 per DGB = 6500 micro-USD (reasonable testnet default)
-    static const CAmount FALLBACK_ORACLE_PRICE_MICRO_USD = 6500;
-    LogPrintf("DigiDollar: Oracle system unavailable, using fallback price: %lld micro-USD ($%.6f)\n",
-              FALLBACK_ORACLE_PRICE_MICRO_USD, static_cast<double>(FALLBACK_ORACLE_PRICE_MICRO_USD) / 1000000.0);
-
-    return FALLBACK_ORACLE_PRICE_MICRO_USD;
+    // SECURITY: No fallback price — oracle failure must HALT minting, not use a guess.
+    // A hardcoded fallback bypasses oracle consensus entirely.
+    // Callers (mempool, ConnectBlock) must handle price=0 by rejecting DD transactions.
+    LogPrintf("DigiDollar: Oracle system unavailable, returning 0 (no fallback price)\n");
+    return 0;
 }
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)

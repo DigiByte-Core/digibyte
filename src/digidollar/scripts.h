@@ -25,8 +25,9 @@ namespace DigiDollar {
  * ensures that key-path spending is impossible — the owner MUST use a
  * script-path spend (which enforces CLTV timelocks).
  *
- * The point is: lift_x(SHA256("DigiDollar/CollateralNUMS"))
- * Nobody knows the discrete logarithm of this point.
+ * The point is: lift_x(SHA256(serialize_uncompressed(G)))
+ * where G is the secp256k1 generator point (04||Gx||Gy).
+ * This is the BIP-341 standard NUMS point. Nobody knows its discrete logarithm.
  *
  * CRITICAL: Using the owner's pubkey as internal key would allow key-path
  * spending that bypasses ALL script conditions including CLTV timelocks.
