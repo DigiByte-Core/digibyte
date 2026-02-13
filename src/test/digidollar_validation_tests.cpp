@@ -342,8 +342,14 @@ BOOST_FIXTURE_TEST_CASE(transaction_validation_mint_tx, DigiDollarValidationTest
     CTransaction tx(mtx);
     TxValidationState state;
 
-    BOOST_CHECK(DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state));
-    BOOST_CHECK(state.IsValid());
+    bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
+    BOOST_CHECK_MESSAGE(result, "[transaction_validation_mint_tx] Expected valid, got reject: " + state.GetRejectReason()
+        + " | collateralScript.size()=" + std::to_string(collateralScript.size())
+        + " ddScript.size()=" + std::to_string(ddScript.size())
+        + " requiredCollateral=" + std::to_string(requiredCollateral)
+        + " collateralType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(collateralScript)))
+        + " ddType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(ddScript))));
+    BOOST_CHECK_MESSAGE(state.IsValid(), "[transaction_validation_mint_tx] state invalid: " + state.GetRejectReason());
 }
 
 BOOST_FIXTURE_TEST_CASE(transaction_validation_invalid_mint_amount, DigiDollarValidationTestSetup)
@@ -466,8 +472,14 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_valid_basic_mint, DigiDollarValidationTe
     TxValidationState state;
 
     // This should pass when implementation is complete
-    BOOST_CHECK(DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state));
-    BOOST_CHECK(state.IsValid());
+    bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
+    BOOST_CHECK_MESSAGE(result, "[mint_validation_valid_basic_mint] Expected valid, got reject: " + state.GetRejectReason()
+        + " | collateralScript.size()=" + std::to_string(collateralScript.size())
+        + " ddScript.size()=" + std::to_string(ddScript.size())
+        + " requiredCollateral=" + std::to_string(requiredCollateral)
+        + " collateralType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(collateralScript)))
+        + " ddType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(ddScript))));
+    BOOST_CHECK_MESSAGE(state.IsValid(), "[mint_validation_valid_basic_mint] state invalid: " + state.GetRejectReason());
 }
 
 BOOST_FIXTURE_TEST_CASE(mint_validation_insufficient_collateral, DigiDollarValidationTestSetup)
@@ -724,8 +736,13 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_dca_multiplier_adjustment, DigiDollarVal
     TxValidationState state;
 
     // Should pass with adjusted collateral
-    BOOST_CHECK(DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state));
-    BOOST_CHECK(state.IsValid());
+    bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
+    BOOST_CHECK_MESSAGE(result, "[mint_validation_dca_multiplier] Expected valid, got reject: " + state.GetRejectReason()
+        + " | systemCollateral=" + std::to_string(validationContext.systemCollateral)
+        + " adjustedCollateral=" + std::to_string(adjustedCollateral)
+        + " collateralType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(collateralScript)))
+        + " ddType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(ddScript))));
+    BOOST_CHECK_MESSAGE(state.IsValid(), "[mint_validation_dca_multiplier] state invalid: " + state.GetRejectReason());
 
     // Test with original 500% collateral - should fail
     CAmount originalCollateral = (static_cast<uint64_t>(ddAmount) * COIN * 500 * 100) / mockOraclePrice;
@@ -877,8 +894,13 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_edge_case_exact_minimum, DigiDollarValid
     CTransaction tx(mtx);
     TxValidationState state;
 
-    BOOST_CHECK(DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state));
-    BOOST_CHECK(state.IsValid());
+    bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
+    BOOST_CHECK_MESSAGE(result, "[mint_validation_edge_case_exact_minimum] Expected valid, got reject: " + state.GetRejectReason()
+        + " | ddAmount=" + std::to_string(ddAmount)
+        + " exactCollateral=" + std::to_string(exactCollateral)
+        + " collateralType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(collateralScript)))
+        + " ddType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(ddScript))));
+    BOOST_CHECK_MESSAGE(state.IsValid(), "[mint_validation_edge_case_exact_minimum] state invalid: " + state.GetRejectReason());
 }
 
 BOOST_FIXTURE_TEST_CASE(mint_validation_edge_case_exact_maximum, DigiDollarValidationTestSetup)
@@ -913,8 +935,13 @@ BOOST_FIXTURE_TEST_CASE(mint_validation_edge_case_exact_maximum, DigiDollarValid
     CTransaction tx(mtx);
     TxValidationState state;
 
-    BOOST_CHECK(DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state));
-    BOOST_CHECK(state.IsValid());
+    bool result = DigiDollar::ValidateDigiDollarTransaction(tx, validationContext, state);
+    BOOST_CHECK_MESSAGE(result, "[mint_validation_edge_case_exact_maximum] Expected valid, got reject: " + state.GetRejectReason()
+        + " | ddAmount=" + std::to_string(ddAmount)
+        + " requiredCollateral=" + std::to_string(requiredCollateral)
+        + " collateralType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(collateralScript)))
+        + " ddType=" + std::to_string(static_cast<int>(DigiDollar::IdentifyScriptType(ddScript))));
+    BOOST_CHECK_MESSAGE(state.IsValid(), "[mint_validation_edge_case_exact_maximum] state invalid: " + state.GetRejectReason());
 }
 
 // =============================================================================
