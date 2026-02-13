@@ -1033,17 +1033,30 @@ void OracleBundleManager::UpdateEpochBundle(int32_t epoch)
 
 bool OracleBundleManager::IsValidOracleMessage(const COraclePriceMessage& message) const
 {
-    // Phase One: Skip chainparams check when min_oracle_count == 1 (testing mode)
-    if (min_oracle_count == 1) {
-        if (!message.IsValid()) return false;
-        return message.VerifyPhase2();
-    }
-
-    // Phase Two (min_oracle_count > 1): Use Phase 2 signature hash
-    // Basic field validation without calling IsValid() which uses Phase 1 Verify()
+    // Common price bounds validation (applies to both phases)
     if (message.price_micro_usd < ORACLE_MIN_PRICE_MICRO_USD) return false;
     if (message.price_micro_usd > ORACLE_MAX_PRICE_MICRO_USD) return false;
 
+    // Phase One: min_oracle_count == 1 (regtest/testing mode)
+    if (min_oracle_count == 1) {
+        // Field validation (timestamp freshness, price range) via IsValid()
+        if (!message.IsValid()) return false;
+
+        // SECURITY FIX (DGB-SEC-002): Bind authorized pubkey from chainparams
+        // before signature verification, same as Phase 2. Previously this path
+        // called message.VerifyPhase2() using the message's embedded pubkey,
+        // allowing an attacker to forge messages with their own keypair.
+        const CChainParams& params = Params();
+        const OracleNodeInfo* oracle_config = params.GetOracleNode(message.oracle_id);
+        if (!oracle_config) {
+            return false;
+        }
+        COraclePriceMessage bound_msg = message;
+        bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
+        return bound_msg.VerifyPhase2();
+    }
+
+    // Phase Two (min_oracle_count > 1): Use Phase 2 signature hash
     // Verify oracle ID is in valid range and matches chainparams
     const CChainParams& params = Params();
     const OracleNodeInfo* oracle_config = params.GetOracleNode(message.oracle_id);
@@ -1354,8 +1367,11 @@ bool OracleDataValidator::ValidateOracleMessage(const COraclePriceMessage& messa
         return false;
     }
 
-    // Verify signature
-    return message.VerifyPhase2();
+    // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification.
+    // Never verify against the message's embedded pubkey — it may be attacker-supplied.
+    COraclePriceMessage bound_msg = message;
+    bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
+    return bound_msg.VerifyPhase2();
 }
 
 bool OracleDataValidator::ValidateOracleBundle(const COracleBundle& bundle, int32_t epoch, const Consensus::Params& params)
@@ -1448,9 +1464,20 @@ bool OracleBundleManager::ValidatePhaseOneBundle(const COracleBundle& bundle, co
     }
 
     // Phase One: Schnorr signature verification (if signature is present)
-    if (!msg.schnorr_sig.empty() && !msg.VerifyPhase2()) {
-        LogPrintf("Oracle: Phase One signature verification failed\n");
-        return false;
+    if (!msg.schnorr_sig.empty()) {
+        // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification
+        const CChainParams& chainparams = Params();
+        const OracleNodeInfo* oracle_config = chainparams.GetOracleNode(msg.oracle_id);
+        if (!oracle_config) {
+            LogPrintf("Oracle: Phase One oracle %d not found in chainparams\n", msg.oracle_id);
+            return false;
+        }
+        COraclePriceMessage bound_msg = msg;
+        bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config->pubkey);
+        if (!bound_msg.VerifyPhase2()) {
+            LogPrintf("Oracle: Phase One signature verification failed\n");
+            return false;
+        }
     }
 
     return true;
@@ -1499,7 +1526,16 @@ bool OracleBundleManager::ValidatePhaseTwoBundle(const COracleBundle& bundle, co
 
         // Verify Schnorr signature using Phase 2 hash (oracle_id + price + timestamp only)
         if (!msg.schnorr_sig.empty()) {
-            if (!msg.VerifyPhase2()) {
+            // SECURITY (DGB-SEC-002): Bind pubkey from chainparams before verification
+            const CChainParams& chainparams_p2 = Params();
+            const OracleNodeInfo* oracle_config_p2 = chainparams_p2.GetOracleNode(msg.oracle_id);
+            if (!oracle_config_p2) {
+                LogPrintf("Oracle: Phase Two oracle %d not found in chainparams\n", msg.oracle_id);
+                continue;
+            }
+            COraclePriceMessage bound_msg = msg;
+            bound_msg.oracle_pubkey = XOnlyPubKey(oracle_config_p2->pubkey);
+            if (!bound_msg.VerifyPhase2()) {
                 LogPrintf("Oracle: Phase Two signature verification failed for oracle %d\n", msg.oracle_id);
                 continue;  // Skip message with invalid signature
             }
