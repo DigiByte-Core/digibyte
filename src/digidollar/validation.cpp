@@ -5,6 +5,7 @@
 #include <digidollar/validation.h>
 #include <digidollar/scripts.h>
 #include <digidollar/digidollar.h>
+#include <digidollar/health.h>
 
 // Phase 1 metadata tracking support
 using DigiDollar::ScriptMetadata;
@@ -887,7 +888,18 @@ bool ValidateMintTransaction(const CTransaction& tx,
                     LogPrintf("DigiDollar: Invalid DD amount: %d\n", ddAmount);
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-dd-amount");
                 }
-                totalDD += ddAmount;
+                // If totalDD was already set from OP_RETURN, verify consistency
+                // rather than double-counting the DD amount.
+                if (totalDD > 0) {
+                    if (ddAmount != totalDD) {
+                        LogPrintf("DigiDollar: DD amount mismatch: token output=%lld, OP_RETURN=%lld\n",
+                                  (long long)ddAmount, (long long)totalDD);
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-dd-amount-mismatch",
+                                           "DD token output amount does not match OP_RETURN amount");
+                    }
+                } else {
+                    totalDD += ddAmount;
+                }
             }
             // If we can't extract (cross-node validation), we'll calculate after loop
         }
@@ -1018,8 +1030,9 @@ bool ValidateMintTransaction(const CTransaction& tx,
 
         // Verify sufficient collateral
         if (totalCollateral < requiredCollateral) {
-            LogPrintf("DigiDollar: Insufficient collateral: provided %d, required %d\n",
-                      totalCollateral, requiredCollateral);
+            LogPrintf("DigiDollar: Insufficient collateral: provided %lld, required %lld (totalDD=%lld, lockPeriod=%lld)\n",
+                      (long long)totalCollateral, (long long)requiredCollateral,
+                      (long long)totalDD, (long long)lockPeriod);
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "insufficient-collateral");
         }
 
