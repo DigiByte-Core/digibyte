@@ -15,6 +15,9 @@ define $(package)_set_vars
   $(package)_config_opts += --disable-tftp --without-brotli --without-zstd --without-libidn2
   $(package)_config_opts += --without-libpsl --without-nghttp2 --disable-dependency-tracking
   $(package)_config_opts_linux=--with-pic
+  # -D_GNU_SOURCE exposes POSIX functions (fileno, fdopen) that libcurl's
+  # fopen.c needs but are hidden by the depends system's strict -std=c11.
+  $(package)_cppflags_linux=-D_GNU_SOURCE
   $(package)_config_env_linux=LIBS="-ldl -lpthread"
   $(package)_config_opts_mingw32=--with-pic
   $(package)_config_env_mingw32=LIBS="-lws2_32 -lcrypt32"
