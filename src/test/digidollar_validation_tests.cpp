@@ -37,8 +37,10 @@ struct DigiDollarValidationTestSetup : public TestingSetup {
         testPubKey = testKey.GetPubKey();
         testXOnlyKey = XOnlyPubKey(testPubKey);
 
-        // Clear volatility freeze state from previous tests
-        DigiDollar::Volatility::VolatilityMonitor::ClearFreeze();
+        // Clear ALL volatility state from previous test suites.
+        // ClearFreeze() alone is insufficient — UpdateState() recalculates
+        // from stale price history and can re-set freeze flags.
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
 
         // Validation context is initialized in member initializer list
     }
