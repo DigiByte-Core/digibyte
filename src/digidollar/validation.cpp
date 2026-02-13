@@ -171,6 +171,17 @@ bool ExtractDDAmount(const CScript& script, CAmount& amount) {
 static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutPoint& prevout, CAmount& amount) {
     amount = 0;
 
+    // SECURITY: Verify the creating transaction is actually a DigiDollar transaction.
+    // Without this check, a malicious miner could include a regular (non-DD) transaction
+    // with a DD-formatted OP_RETURN and zero-value P2TR outputs. A subsequent DD transfer
+    // spending those outputs would pass conservation checks because ExtractDDAmountFromTxRef
+    // would find DD amounts in the non-DD source tx's OP_RETURN — creating DD from nothing.
+    if (!DigiDollar::HasDigiDollarMarker(*prev_tx)) {
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ExtractDDAmountFromTxRef - source tx %s is not a DD transaction (version=0x%08x)\n",
+                 prevout.hash.ToString(), prev_tx->nVersion);
+        return false;
+    }
+
     // Parse the OP_RETURN in the previous transaction to get DD amounts
     std::vector<CAmount> dd_amounts;
     for (const auto& vout : prev_tx->vout) {
@@ -186,17 +197,45 @@ static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutP
             if (!vout.scriptPubKey.GetOp(pc, opcode, data)) continue;
             if (data.size() != 2 || data[0] != 'D' || data[1] != 'D') continue;
 
-            // Skip transaction type
+            // Read transaction type (1=MINT, 2=TRANSFER, 3=REDEEM)
             if (!vout.scriptPubKey.GetOp(pc, opcode, data)) continue;
+            int64_t txType = 0;
+            if (data.size() > 0) {
+                try {
+                    CScriptNum txTypeNum(data, true);
+                    txType = txTypeNum.GetInt64();
+                } catch (const scriptnum_error&) {
+                    continue;
+                }
+            }
 
-            // Extract all DD amounts from OP_RETURN
-            while (vout.scriptPubKey.GetOp(pc, opcode, data)) {
-                if (data.size() > 0) {
+            // SECURITY: Type-aware parsing of OP_RETURN fields.
+            // Mint OP_RETURN format:    DD <type=1> <ddAmount> <lockHeight> <lockTier>
+            // Transfer OP_RETURN format: DD <type=2> <amount1> <amount2> ... <amountN>
+            // Redeem OP_RETURN format:   DD <type=3> <ddAmount> [additional fields]
+            //
+            // For MINT (type 1), only the FIRST value after type is the DD amount.
+            // lockHeight and lockTier are NOT DD amounts. Reading them as such would
+            // allow an attacker to add extra P2TR zero-value outputs and inflate the
+            // DD supply (e.g., 360-day lockHeight = 2,073,600 interpreted as $20,736).
+            if (txType == 1 || txType == 3) {
+                // MINT or REDEEM: Only first push is DD amount
+                if (vout.scriptPubKey.GetOp(pc, opcode, data) && data.size() > 0) {
                     try {
-                        CScriptNum scriptNum(data, true, 8);  // 8-byte max for large DD amounts
+                        CScriptNum scriptNum(data, true, 8);
                         dd_amounts.push_back(scriptNum.GetInt64());
-                    } catch (const scriptnum_error&) {
-                        continue;
+                    } catch (const scriptnum_error&) {}
+                }
+            } else {
+                // TRANSFER: All remaining pushes are DD amounts (one per output)
+                while (vout.scriptPubKey.GetOp(pc, opcode, data)) {
+                    if (data.size() > 0) {
+                        try {
+                            CScriptNum scriptNum(data, true, 8);  // 8-byte max for large DD amounts
+                            dd_amounts.push_back(scriptNum.GetInt64());
+                        } catch (const scriptnum_error&) {
+                            continue;
+                        }
                     }
                 }
             }
@@ -635,7 +674,13 @@ bool ValidateMintTransaction(const CTransaction& tx,
     CAmount totalCollateral = 0;
     bool hasCollateralOutput = false;
     bool hasDDOutput = false;
+    int ddOutputCount = 0;  // Security: count DD outputs to prevent inflation attack
+    int collateralOutputCount = 0;  // Security [T1-04c]: count collateral outputs to prevent NUMS bypass
+    int ddOpReturnCount = 0;  // Security [T1-04f]: count DD OP_RETURN outputs to prevent owner key overwrite
     int64_t lockTime = 0;
+    std::vector<unsigned char> ownerXOnlyPubKeyData;  // Owner pubkey for NUMS verification
+    bool hasOwnerPubKey = false;
+    CScript actualCollateralScript;  // Store the actual collateral P2TR script for NUMS verification
 
     for (size_t i = 0; i < tx.vout.size(); i++) {
         const CTxOut& output = tx.vout[i];
@@ -671,8 +716,25 @@ bool ValidateMintTransaction(const CTransaction& tx,
             if (!ValidateCollateralOutput(output, tx, state)) {
                 return false;
             }
+            collateralOutputCount++;
+
+            // Security [T1-04c]: Mint transactions MUST have exactly 1 collateral output.
+            // Without this, an attacker can include a large FAKE collateral output (with their
+            // own key as P2TR internal key, enabling key-path spend) plus a small LEGITIMATE
+            // output (with NUMS key). The NUMS verification only checks the last P2TR value
+            // output, so the large fake collateral passes unverified. The attacker key-path
+            // spends the fake output immediately, leaving DD backed by only the tiny amount.
+            if (collateralOutputCount > 1) {
+                LogPrintf("DigiDollar: SECURITY [T1-04c] - Mint tx has %d collateral outputs (max 1 allowed). "
+                         "Rejecting to prevent NUMS verification bypass via multiple collateral outputs.\n",
+                         collateralOutputCount);
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-multiple-collateral-outputs",
+                                   "Mint transactions must have exactly 1 collateral output to prevent NUMS bypass");
+            }
+
             totalCollateral += output.nValue;
             hasCollateralOutput = true;
+            actualCollateralScript = output.scriptPubKey;  // Store for NUMS verification
         }
 
         // Check for OP_RETURN metadata: <"DD"> <txType> <ddAmount> <lockHeight>
@@ -684,6 +746,20 @@ bool ValidateMintTransaction(const CTransaction& tx,
             // Check for DD marker
             if (output.scriptPubKey.GetOp(pc, opcode, data) && data.size() == 2 &&
                 data[0] == 'D' && data[1] == 'D') {
+
+                // Security [T1-04f]: Mint transactions MUST have exactly 1 DD OP_RETURN.
+                // Without this, an attacker can include multiple DD OP_RETURNs with different
+                // owner keys. The validation loop overwrites ownerXOnlyPubKeyData with each
+                // OP_RETURN, so the last one's owner key is used for NUMS reconstruction.
+                // This creates ambiguity about which owner key is authoritative.
+                ddOpReturnCount++;
+                if (ddOpReturnCount > 1) {
+                    LogPrintf("DigiDollar: SECURITY [T1-04f] - Mint tx has %d DD OP_RETURN outputs (max 1 allowed). "
+                             "Rejecting to prevent owner key overwrite via multiple DD OP_RETURNs.\n",
+                             ddOpReturnCount);
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-multiple-dd-opreturn",
+                                       "Mint transactions must have exactly 1 DD OP_RETURN to prevent owner key confusion");
+                }
 
                 // Extract tx type (1 = MINT, 2 = TRANSFER, etc.)
                 int64_t txType = 0;
@@ -715,6 +791,71 @@ bool ValidateMintTransaction(const CTransaction& tx,
                         LogPrintf("DigiDollar: Extracted lock height from OP_RETURN: %lld blocks\n", static_cast<long long>(lockTime));
                     } catch (const std::exception&) {}
                 }
+
+                // Extract lock tier and VERIFY consistency with lockHeight
+                // SECURITY: Without this check, an attacker could claim a long lock tier
+                // (e.g., tier 9 = 10 years, 200% ratio) in OP_RETURN but commit a short
+                // lock (e.g., 1 hour) in the MAST tree, getting a favorable collateral
+                // ratio without actually locking for the claimed period.
+                if (output.scriptPubKey.GetOp(pc, opcode, data)) {
+                    try {
+                        CScriptNum lockTierNum(data, true);
+                        int64_t lockTier = lockTierNum.getint();
+                        LogPrintf("DigiDollar: Extracted lock tier from OP_RETURN: %lld\n", static_cast<long long>(lockTier));
+
+                        // Validate tier is in range (0-9)
+                        if (lockTier < 0 || lockTier > 9) {
+                            LogPrintf("DigiDollar: SECURITY - Invalid lock tier %lld (must be 0-9)\n", static_cast<long long>(lockTier));
+                            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-lock-tier",
+                                               "Lock tier must be 0-9");
+                        }
+
+                        // Verify lockHeight is consistent with the claimed tier
+                        // Tier lock days: {0, 30, 90, 180, 365, 730, 1095, 1825, 2555, 3650}
+                        static const int TIER_LOCK_DAYS[] = {0, 30, 90, 180, 365, 730, 1095, 1825, 2555, 3650};
+                        int64_t expectedLockBlocks = DigiDollar::LockDaysToBlocks(TIER_LOCK_DAYS[lockTier]);
+                        int64_t actualLockBlocks = lockTime - ctx.nHeight;
+
+                        // Allow small tolerance (±10 blocks) for timing variance
+                        if (actualLockBlocks < expectedLockBlocks - 10) {
+                            LogPrintf("DigiDollar: SECURITY - Lock height mismatch! "
+                                     "Tier %lld claims %lld blocks but actual lock is only %lld blocks "
+                                     "(lockHeight=%lld, currentHeight=%d). "
+                                     "Possible collateral ratio manipulation attack.\n",
+                                     static_cast<long long>(lockTier),
+                                     static_cast<long long>(expectedLockBlocks),
+                                     static_cast<long long>(actualLockBlocks),
+                                     static_cast<long long>(lockTime), ctx.nHeight);
+                            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-lock-height-mismatch",
+                                               "Lock height does not match claimed lock tier");
+                        }
+                    } catch (const std::exception&) {
+                        // If we can't parse lock tier, reject the mint
+                        LogPrintf("DigiDollar: Failed to parse lock tier from OP_RETURN\n");
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-lock-tier-parse");
+                    }
+                }
+
+                // Extract owner x-only pubkey (32 bytes) for NUMS verification
+                // SECURITY [T1-04]: Without this, an attacker could use their own key as
+                // the P2TR internal key instead of the NUMS point, enabling key-path
+                // spending that bypasses CLTV timelocks and creates unbacked DD tokens.
+                if (output.scriptPubKey.GetOp(pc, opcode, data)) {
+                    if (data.size() == 32) {
+                        ownerXOnlyPubKeyData = data;
+                        hasOwnerPubKey = true;
+                        LogPrintf("DigiDollar: Extracted owner x-only pubkey from OP_RETURN (%d bytes)\n", data.size());
+                    } else {
+                        LogPrintf("DigiDollar: SECURITY - Invalid owner pubkey size in OP_RETURN: %d (expected 32)\n", data.size());
+                        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-owner-pubkey",
+                                           "Owner x-only pubkey must be 32 bytes");
+                    }
+                } else {
+                    // Owner pubkey is REQUIRED for NUMS verification
+                    LogPrintf("DigiDollar: SECURITY - Missing owner pubkey in mint OP_RETURN\n");
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-missing-owner-pubkey",
+                                       "Mint OP_RETURN must include owner x-only pubkey for NUMS verification");
+                }
             }
         }
 
@@ -723,6 +864,20 @@ bool ValidateMintTransaction(const CTransaction& tx,
             if (!ValidateDDOutput(output, tx, state)) {
                 return false;
             }
+            ddOutputCount++;
+
+            // Security: Mint transactions MUST have exactly 1 DD output.
+            // Extra P2TR zero-value outputs would be indexed against the OP_RETURN
+            // metadata (lockHeight, lockTier fields), causing those non-amount values
+            // to be misinterpreted as DD amounts during transfer validation lookups.
+            // This would allow an attacker to inflate DD supply from nothing.
+            if (ddOutputCount > 1) {
+                LogPrintf("DigiDollar: SECURITY - Mint tx has %d DD outputs (max 1 allowed). "
+                         "Rejecting to prevent OP_RETURN inflation attack.\n", ddOutputCount);
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-multiple-dd-outputs",
+                                   "Mint transactions must have exactly 1 DD token output");
+            }
+
             hasDDOutput = true;
 
             // Phase 1: Try to extract DD amount from metadata if available
@@ -777,6 +932,59 @@ bool ValidateMintTransaction(const CTransaction& tx,
         LogPrintf("DigiDollar: No lock time in OP_RETURN, using default 30 days for testing\n");
     }
 
+    // 5b. SECURITY [T1-04b]: Require DD OP_RETURN with owner pubkey for ALL mint transactions.
+    // Without this, an attacker can omit OP_RETURN to bypass NUMS verification entirely,
+    // since hasOwnerPubKey stays false and the NUMS check guard skips verification.
+    // The attacker uses their own key as P2TR internal key, enabling key-path spend
+    // that bypasses CLTV timelocks, stealing collateral and creating unbacked DD tokens.
+    if (hasCollateralOutput && !hasOwnerPubKey) {
+        LogPrintf("DigiDollar: SECURITY [T1-04b] - Mint tx has collateral but missing DD OP_RETURN with owner pubkey!\n");
+        LogPrintf("  Without owner pubkey, NUMS verification cannot be performed.\n");
+        LogPrintf("  This could allow key-path spending that bypasses CLTV timelocks.\n");
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-missing-dd-opreturn",
+                           "Mint transaction must include DD OP_RETURN with owner pubkey for NUMS verification");
+    }
+
+    // SECURITY [T1-04]: Verify collateral P2TR output was constructed with NUMS internal key.
+    // Without this check, an attacker can use their own key as internal key, enabling
+    // key-path spending that bypasses CLTV timelocks and creates unbacked DD tokens.
+    if (hasOwnerPubKey && hasCollateralOutput && lockTime > 0 && totalDD > 0) {
+        XOnlyPubKey ownerXOnly{Span<const unsigned char>(ownerXOnlyPubKeyData.data(), 32)};
+        if (!ownerXOnly.IsFullyValid()) {
+            LogPrintf("DigiDollar: SECURITY - Invalid owner x-only pubkey in OP_RETURN\n");
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-owner-pubkey-invalid",
+                               "Owner x-only pubkey is not a valid curve point");
+        }
+
+        // Reconstruct the expected P2TR collateral output using NUMS internal key
+        DigiDollar::MintParams expectedParams;
+        expectedParams.ddAmount = totalDD;
+        expectedParams.lockHeight = lockTime;
+        expectedParams.ownerKey = ownerXOnly;
+        expectedParams.internalKey = DigiDollar::GetCollateralNUMSKey();
+        expectedParams.oracleKeys = DigiDollar::GetOracleKeys(15);
+
+        CScript expectedCollateral = DigiDollar::CreateCollateralP2TR(expectedParams);
+        if (expectedCollateral.empty()) {
+            LogPrintf("DigiDollar: SECURITY - Failed to reconstruct expected P2TR collateral\n");
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-reconstruction",
+                               "Failed to reconstruct expected P2TR collateral output");
+        }
+
+        if (actualCollateralScript != expectedCollateral) {
+            LogPrintf("DigiDollar: SECURITY [T1-04] - Collateral P2TR output does NOT match expected NUMS reconstruction!\n");
+            LogPrintf("  Actual:   %s\n", HexStr(actualCollateralScript));
+            LogPrintf("  Expected: %s\n", HexStr(expectedCollateral));
+            LogPrintf("  This means the collateral was constructed with a non-NUMS internal key,\n");
+            LogPrintf("  allowing key-path spending that bypasses CLTV timelocks.\n");
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-nums-mismatch",
+                               "Collateral P2TR output does not match NUMS-key reconstruction. "
+                               "Internal key must be the NUMS point to prevent key-path spending.");
+        }
+
+        LogPrintf("DigiDollar: NUMS verification passed - collateral P2TR matches expected output\n");
+    }
+
     // 6. Validate total DD amount against mint limits
     if (!ValidateMintAmount(totalDD, ctx.params, ctx.nHeight)) {
         LogPrintf("DigiDollar: Invalid total mint amount: %d cents (limits: %d - %d)\n",
@@ -788,7 +996,21 @@ bool ValidateMintTransaction(const CTransaction& tx,
     // 7. Calculate and verify collateral (skip for historical blocks - oracle price dependent)
     CAmount requiredCollateral = 0;
     if (!ctx.skipOracleValidation) {
-        requiredCollateral = CalculateRequiredCollateral(totalDD, lockTime, ctx);
+        // SECURITY [T2-01]: Convert absolute lock HEIGHT to relative lock PERIOD for
+        // collateral ratio calculation. The OP_RETURN stores an absolute lockHeight
+        // (currentHeight + lockPeriod), but GetCollateralRatioForLockTime expects a
+        // relative lock period in blocks. Without this conversion, on mainnet (height ~22M)
+        // the absolute height exceeds ALL tier thresholds (max is 10yr = 21M blocks),
+        // causing every lock tier to use the 200% (10-year) ratio instead of its correct
+        // higher ratio. A 1-hour lock would require only 200% instead of 1000% collateral.
+        int64_t lockPeriod = lockTime - ctx.nHeight;
+        if (lockPeriod <= 0) {
+            LogPrintf("DigiDollar: Invalid lock period: lockTime=%lld, height=%d, period=%lld\n",
+                      (long long)lockTime, ctx.nHeight, (long long)lockPeriod);
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-lock-period");
+        }
+
+        requiredCollateral = CalculateRequiredCollateral(totalDD, lockPeriod, ctx);
         if (requiredCollateral <= 0) {
             LogPrintf("DigiDollar: Failed to calculate required collateral\n");
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "collateral-calculation-failed");
@@ -802,7 +1024,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
         }
 
         // 8. Additional validation checks
-        if (!ValidateCollateralRatio(totalCollateral, totalDD, lockTime, ctx)) {
+        if (!ValidateCollateralRatio(totalCollateral, totalDD, lockPeriod, ctx)) {
             LogPrintf("DigiDollar: Collateral ratio validation failed\n");
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-ratio");
         }
@@ -1364,28 +1586,117 @@ bool ValidateCollateralReleaseAmount(const CTransaction& tx,
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-release-zero-collateral");
     }
 
-    // Extract original DD amount from collateral script metadata
+    // Extract original DD amount — first try metadata registry, then creating tx lookup.
+    //
+    // SECURITY [T1-08]: The collateral UTXO is a P2TR script (OP_1 + 32 bytes) which does
+    // NOT contain the DD amount. During cross-node block validation, the ephemeral metadata
+    // registry is empty. Without this fix, the function silently allowed ANY release amount,
+    // enabling an attacker to burn 1 cent of DD and steal all locked collateral.
+    //
+    // Strategy: 1) metadata registry, 2) txindex, 3) block-db lookup, 4) REJECT
     CAmount originalDDMinted = 0;
     if (!ExtractDDAmount(collateralCoin.out.scriptPubKey, originalDDMinted) || originalDDMinted <= 0) {
-        LogPrintf("DigiDollar: Could not extract original DD amount from collateral script\n");
-        // Fallback: allow if we can't determine original amount
-        return true;
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Could not extract original DD amount from collateral script, "
+                 "trying creating transaction lookup...\n");
+
+        // Helper: extract DD minted amount from a mint transaction's OP_RETURN
+        auto extractDDFromMintTx = [](const CTransactionRef& prev_tx, CAmount& ddOut) -> bool {
+            for (const auto& vout : prev_tx->vout) {
+                if (vout.scriptPubKey.size() == 0 || vout.scriptPubKey[0] != OP_RETURN) continue;
+
+                CScript::const_iterator pc = vout.scriptPubKey.begin();
+                opcodetype opcode;
+                std::vector<unsigned char> data;
+
+                if (!vout.scriptPubKey.GetOp(pc, opcode)) continue; // Skip OP_RETURN
+                if (!vout.scriptPubKey.GetOp(pc, opcode, data)) continue;
+                if (data.size() != 2 || data[0] != 'D' || data[1] != 'D') continue;
+
+                // Read tx type
+                if (!vout.scriptPubKey.GetOp(pc, opcode, data)) continue;
+                int64_t txType = 0;
+                if (data.size() > 0) {
+                    try {
+                        CScriptNum txTypeNum(data, true);
+                        txType = txTypeNum.GetInt64();
+                    } catch (const scriptnum_error&) { continue; }
+                }
+
+                // Only process MINT (type 1) — that's the transaction that created collateral
+                if (txType != 1) continue;
+
+                // Read DD amount (first push after type for mint)
+                if (vout.scriptPubKey.GetOp(pc, opcode, data) && data.size() > 0) {
+                    try {
+                        CScriptNum scriptNum(data, true, 8);
+                        ddOut = scriptNum.GetInt64();
+                        return ddOut > 0;
+                    } catch (const scriptnum_error&) {}
+                }
+            }
+            return false;
+        };
+
+        bool found = false;
+
+        // Try txindex (authoritative — reads creating tx from indexed database)
+        if (!found && g_txindex) {
+            uint256 block_hash;
+            CTransactionRef prev_tx;
+            if (g_txindex->FindTx(tx.vin[0].prevout.hash, block_hash, prev_tx)) {
+                found = extractDDFromMintTx(prev_tx, originalDDMinted);
+                if (found) {
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted original DD minted (%lld) from txindex\n",
+                             (long long)originalDDMinted);
+                }
+            }
+        }
+
+        // Try block-db lookup (universal fallback — every full node has every block)
+        if (!found && ctx.txLookup) {
+            CTransactionRef prev_tx;
+            if (ctx.txLookup(tx.vin[0].prevout.hash, collateralCoin.nHeight, prev_tx)) {
+                found = extractDDFromMintTx(prev_tx, originalDDMinted);
+                if (found) {
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted original DD minted (%lld) from block db\n",
+                             (long long)originalDDMinted);
+                }
+            }
+        }
+
+        if (!found || originalDDMinted <= 0) {
+            // SECURITY: REJECT if we cannot determine original DD amount.
+            // A consensus rule must never be silently bypassed.
+            LogPrintf("DigiDollar: SECURITY [T1-08] - Cannot determine original DD minted amount "
+                      "for collateral at %s:%d. Rejecting to prevent collateral theft.\n",
+                      tx.vin[0].prevout.hash.ToString(), tx.vin[0].prevout.n);
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-release-unknown-dd-amount",
+                               "Cannot verify proportional collateral release: original DD amount undetermined");
+        }
     }
 
-    // Calculate proportionally allowed collateral release
-    // allowed_release = (dd_burned / original_dd_minted) * locked_collateral
-    // Use 64-bit math carefully to avoid overflow
-    CAmount allowedRelease;
-    if (ddBurned >= originalDDMinted) {
-        // Full redemption
-        allowedRelease = lockedCollateral;
-    } else {
-        // Partial redemption: proportional release using integer math
-        // Use __int128 to prevent overflow: ddBurned * lockedCollateral can exceed int64
-        allowedRelease = static_cast<int64_t>(
-            static_cast<__int128>(ddBurned) * static_cast<__int128>(lockedCollateral) /
-            static_cast<__int128>(originalDDMinted));
+    // SECURITY [T2-03]: Require full DD burn for collateral release.
+    //
+    // In the UTXO model, the entire collateral UTXO is consumed as vin[0].
+    // Partial burns are NOT safe because:
+    //   1) The excess collateral (lockedCollateral - proportionalRelease) becomes miner fee
+    //   2) A miner-attacker can burn 1% of DD and recover 100% of collateral (99% as fee)
+    //   3) Cross-mint burns allow releasing collateral from mint A using DD from mint B
+    //   4) Remaining DD from the original mint stays in circulation, completely unbacked
+    //
+    // To redeem, you MUST burn at least the full DD amount minted against this collateral.
+    // Burning more than originalDDMinted is allowed (user's loss, not a security risk).
+    if (ddBurned < originalDDMinted) {
+        LogPrintf("DigiDollar: SECURITY [T2-03] - Partial DD burn rejected: burned %lld < original %lld. "
+                  "Full burn required to release collateral (UTXO is indivisible).\n",
+                  (long long)ddBurned, (long long)originalDDMinted);
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-release-partial-burn",
+                           strprintf("Must burn all DD minted against this collateral: burned %lld < required %lld",
+                                     (long long)ddBurned, (long long)originalDDMinted));
     }
+
+    // Full redemption: ddBurned >= originalDDMinted
+    CAmount allowedRelease = lockedCollateral;
 
     // Small fee tolerance (0.1% or 1000 satoshis, whichever is larger)
     CAmount feeTolerance = std::max((CAmount)1000, allowedRelease / 1000);

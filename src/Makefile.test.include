@@ -94,6 +94,7 @@ DIGIBYTE_TESTS =\
   test/oracle_phase2_tests.cpp \
   test/digidollar_p2p_tests.cpp \
   test/digidollar_rpc_tests.cpp \
+  test/digidollar_redteam_tests.cpp \
   test/digidollar_scripts_tests.cpp \
   test/digidollar_structures_tests.cpp \
   test/digidollar_transaction_tests.cpp \

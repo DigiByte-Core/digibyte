@@ -343,16 +343,23 @@ TxBuilderResult MintTxBuilder::BuildMintTransaction(const TxBuilderMintParams& p
     tx.vout.push_back(CTxOut(0, ddScript));
 
     // Add OP_RETURN output with metadata for validation
-    // Format: OP_RETURN <"DD"> <txType> <ddAmount> <lockHeight> <lockTier>
+    // Format: OP_RETURN <"DD"> <txType> <ddAmount> <lockHeight> <lockTier> <ownerXOnlyPubKey>
     // NOTE: lockTier is stored explicitly to avoid deriving it from block heights
     // during wallet restore, which has timing variance issues.
+    // SECURITY: Owner's x-only pubkey is included so validators can reconstruct the
+    // expected P2TR collateral output (with NUMS internal key) and verify the output
+    // matches. This prevents attackers from using their own key as internal key,
+    // which would allow key-path spending that bypasses CLTV timelocks.
     int64_t lockHeight = currentHeight + LockDaysToBlocks(params.lockDays);
+    CPubKey ownerPubKey = params.ownerKey.GetPubKey();
+    XOnlyPubKey ownerXOnly(ownerPubKey);
     CScript metadataScript = CScript() << OP_RETURN
                                        << std::vector<unsigned char>{'D', 'D'}
                                        << CScriptNum(1)  // 1 = MINT transaction
                                        << CScriptNum(params.ddAmount)  // DD amount in cents
                                        << CScriptNum(lockHeight)  // Lock height in blocks
-                                       << CScriptNum(params.lockTier);  // Lock tier (0-9)
+                                       << CScriptNum(params.lockTier)  // Lock tier (0-9)
+                                       << std::vector<unsigned char>(ownerXOnly.begin(), ownerXOnly.end());  // Owner x-only pubkey (32 bytes)
     tx.vout.push_back(CTxOut(0, metadataScript));
 
     // Iterative fee calculation to account for change output

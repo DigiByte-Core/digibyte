@@ -699,6 +699,21 @@ CAmount OracleBundleManager::GetConsensusPrice(int32_t epoch) const
 CAmount OracleBundleManager::GetLatestPrice() const
 {
     std::lock_guard<std::mutex> lock(mtx_bundles);
+
+    // SECURITY: Reject stale cached prices.
+    // If the last oracle update was more than ORACLE_MAX_AGE_SECONDS ago,
+    // the price is stale and must not be used for collateral calculations.
+    // Without this check, an attacker can DDoS oracles and mint DD using
+    // the last known (higher) price while the real DGB price has crashed.
+    if (cached_price > 0 && last_update_time > 0) {
+        int64_t age = GetTime() - last_update_time;
+        if (age > ORACLE_MAX_AGE_SECONDS) {
+            LogPrintf("Oracle: Rejecting stale cached price %lld micro-USD (age: %lld seconds, max: %d)\n",
+                     cached_price, age, ORACLE_MAX_AGE_SECONDS);
+            return 0;
+        }
+    }
+
     return cached_price;
 }
 
