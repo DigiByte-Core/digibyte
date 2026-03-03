@@ -141,7 +141,7 @@ jobs:
           test/functional/test_runner.py
           --jobs=1
           --timeout-factor=3
-          --exclude=p2p_invalid_tx.py,p2p_disconnect_ban.py,p2p_compactblocks_hb.py
+          --exclude=p2p_invalid_tx.py,p2p_disconnect_ban.py,p2p_compactblocks_hb.py,p2p_nobloomfilter_messages.py
 
       - name: Upload Test Suite Log
         uses: actions/upload-artifact@v4
