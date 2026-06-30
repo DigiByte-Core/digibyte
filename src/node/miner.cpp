@@ -489,8 +489,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     assert(pindexPrev != nullptr);
     nHeight = pindexPrev->nHeight + 1;
     
-    // DigiByte: Check if algorithm is active before creating block
-    if (!IsAlgoActive(pindexPrev, chainparams.GetConsensus(), algo))
+    // DigiByte: Check if algorithm is active before creating block.
+    // MODDED BUILD (v9.26.2modded): additionally allow building Groestl (Myriad-Groestl)
+    // templates so DigiHash can mine the retired algo via getblocktemplate. This is a
+    // miner-only allowance — IsAlgoActive() itself is left unchanged, so chainwork
+    // (GetBlockProof) and the v9.26.2 algolock rule are unaffected and this node stays
+    // in consensus with the network. Groestl blocks remain valid pre-activation
+    // (grandfathered) and are rejected once the algolock height/BIP9 gate activates.
+    if (!IsAlgoActive(pindexPrev, chainparams.GetConsensus(), algo) && algo != ALGO_GROESTL)
         throw std::runtime_error(strprintf("Algorithm '%s' is not currently active.", GetAlgoName(algo).c_str()));
     
     pblock->nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus(), algo);

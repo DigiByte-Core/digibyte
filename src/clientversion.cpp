@@ -51,7 +51,9 @@ static std::string FormatVersion(int nVersion)
 
 std::string FormatFullVersion()
 {
-    static const std::string CLIENT_BUILD(BUILD_DESC BUILD_SUFFIX);
+    // MODDED BUILD: identify this build as v9.26.2modded (Groestl mining enabled in the
+    // miner template path). Distinguishes it from an official v9.26.2 release binary.
+    static const std::string CLIENT_BUILD(BUILD_DESC BUILD_SUFFIX "modded");
     return CLIENT_BUILD;
 }
 
