@@ -182,7 +182,11 @@ public:
     //! (block data incomplete/damaged) — callers seeding consensus-relevant
     //! state must treat that as fatal (fail closed) rather than accept an
     //! undercounted supply/collateral baseline.
-    static bool ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view, const node::BlockManager* blockman, const CTxMemPool* mempool = nullptr, const CChain* chain = nullptr, const Consensus::Params* consensus = nullptr);
+    //! mempool/chain/consensus deliberately have no defaults: the pre-floor
+    //! coin skip and the fail-closed check are both gated on a non-null chain,
+    //! so a caller that silently omitted these arguments would revert to the
+    //! old silent-undercount behavior. Every caller must decide explicitly.
+    static bool ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view, const node::BlockManager* blockman, const CTxMemPool* mempool, const CChain* chain, const Consensus::Params* consensus);
 
     /**
      * Reconstruct the cached system-health metrics (total DD supply + total

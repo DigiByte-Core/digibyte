@@ -13,6 +13,19 @@
 
 namespace DigiDollar {
 
+int EarliestActivationFloor(const Consensus::Params& params)
+{
+    const auto& deployment = params.vDeployments[Consensus::DEPLOYMENT_DIGIDOLLAR];
+    if (deployment.nStartTime == Consensus::BIP9Deployment::NEVER_ACTIVE ||
+        deployment.nTimeout == Consensus::BIP9Deployment::NEVER_ACTIVE) {
+        return 0;
+    }
+    if (deployment.nStartTime == Consensus::BIP9Deployment::ALWAYS_ACTIVE) {
+        return deployment.min_activation_height;
+    }
+    return std::min(params.nDDActivationHeight, deployment.min_activation_height);
+}
+
 int GetCollateralRatioForLockTime(int64_t lockBlocks, const ConsensusParams& params)
 {
     const auto it = params.collateralRatios.find(lockBlocks);

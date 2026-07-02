@@ -10382,7 +10382,7 @@ BOOST_AUTO_TEST_CASE(redteam_t5_06c_scan_utxo_set_race_condition)
     DigiDollar::SystemHealthMonitor::Initialize();
 
     // Now call ScanUTXOSet with null view — this resets metrics to 0
-    DigiDollar::SystemHealthMonitor::ScanUTXOSet(nullptr, nullptr, nullptr, nullptr);
+    DigiDollar::SystemHealthMonitor::ScanUTXOSet(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
     // At this point metrics are reset to 0 (scan found nothing with null view)
     auto metrics = DigiDollar::SystemHealthMonitor::GetCachedMetrics();

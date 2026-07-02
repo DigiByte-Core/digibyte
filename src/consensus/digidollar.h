@@ -46,6 +46,21 @@ enum DigiDollarTxType : uint8_t {
 };
 
 /**
+ * Earliest height at which a DigiDollar output can exist on this chain (the
+ * "activation floor"). Single source of truth shared by consensus validation
+ * (EarliestDigiDollarActivationHeight), the "digidollar" prune lock
+ * (src/node/chainstate.cpp), and the startup fail-closed guards
+ * (src/digidollar/health.cpp, src/oracle/bundle_manager.cpp) — these must
+ * never disagree, or a pruned node could delete a block validation still
+ * needs to read.
+ *
+ * Returns 0 when the deployment can never activate (NEVER_ACTIVE start or
+ * timeout); callers treat 0 as "no floor" (no prune lock, no fail-closed
+ * window, pre-floor gates disabled).
+ */
+int EarliestActivationFloor(const Consensus::Params& params);
+
+/**
  * Core consensus parameters for the DigiDollar stablecoin system.
  * These parameters define the economic model, collateral requirements,
  * oracle configuration, and protection mechanisms.

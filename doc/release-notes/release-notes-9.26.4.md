@@ -8,11 +8,18 @@ only a few gigabytes of blocks instead of the entire ~12-year, ~40 GB block hist
 **In one line:** add `prune=2000` to your `digibyte.conf`, upgrade, and your node
 runs DigiByte + everything DigiDollar needs on a fraction of the disk.
 
-**It contains no consensus rule changes for existing nodes.** v9.26.2's Groestl
+**This release adds one narrowly scoped consensus rule.** Redemption collateral
+classification is now gated on the DigiDollar activation floor: a coin created below
+the floor is never treated as vault collateral, whether it appears as the redemption's
+input 0 (rejected as `bad-collateral-release-not-vault`) or as a fee input (see
+`ValidateCollateralReleaseAmount` in `src/digidollar/validation.cpp`). This rule is
+what keeps pruned and full nodes in agreement, and the pre-release mainnet scan found
+no existing coins it affects (`V9.26.4_MAINNET_VALIDATION.md`). v9.26.2's Groestl
 algolock and the DigiDollar BIP9 deployment are carried forward unchanged, and a
 pruned v9.26.4 node accepts and rejects exactly the same blocks and transactions as a
-full node. Upgrading is optional — a node that does not set `-prune` behaves exactly
-like v9.26.3.
+full node. Upgrading is optional — a node that does not set `-prune` behaves like
+v9.26.3 except for this one rule; node operators, pools, and exchanges should treat it
+as a consensus rule addition when assessing upgrade urgency.
 
 
 How to Upgrade

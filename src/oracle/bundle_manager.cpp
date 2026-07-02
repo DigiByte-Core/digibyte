@@ -12,6 +12,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <consensus/consensus.h>
+#include <consensus/digidollar.h>
 #include <consensus/volatility.h>
 #include <digidollar/digidollar.h>
 #include <kernel/chainparams.h>
@@ -1810,16 +1811,7 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
     // data is damaged and we must fail closed. Below it — or when the floor is 0
     // (default regtest ALWAYS_ACTIVE, where no retention is guaranteed and no lock is
     // registered) — a missing block is a legitimate prune/assumeutxo state, not damage.
-    int dd_floor = 0;
-    {
-        const auto& dd_dep = consensus.vDeployments[Consensus::DEPLOYMENT_DIGIDOLLAR];
-        if (dd_dep.nStartTime != Consensus::BIP9Deployment::NEVER_ACTIVE &&
-            dd_dep.nTimeout != Consensus::BIP9Deployment::NEVER_ACTIVE) {
-            dd_floor = (dd_dep.nStartTime == Consensus::BIP9Deployment::ALWAYS_ACTIVE)
-                           ? dd_dep.min_activation_height
-                           : std::min(consensus.nDDActivationHeight, dd_dep.min_activation_height);
-        }
-    }
+    const int dd_floor = DigiDollar::EarliestActivationFloor(consensus);
 
     // Scan recent blocks for the live oracle cache and enough history to
     // deterministically rebuild volatility state after restart/reindex.
