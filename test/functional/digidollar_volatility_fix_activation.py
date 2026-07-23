@@ -115,6 +115,13 @@ class DigiDollarVolatilityFixActivationTest(DigiByteTestFramework):
         self.mine_with_bundles(PRICE_P1, STABILIZE_BLOCKS)
         node.setmockoracleprice(PRICE_P2)
         self.mint_frozen("+30% jump against a stable in-window anchor")
+        # Boundary pin: with fewer than ANCHOR_LAG blocks committed at the new
+        # price, the lagged window still resolves to the old anchor, so the
+        # pause MUST still be in force. Catches regressions that shorten the
+        # effective lag (off-by-one in the newest sampled height, or sampling
+        # shallower than the lag).
+        self.mine_with_bundles(PRICE_P2, ANCHOR_LAG - 2)
+        self.mint_frozen("still paused below the %d-block lag boundary" % ANCHOR_LAG)
         # Self-expiry: once the new price level has been committed on-chain
         # deeper than the lag, the anchor follows it and minting resumes.
         self.mine_with_bundles(PRICE_P2, STABILIZE_BLOCKS)

@@ -205,7 +205,7 @@ public:
 
 private:
     Mutex m_mutex;
-    std::map<uint256, CAmount> m_prices GUARDED_BY(m_mutex);
+    std::unordered_map<uint256, CAmount, BlockHasher> m_prices GUARDED_BY(m_mutex);
     std::deque<uint256> m_order GUARDED_BY(m_mutex);
 };
 
@@ -376,9 +376,18 @@ static std::optional<CAmount> GetDDMintAnchorPrice(const CBlockIndex* pindexPrev
         if (const auto memo = g_dd_vol_anchor_price_cache.Get(pindex->GetBlockHash())) {
             price = *memo;
         } else {
+            // Distinguish "block data not on disk" (pruned below the anchor
+            // window — a configuration/retention failure) from a failed read
+            // of data we are supposed to have (disk corruption). Both are
+            // local conditions that make the consensus anchor underivable.
+            if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
+                LogPrintf("ERROR: %s: block %s (height %d) required for the DD mint volatility anchor has no data on disk (pruned?)\n",
+                          __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+                return std::nullopt;
+            }
             CBlock block;
             if (!blockman.ReadBlockFromDisk(block, *pindex)) {
-                LogPrintf("ERROR: %s: failed to read block %s (height %d) while deriving DD mint volatility anchor\n",
+                LogPrintf("ERROR: %s: failed to read block %s (height %d) while deriving DD mint volatility anchor (disk corruption?)\n",
                           __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
                 return std::nullopt;
             }

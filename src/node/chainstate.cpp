@@ -168,7 +168,19 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     {
         const int dd_floor = DigiDollar::EarliestActivationFloor(chainman.GetConsensus());
 
-        if (options.prune && dd_floor > 0) {
+        // The DD mint volatility anchor (nDDVolatilityFixHeight) derives a
+        // consensus value from ancestor blocks up to nDDVolAnchorWindow deep.
+        // On networks where the DD floor is 0 (so no floor-based lock engages)
+        // and the window exceeds the MIN_BLOCKS_TO_KEEP retention guarantee,
+        // a pruned node could delete anchor-window blocks and then FatalError
+        // on the first fix-active mint block. Keep the whole DD era in that
+        // case too (dd_floor 0 => height_first 0 => retain everything).
+        const Consensus::Params& dd_consensus = chainman.GetConsensus();
+        const bool vol_anchor_needs_history =
+            dd_consensus.nDDVolatilityFixHeight != std::numeric_limits<int>::max() &&
+            dd_consensus.nDDVolAnchorWindow > static_cast<int>(MIN_BLOCKS_TO_KEEP);
+
+        if (options.prune && (dd_floor > 0 || vol_anchor_needs_history)) {
             PruneLockInfo dd_lock;
             dd_lock.height_first = dd_floor;
             chainman.m_blockman.UpdatePruneLock("digidollar", dd_lock);
