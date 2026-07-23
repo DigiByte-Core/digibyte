@@ -4281,7 +4281,11 @@ static RPCHelpMan getprotectionstatus()
                                 {RPCResult::Type::BOOL, "protection_active", "Whether volatility protection is active"},
                                 {RPCResult::Type::NUM, "current_volatility", "Current volatility percentage"},
                                 {RPCResult::Type::NUM, "protection_threshold", "Volatility protection threshold"},
-                                {RPCResult::Type::BOOL, "minting_restricted", "Whether minting is restricted due to volatility"}
+                                {RPCResult::Type::BOOL, "minting_restricted", "Whether minting is restricted due to volatility"},
+                                {RPCResult::Type::NUM, "anchor_price_micro_usd", "Chain-derived lagged-median mint anchor price in micro-USD (0 = no in-window bundle samples)"},
+                                {RPCResult::Type::NUM, "anchor_deviation_bps", "Absolute deviation of the current oracle price from the anchor, in basis points"},
+                                {RPCResult::Type::BOOL, "minting_paused", "Whether the volatility-anchor rule currently pauses minting (always false below volatility_fix_height)"},
+                                {RPCResult::Type::NUM, "volatility_fix_height", "Activation height of the chain-derived volatility-anchor mint rule"}
                             }
                         },
                         {RPCResult::Type::OBJ, "overall", "Overall protection status",
@@ -4434,11 +4438,40 @@ static RPCHelpMan getprotectionstatus()
             bool mintingRestricted = Volatility::VolatilityMonitor::ShouldFreezeMinting();
             bool allOperationsRestricted = Volatility::VolatilityMonitor::ShouldFreezeAll();
 
+            // Chain-derived mint volatility anchor (nDDVolatilityFixHeight rule).
+            // Computed from the same tip-derived helper consensus uses; no new
+            // state. A disk-read failure (nullopt) is reported as anchor 0.
+            const Consensus::Params& consensusParams = chainman.GetConsensus();
+            CAmount anchorPriceMicroUSD{0};
+            int nextBlockHeight{0};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* tip = chainman.ActiveChain().Tip();
+                nextBlockHeight = tip ? tip->nHeight + 1 : 0;
+                anchorPriceMicroUSD = GetDDMintAnchorPrice(tip, chainman.m_blockman,
+                                                           consensusParams).value_or(0);
+            }
+            int64_t anchorDeviationBps{0};
+            if (anchorPriceMicroUSD > 0 && oraclePriceMicroUSD > 0) {
+                anchorDeviationBps = Volatility::CalculatePercentageChangeBps(anchorPriceMicroUSD,
+                                                                              oraclePriceMicroUSD);
+                if (anchorDeviationBps < 0) anchorDeviationBps = -anchorDeviationBps;
+            }
+            const bool anchorMintingPaused =
+                nextBlockHeight >= consensusParams.nDDVolatilityFixHeight &&
+                anchorPriceMicroUSD > 0 && oraclePriceMicroUSD > 0 &&
+                Volatility::ExceedsThresholdBps(anchorPriceMicroUSD, oraclePriceMicroUSD,
+                                                Volatility::VolatilityThresholds::FREEZE_MINT_1H_BPS);
+
             UniValue volatility(UniValue::VOBJ);
             volatility.pushKV("protection_active", mintingRestricted || allOperationsRestricted);
             volatility.pushKV("current_volatility", currentVolatility);
             volatility.pushKV("protection_threshold", Volatility::VolatilityThresholds::FREEZE_MINT_1H);
             volatility.pushKV("minting_restricted", mintingRestricted);
+            volatility.pushKV("anchor_price_micro_usd", anchorPriceMicroUSD);
+            volatility.pushKV("anchor_deviation_bps", anchorDeviationBps);
+            volatility.pushKV("minting_paused", anchorMintingPaused);
+            volatility.pushKV("volatility_fix_height", consensusParams.nDDVolatilityFixHeight);
             result.pushKV("volatility", volatility);
 
             // Overall status

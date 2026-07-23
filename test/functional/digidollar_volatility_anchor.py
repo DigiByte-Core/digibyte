@@ -165,8 +165,8 @@ class DigiDollarVolatilityAnchorTest(DigiByteTestFramework):
         assert_equal(res["reject-reason"], FREEZE_REJECT)
         # Block-consensus direction: a block containing the paused mint is
         # rejected by TestBlockValidity/ConnectBlock with the same reason.
-        assert_raises_rpc_error(-25, FREEZE_REJECT,
-                                node.generateblock, node.getnewaddress(), [frozen_hex])
+        assert_raises_rpc_error(-25, FREEZE_REJECT, self.generateblock,
+                                node, node.getnewaddress(), [frozen_hex])
         # The policy rejection did not poison the tx: after self-expiry the
         # same raw tx is accepted and mined (block-context acceptance).
         self.mine_with_bundles(PRICE_P4, STABILIZE_BLOCKS)
