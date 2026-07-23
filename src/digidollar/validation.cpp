@@ -2728,9 +2728,14 @@ bool ValidateDigiDollarTransaction(const CTransaction& tx,
                                      "minting-frozen-volatility-candidate",
                                      "Candidate oracle price crosses mint volatility freeze threshold");
             }
-        } else if (Volatility::VolatilityMonitor::WouldCandidateFreezeMinting(ctx.oraclePriceMicroUSD)) {
+        } else if (!ctx.skipOracleValidation &&
+                   Volatility::VolatilityMonitor::WouldCandidateFreezeMinting(ctx.oraclePriceMicroUSD)) {
             // Legacy rule below the fix height: reference is the price at the
-            // last accepted mint (process-local deque).
+            // last accepted mint (process-local deque). Guarded by
+            // !ctx.skipOracleValidation (matching the transfer/redeem gates)
+            // so IBD/reindex can never re-reject a canonical historical mint
+            // block against a half-rebuilt deque. Accept-direction-only: every
+            // historical chain block was already accepted.
             LogPrintf("DigiDollar: Mint candidate oracle price would cross volatility freeze threshold "
                       "(candidate=%lld)\n",
                       static_cast<long long>(ctx.oraclePriceMicroUSD));
