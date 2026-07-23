@@ -163,6 +163,10 @@ static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state,
     // DD-touching block under a bundle that has just aged out of the
     // wall-clock freshness window can gracefully degrade to a non-DD block
     // (after RemoveDDTransactionsFromBlock + retry) instead of throwing.
+    // minting-frozen-volatility-candidate: defense-in-depth so the miner
+    // degrades gracefully (strip DD txs + retry) if the package-selection
+    // anchor view ever diverges from TestBlockValidity's, e.g. a price move
+    // racing template assembly, instead of throwing and halting mining.
     if (reject_reason == "insufficient-collateral" ||
         reject_reason == "bad-oracle-price" ||
         reject_reason == "invalid-oracle-price" ||
@@ -171,7 +175,8 @@ static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state,
         reject_reason == "bad-oracle-musig2" ||
         reject_reason == "bad-oracle-legacy" ||
         reject_reason == "bad-oracle-bundle" ||
-        reject_reason == "bad-oracle-timestamp") {
+        reject_reason == "bad-oracle-timestamp" ||
+        reject_reason == "minting-frozen-volatility-candidate") {
         return true;
     }
 
@@ -182,7 +187,8 @@ static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state,
     return what.find("insufficient-collateral") != std::string_view::npos ||
            what.find("bad-oracle-price") != std::string_view::npos ||
            what.find("invalid-oracle-price") != std::string_view::npos ||
-           what.find("bad-oracle-") != std::string_view::npos;
+           what.find("bad-oracle-") != std::string_view::npos ||
+           what.find("minting-frozen-volatility-candidate") != std::string_view::npos;
 }
 
 bool BlockAssembler::IsDDTransactionForMiner(const CTransaction& tx) const
@@ -359,6 +365,24 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
         return false;
     }
 
+    // Post-fix mint volatility anchor for the candidate block, derived from
+    // the same ancestor chain TestBlockValidity will use, so templates
+    // pre-filter paused mints instead of assembling a block that fails
+    // validation. Policy context: a local disk-read failure skips the tx.
+    CAmount dd_anchor_price{0};
+    if (block_height >= chainparams.GetConsensus().nDDVolatilityFixHeight &&
+        DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT) {
+        const auto anchor = GetDDMintAnchorPrice(pindexPrev, m_chainstate.m_blockman,
+                                                 chainparams.GetConsensus());
+        if (!anchor.has_value()) {
+            LogPrint(BCLog::DIGIDOLLAR,
+                     "CreateNewBlock(): skipping DD mint %s: mint volatility anchor could not be derived\n",
+                     tx.GetHash().ToString());
+            return false;
+        }
+        dd_anchor_price = *anchor;
+    }
+
     DigiDollar::ValidationContext dd_context(
         block_height,
         GetOraclePriceForTransaction(tx, block_height, static_cast<CAmount>(block_bundle.median_price_micro_usd)),
@@ -367,7 +391,10 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
         &coins_view,
         false,
         txLookup,
-        m_mempool
+        m_mempool,
+        0,
+        dd_anchor_price,
+        true
     );
 
     TxValidationState tx_state;

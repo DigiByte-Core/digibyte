@@ -351,8 +351,7 @@ static bool DigiDollarMempoolTxRequiresOracleQuote(const CTransaction& tx)
 //! oracle-drought self-expiry) and std::nullopt on a block disk-read failure,
 //! which is local corruption: consensus callers must abort, policy callers
 //! must fail closed.
-static std::optional<CAmount> GetDDMintAnchorPrice(const CBlockIndex* pindexPrev, BlockManager& blockman, const Consensus::Params& params)
-    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+std::optional<CAmount> GetDDMintAnchorPrice(const CBlockIndex* pindexPrev, BlockManager& blockman, const Consensus::Params& params)
 {
     AssertLockHeld(cs_main);
 

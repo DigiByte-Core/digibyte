@@ -118,6 +118,15 @@ void StopScriptCheckWorkerThreads();
  */
 CAmount GetOraclePriceForTransaction(const CTransaction& tx, int nHeight = 0, CAmount blockOraclePrice = 0);
 
+/** Deterministic DD mint volatility anchor for a candidate block built on
+ *  pindexPrev: the lower median of up to nDDVolAnchorMaxSamples committed
+ *  v0x03 bundle prices in ancestor blocks at heights
+ *  [H - nDDVolAnchorWindow, H - nDDVolAnchorLag] (H = pindexPrev->nHeight+1).
+ *  Returns 0 when no in-window samples exist (gate passes) and std::nullopt
+ *  on a block disk-read failure: consensus callers must abort, policy callers
+ *  (mempool/miner/RPC) must fail closed. */
+std::optional<CAmount> GetDDMintAnchorPrice(const CBlockIndex* pindexPrev, node::BlockManager& blockman, const Consensus::Params& params) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 
 bool IsAlgoActive(const CBlockIndex* pindexPrev, const Consensus::Params& consensus, int algo);
