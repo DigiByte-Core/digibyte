@@ -17,6 +17,7 @@
 #include <clientversion.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
+#include <consensus/dd_mint_anchor.h>
 #include <consensus/merkle.h>
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
@@ -166,6 +167,50 @@ private:
 
 static DDBlockTxLookupCache g_dd_block_tx_lookup_cache;
 
+/** Bound on the block-hash-keyed memo of committed bundle prices used by the
+ *  DD mint volatility anchor. Covers several anchor windows (mainnet window
+ *  1440) with room for reorg branches. */
+static constexpr size_t DD_VOL_ANCHOR_PRICE_CACHE_MAX_BLOCKS{4096};
+
+/** Bounded, mutex-protected memo of committed v0x03 bundle prices keyed by
+ *  block hash (value 0 = block carries no usable MuSig2 bundle). Purely a
+ *  disk-read cache for GetDDMintAnchorPrice: hash-keyed so it can never alias
+ *  across branches, and consensus results never depend on its contents —
+ *  a miss is answered from disk. */
+class DDVolAnchorPriceCache
+{
+public:
+    std::optional<CAmount> Get(const uint256& block_hash)
+    {
+        LOCK(m_mutex);
+        const auto it = m_prices.find(block_hash);
+        if (it == m_prices.end()) return std::nullopt;
+        return it->second;
+    }
+
+    void Insert(const uint256& block_hash, CAmount price)
+    {
+        LOCK(m_mutex);
+        const auto [it, inserted] = m_prices.emplace(block_hash, price);
+        if (!inserted) {
+            it->second = price;
+            return;
+        }
+        m_order.push_back(block_hash);
+        while (m_prices.size() > DD_VOL_ANCHOR_PRICE_CACHE_MAX_BLOCKS && !m_order.empty()) {
+            m_prices.erase(m_order.front());
+            m_order.pop_front();
+        }
+    }
+
+private:
+    Mutex m_mutex;
+    std::map<uint256, CAmount> m_prices GUARDED_BY(m_mutex);
+    std::deque<uint256> m_order GUARDED_BY(m_mutex);
+};
+
+static DDVolAnchorPriceCache g_dd_vol_anchor_price_cache;
+
 static DigiDollar::TxLookupFn MakeCachedBlockTxLookup(
     std::function<const CBlockIndex*(uint32_t)> locate_block,
     BlockManager& blockman)
@@ -291,6 +336,68 @@ static bool DigiDollarMempoolTxRequiresOracleQuote(const CTransaction& tx)
     if (!DigiDollar::HasDigiDollarMarker(tx)) return false;
     const DigiDollar::DigiDollarTxType tx_type = DigiDollar::GetDigiDollarTxType(tx);
     return tx_type == DigiDollar::DD_TX_MINT || tx_type == DigiDollar::DD_TX_REDEEM;
+}
+
+//! Deterministic DD mint volatility anchor for a candidate block built on
+//! pindexPrev: the lower median of up to nDDVolAnchorMaxSamples committed
+//! v0x03 bundle prices found in ancestor blocks at heights
+//! [H - nDDVolAnchorWindow, H - nDDVolAnchorLag] (H = candidate height),
+//! collected newest-first. Ancestors below the buried DigiDollar activation
+//! height are never consulted — bundles below it were never
+//! signature-verified. A pure function of the candidate block's ancestor
+//! chain: no wall clock, no node-local state.
+//!
+//! Returns 0 when no in-window samples exist (the gate passes — bootstrap /
+//! oracle-drought self-expiry) and std::nullopt on a block disk-read failure,
+//! which is local corruption: consensus callers must abort, policy callers
+//! must fail closed.
+static std::optional<CAmount> GetDDMintAnchorPrice(const CBlockIndex* pindexPrev, BlockManager& blockman, const Consensus::Params& params)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+
+    if (!pindexPrev || params.nDDVolAnchorMaxSamples <= 0) return CAmount{0};
+
+    const int candidate_height = pindexPrev->nHeight + 1;
+    const int newest_height = candidate_height - params.nDDVolAnchorLag;
+    const int floor_height = std::max({candidate_height - params.nDDVolAnchorWindow,
+                                       params.DigiDollarHeight, 0});
+    if (newest_height < floor_height) return CAmount{0};
+
+    std::vector<CAmount> samples;
+    samples.reserve(static_cast<size_t>(params.nDDVolAnchorMaxSamples));
+
+    OracleBundleManager& manager = OracleBundleManager::GetInstance();
+    for (const CBlockIndex* pindex = pindexPrev->GetAncestor(newest_height);
+         pindex && pindex->nHeight >= floor_height &&
+         samples.size() < static_cast<size_t>(params.nDDVolAnchorMaxSamples);
+         pindex = pindex->pprev) {
+        CAmount price{0};
+        if (const auto memo = g_dd_vol_anchor_price_cache.Get(pindex->GetBlockHash())) {
+            price = *memo;
+        } else {
+            CBlock block;
+            if (!blockman.ReadBlockFromDisk(block, *pindex)) {
+                LogPrintf("ERROR: %s: failed to read block %s (height %d) while deriving DD mint volatility anchor\n",
+                          __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+                return std::nullopt;
+            }
+            COracleBundle bundle;
+            if (!block.vtx.empty() && block.vtx[0] && block.vtx[0]->IsCoinBase() &&
+                manager.ExtractOracleBundle(*block.vtx[0], bundle) && bundle.IsMuSig2() &&
+                bundle.median_price_micro_usd > 0) {
+                price = static_cast<CAmount>(bundle.median_price_micro_usd);
+            }
+            g_dd_vol_anchor_price_cache.Insert(pindex->GetBlockHash(), price);
+        }
+        if (price > 0) samples.push_back(price);
+    }
+
+    const size_t sample_count = samples.size();
+    const CAmount anchor = DigiDollar::MintAnchor::LowerMedian(std::move(samples));
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: mint volatility anchor for candidate height %d: %lld micro-USD from %zu samples (window heights [%d, %d])\n",
+             candidate_height, static_cast<long long>(anchor), sample_count, floor_height, newest_height);
+    return anchor;
 }
 
 GlobalMutex g_best_block_mutex;
@@ -604,6 +711,22 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 return true;
             }
 
+            // Post-fix mint volatility anchor for the next block. Policy
+            // context: on a local disk-read failure fail closed by dropping
+            // the resurrected transaction.
+            CAmount ddAnchorPrice{0};
+            const Consensus::Params& consensusParams = m_chainman.GetConsensus();
+            if (m_chain.Height() + 1 >= consensusParams.nDDVolatilityFixHeight &&
+                DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT) {
+                const auto anchor = GetDDMintAnchorPrice(m_chain.Tip(), m_blockman, consensusParams);
+                if (!anchor.has_value()) {
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Removing reorg-resurrected tx %s because the mint volatility anchor could not be derived\n",
+                             tx.GetHash().ToString());
+                    return true;
+                }
+                ddAnchorPrice = *anchor;
+            }
+
             TxValidationState dd_state;
             DigiDollar::ValidationContext ddContext(
                 m_chain.Height() + 1,
@@ -613,7 +736,10 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 &dd_view,
                 false,
                 reorg_tx_lookup,
-                m_mempool
+                m_mempool,
+                0,
+                ddAnchorPrice,
+                true
             );
             if (!DigiDollar::ValidateDigiDollarTransaction(tx, ddContext, dd_state)) {
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Removing reorg-resurrected tx %s after DD revalidation failed: %s\n",
@@ -1123,6 +1249,23 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     );
 
     if (DigiDollar::RequiresDigiDollarValidation(tx, ddProbeContext)) {
+        // Post-fix mint volatility anchor for the next block, derived from the
+        // current tip. This is a policy-context check: a local disk-read
+        // failure fails closed instead of aborting the node.
+        CAmount ddAnchorPrice{0};
+        const Consensus::Params& consensusParams = args.m_chainparams.GetConsensus();
+        if (m_active_chainstate.m_chain.Height() + 1 >= consensusParams.nDDVolatilityFixHeight &&
+            DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT) {
+            const auto anchor = GetDDMintAnchorPrice(m_active_chainstate.m_chain.Tip(),
+                                                     m_active_chainstate.m_blockman, consensusParams);
+            if (!anchor.has_value()) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                     "dd-volatility-anchor-unavailable",
+                                     "failed to read block while deriving DD mint volatility anchor");
+            }
+            ddAnchorPrice = *anchor;
+        }
+
         DigiDollar::ValidationContext ddContext(
             m_active_chainstate.m_chain.Height() + 1,  // Height for next block
             GetOraclePriceForTransaction(tx),           // Current oracle price
@@ -1131,7 +1274,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             &m_view,                                    // Mempool-aware coins view
             false,                                      // Don't skip oracle validation in mempool
             txLookup,                                   // Block-db tx lookup for DD amounts
-            &m_pool                                     // Mempool for unconfirmed DD input lookup
+            &m_pool,                                    // Mempool for unconfirmed DD input lookup
+            0,                                          // No candidate block timestamp in mempool context
+            ddAnchorPrice,                              // Chain-derived mint volatility anchor
+            true                                        // Policy context: anchor freeze is TX_MEMPOOL_POLICY
         );
 
         if (!DigiDollar::ValidateDigiDollarTransaction(tx, ddContext, state)) {
@@ -3123,7 +3269,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             blockOracleBundle = std::move(extractedBundle);
             hasBlockOracleBundle = true;
         }
+        // Opportunistically warm the volatility-anchor memo so descendant
+        // anchor derivations do not need to re-read this block from disk.
+        // Hash-keyed, so an entry from a block that later fails validation
+        // can never be consulted for a valid chain.
+        g_dd_vol_anchor_price_cache.Insert(
+            pindex->GetBlockHash(),
+            (hasBlockOracleBundle && blockOracleBundle.IsMuSig2()) ? blockOraclePrice : CAmount{0});
     }
+    // DD mint volatility anchor, derived lazily at most once per block: only
+    // fix-active blocks that actually carry a DD mint pay for the ancestor
+    // scan.
+    std::optional<CAmount> ddVolAnchorPrice;
 
     auto block_tx_lookup = MakeCachedBlockTxLookup(
         [pindex](uint32_t coinHeight) -> const CBlockIndex* {
@@ -3223,6 +3380,23 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 const bool fPriceIndependentTransfer = ddTxType == DigiDollar::DD_TX_TRANSFER && blockOraclePrice <= 0;
                 const bool fSkipOracle = fInIBD || (fCatchingUp && blockOraclePrice <= 0) || fPriceIndependentTransfer;
 
+                CAmount ddAnchorForTx{0};
+                if (ddTxType == DigiDollar::DD_TX_MINT &&
+                    pindex->nHeight >= m_chainman.GetConsensus().nDDVolatilityFixHeight) {
+                    if (!ddVolAnchorPrice.has_value()) {
+                        ddVolAnchorPrice = GetDDMintAnchorPrice(pindex->pprev, m_blockman,
+                                                                m_chainman.GetConsensus());
+                        if (!ddVolAnchorPrice.has_value()) {
+                            // An unreadable ancestor while deriving the consensus
+                            // anchor is local disk corruption, not evidence about
+                            // this block's validity. Fail closed.
+                            return FatalError(m_chainman.GetNotifications(), state,
+                                              "Failed to read block while deriving DD mint volatility anchor");
+                        }
+                    }
+                    ddAnchorForTx = *ddVolAnchorPrice;
+                }
+
                 DigiDollar::ValidationContext ddContext(
                     pindex->nHeight,
                     GetOraclePriceForTransaction(tx, pindex->nHeight, blockOraclePrice),  // T8-03: Deterministic block oracle price
@@ -3232,7 +3406,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                     fSkipOracle,                                             // Skip oracle validation during IBD or catch-up sync
                     block_tx_lookup,                                      // Block-db tx lookup for DD amounts
                     nullptr,                                             // No mempool during block connect
-                    pindex->nTime                                        // Deterministic volatility timestamp
+                    pindex->nTime,                                       // Deterministic volatility timestamp
+                    ddAnchorForTx                                        // Chain-derived mint volatility anchor (fix-active blocks)
                 );
 
                 TxValidationState dd_state;

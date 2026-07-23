@@ -46,7 +46,6 @@ FREEZE_REJECT = "minting-frozen-volatility-candidate"
 PRICE_P0 = 500000    # $0.50/DGB
 PRICE_P1 = 690000    # +38.0% vs P0
 PRICE_P2 = 897000    # +30.0% vs P1
-PRICE_P3 = 1238000   # +38.0% vs P2
 
 
 class DigiDollarVolatilityFixActivationTest(DigiByteTestFramework):
@@ -61,6 +60,19 @@ class DigiDollarVolatilityFixActivationTest(DigiByteTestFramework):
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
+
+    def mine_with_bundles(self, price, count):
+        """Mine blocks that each commit a fresh mock bundle at price.
+
+        setmockoracleprice publishes a new MuSig2 quote for tip+1, which the
+        miner stamps into the next block — mirroring a live oracle-fed chain
+        where every block carries a bundle. A bare generate() would reuse the
+        cached quote for only a few blocks and then mine bundle-less blocks.
+        """
+        node = self.nodes[0]
+        for _ in range(count):
+            node.setmockoracleprice(price)
+            node.generate(1)
 
     def mint_ok(self, msg):
         """Mint and mine the tx into the next block, asserting acceptance."""
@@ -100,25 +112,31 @@ class DigiDollarVolatilityFixActivationTest(DigiByteTestFramework):
 
         self.log.info("Scenario: genuine spike still pauses, then self-expires")
         # Build a dense stable on-chain price history at P1 deeper than the lag.
-        node.generate(STABILIZE_BLOCKS)
+        self.mine_with_bundles(PRICE_P1, STABILIZE_BLOCKS)
         node.setmockoracleprice(PRICE_P2)
         self.mint_frozen("+30% jump against a stable in-window anchor")
         # Self-expiry: once the new price level has been committed on-chain
         # deeper than the lag, the anchor follows it and minting resumes.
-        node.generate(STABILIZE_BLOCKS)
+        self.mine_with_bundles(PRICE_P2, STABILIZE_BLOCKS)
         self.mint_ok("pause self-expired after ~lag blocks at the new price")
 
         self.log.info("Scenario: legacy rule preserved below the fix height")
         self.restart_node(0, extra_args=self.base_args +
                           ["-ddvolatilityfixheight=99999"])
-        node.setmockoracleprice(PRICE_P2)  # mock oracle is per-process
-        self.mint_ok("legacy gate — candidate matches last accepted mint price")
-        node.setmockoracleprice(PRICE_P3)
-        self.mint_frozen("legacy gate — +38% drift vs last accepted mint")
+        # The startup scan replays mint blocks oldest-first with the legacy
+        # 1-hour dedupe, so the reconstructed deque reference is P0 (the first
+        # mint's price) — the same stale baseline the original process had.
+        node.setmockoracleprice(PRICE_P0)  # mock oracle is per-process
+        # Discriminator that the legacy rule governs: under the anchor rule
+        # this mint would be frozen (the in-window history is dense P2 bundles,
+        # -44% away), but the deque reference is P0 so it passes.
+        self.mint_ok("legacy gate — candidate matches the stale deque baseline")
+        node.setmockoracleprice(PRICE_P1)
+        self.mint_frozen("legacy gate — +38% drift vs the deque baseline")
         # The legacy freeze must NOT self-expire: the deque reference only
         # moves when a mint is accepted, so the freeze is permanent below the
         # gate no matter how many blocks carry the new price.
-        node.generate(STABILIZE_BLOCKS)
+        self.mine_with_bundles(PRICE_P1, STABILIZE_BLOCKS)
         self.mint_frozen("legacy gate — freeze persists after %d blocks"
                          % STABILIZE_BLOCKS)
 

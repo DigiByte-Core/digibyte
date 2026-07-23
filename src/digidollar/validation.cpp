@@ -2707,14 +2707,37 @@ bool ValidateDigiDollarTransaction(const CTransaction& tx,
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "minting-blocked-during-err");
     }
 
-    if (txType == DD_TX_MINT && ctx.oraclePriceMicroUSD > 0 &&
-        Volatility::VolatilityMonitor::WouldCandidateFreezeMinting(ctx.oraclePriceMicroUSD)) {
-        LogPrintf("DigiDollar: Mint candidate oracle price would cross volatility freeze threshold "
-                  "(candidate=%lld)\n",
-                  static_cast<long long>(ctx.oraclePriceMicroUSD));
-        return state.Invalid(TxValidationResult::TX_CONSENSUS,
-                             "minting-frozen-volatility-candidate",
-                             "Candidate oracle price crosses mint volatility freeze threshold");
+    if (txType == DD_TX_MINT && ctx.oraclePriceMicroUSD > 0) {
+        if (ctx.nHeight >= ctx.params.GetConsensus().nDDVolatilityFixHeight) {
+            // Deterministic rule from nDDVolatilityFixHeight: compare the
+            // candidate bundle price to the chain-derived lagged-median anchor
+            // supplied by the caller. Anchor 0 means no in-window bundle
+            // samples (bootstrap / oracle drought) and passes; the pause
+            // self-expires by height arithmetic once the new price level has
+            // been on-chain deeper than the anchor lag.
+            if (ctx.volatilityAnchorPriceMicroUSD > 0 &&
+                Volatility::ExceedsThresholdBps(ctx.volatilityAnchorPriceMicroUSD,
+                                                ctx.oraclePriceMicroUSD,
+                                                Volatility::VolatilityThresholds::FREEZE_MINT_1H_BPS)) {
+                LogPrintf("DigiDollar: Mint candidate oracle price would cross volatility freeze threshold "
+                          "(candidate=%lld anchor=%lld)\n",
+                          static_cast<long long>(ctx.oraclePriceMicroUSD),
+                          static_cast<long long>(ctx.volatilityAnchorPriceMicroUSD));
+                return state.Invalid(ctx.policyContext ? TxValidationResult::TX_MEMPOOL_POLICY
+                                                       : TxValidationResult::TX_CONSENSUS,
+                                     "minting-frozen-volatility-candidate",
+                                     "Candidate oracle price crosses mint volatility freeze threshold");
+            }
+        } else if (Volatility::VolatilityMonitor::WouldCandidateFreezeMinting(ctx.oraclePriceMicroUSD)) {
+            // Legacy rule below the fix height: reference is the price at the
+            // last accepted mint (process-local deque).
+            LogPrintf("DigiDollar: Mint candidate oracle price would cross volatility freeze threshold "
+                      "(candidate=%lld)\n",
+                      static_cast<long long>(ctx.oraclePriceMicroUSD));
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "minting-frozen-volatility-candidate",
+                                 "Candidate oracle price crosses mint volatility freeze threshold");
+        }
     }
 
     // Redemption routing is handled inside ValidateRedemptionTransaction using

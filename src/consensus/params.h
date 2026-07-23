@@ -204,6 +204,19 @@ struct Params {
     int nDDOracleUpdateInterval{4};     // Blocks between price updates
     int nDDActivationHeight{0};         // Height at which DigiDollar activates
 
+    /** DD mint volatility gate fix (chain-derived lagged-median anchor).
+     *  From nDDVolatilityFixHeight the mint freeze compares the candidate
+     *  bundle price against the lower median of up to nDDVolAnchorMaxSamples
+     *  committed v0x03 bundle prices found in ancestor blocks at heights
+     *  [H - nDDVolAnchorWindow, H - nDDVolAnchorLag] (H = candidate height),
+     *  collected newest-first, never below DigiDollarHeight. Zero in-window
+     *  samples pass the gate (bootstrap / oracle-drought self-expiry). Below
+     *  the fix height the legacy process-local deque check applies. */
+    int nDDVolatilityFixHeight{std::numeric_limits<int>::max()};
+    int nDDVolAnchorLag{240};        // Anchor lag in blocks (~1 hour of 15s blocks)
+    int nDDVolAnchorWindow{1440};    // Anchor window depth in blocks (~6 hours)
+    int nDDVolAnchorMaxSamples{15};  // Max bundle samples for the lagged median
+
     /** Oracle system parameters. DigiDollar V1 block data uses MuSig2 bundles only. */
     int nOracleActivationHeight{std::numeric_limits<int>::max()};  // Height when oracle system activates
     int nOracleEpochLength{1440};               // Blocks per oracle epoch (default: 1440 = 24 hours)

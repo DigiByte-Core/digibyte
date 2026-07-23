@@ -109,6 +109,17 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.digidollar_activation_height = static_cast<int>(*digidollar_height);
         LogPrintf("Setting DigiDollar activation height for regtest to %d (buried deployment)\n", *digidollar_height);
     }
+
+    // Height at which the chain-derived DD mint volatility anchor rule
+    // replaces the legacy process-local deque check. Regtest defaults to 0;
+    // tests raise it to exercise the legacy rule below the gate.
+    if (auto vol_fix_height = args.GetIntArg("-ddvolatilityfixheight")) {
+        if (*vol_fix_height < 0 || *vol_fix_height >= std::numeric_limits<int>::max()) {
+            throw std::runtime_error(strprintf("Invalid height value (%d) for -ddvolatilityfixheight.", *vol_fix_height));
+        }
+        options.dd_volatility_fix_height = static_cast<int>(*vol_fix_height);
+        LogPrintf("Setting DD mint volatility fix height for regtest to %d\n", *vol_fix_height);
+    }
 }
 
 static std::unique_ptr<const CChainParams> globalChainParams;

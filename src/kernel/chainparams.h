@@ -183,6 +183,7 @@ public:
         std::unordered_map<Consensus::DeploymentPos, VersionBitsParameters> version_bits_parameters{};
         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
         std::optional<int> digidollar_activation_height{};
+        std::optional<int> dd_volatility_fix_height{};
         bool fastprune{false};
     };
 

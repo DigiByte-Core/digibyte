@@ -683,6 +683,7 @@ void SetupServerArgs(ArgsManager& argsman)
     // DigiDollar startup options
     argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (follows BIP9 activation by default)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-ddvolatilityfixheight=<n>", "Set the height at which the chain-derived DD mint volatility anchor rule replaces the legacy in-process check (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
 
     // DigiDollar RPC commands (use 'help <command>' in console for details)
     argsman.AddArg("mintdigidollar", "Mint DigiDollars by locking DGB as collateral (RPC/console)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);

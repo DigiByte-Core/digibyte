@@ -72,14 +72,22 @@ struct ValidationContext {
     TxLookupFn txLookup;             // Look up tx from block database (for DD amount extraction)
     const CTxMemPool* mempool;       // Mempool context; DD amount resolution remains confirmed-only
     int64_t nBlockTime;              // Candidate block timestamp for deterministic volatility recording
+    CAmount volatilityAnchorPriceMicroUSD; // Chain-derived lagged-median mint volatility anchor
+                                     // (0 = no in-window bundle samples => gate passes);
+                                     // consulted only from nDDVolatilityFixHeight
+    bool policyContext;              // True for mempool/reorg policy callers: the anchor freeze
+                                     // is reported as TX_MEMPOOL_POLICY instead of TX_CONSENSUS
 
     ValidationContext(int height, CAmount price_micro_usd, int collateral, const CChainParams& chainParams,
                       const CCoinsViewCache* coins_view = nullptr, bool skip_oracle = false,
                       TxLookupFn tx_lookup = nullptr, const CTxMemPool* pool = nullptr,
-                      int64_t block_time = 0)
+                      int64_t block_time = 0, CAmount volatility_anchor_price_micro_usd = 0,
+                      bool policy_context = false)
         : nHeight(height), oraclePriceMicroUSD(price_micro_usd), systemCollateral(collateral),
           params(chainParams), coins(coins_view), skipOracleValidation(skip_oracle),
-          txLookup(std::move(tx_lookup)), mempool(pool), nBlockTime(block_time) {}
+          txLookup(std::move(tx_lookup)), mempool(pool), nBlockTime(block_time),
+          volatilityAnchorPriceMicroUSD(volatility_anchor_price_micro_usd),
+          policyContext(policy_context) {}
 };
 
 // ============================================================================

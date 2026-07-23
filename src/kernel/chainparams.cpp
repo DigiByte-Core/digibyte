@@ -335,6 +335,10 @@ public:
         consensus.nOracleTotalOracles = 35;           // 35 configured oracle bitmap slots
         consensus.nDigiDollarMuSig2Height = consensus.nDDActivationHeight;  // MuSig2 activates alongside DigiDollar
 
+        // DD mint volatility anchor fix: concrete flag-day height to be chosen
+        // at release; the oracle watchdog protects minting until then.
+        consensus.nDDVolatilityFixHeight = std::numeric_limits<int>::max();
+
         // MuSig2 oracle configuration — 7 signatures from the active key roster.
         // Same oracle operator set as testnet. To add/replace active operators:
         //   1. Generate keypair via `digibyte-cli generateoraclekey <id>`
@@ -700,6 +704,11 @@ public:
         consensus.nOracleActivationHeight = consensus.nDDActivationHeight;
         consensus.nDigiDollarMuSig2Height = consensus.nDDActivationHeight;
 
+        // DD mint volatility anchor fix. PLACEHOLDER — must be re-confirmed
+        // >= the testnet26 tip at release tagging; activation is the unfreeze
+        // event for the incident chain.
+        consensus.nDDVolatilityFixHeight = 190000;
+
         LogPrintf("Oracle: Testnet oracle activation height: %d\n", consensus.nOracleActivationHeight);
         LogPrintf("Oracle: %d oracles configured, %d-of-%d MuSig2 quorum, V1 activation height %d\n",
                  (int)consensus.vOraclePublicKeys.size(), consensus.nOracleRequiredMessages,
@@ -977,6 +986,9 @@ public:
         consensus.TaprootHeight = 0;
         consensus.DigiDollarHeight = 0;
         consensus.AlgoLockHeight = 0;
+
+        // DD mint volatility anchor fix: active from genesis on signet.
+        consensus.nDDVolatilityFixHeight = 0;
 
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
@@ -1260,6 +1272,17 @@ public:
         consensus.nDigiDollarMuSig2Height = std::min(
             consensus.nDDActivationHeight,
             consensus.DigiDollarHeight);
+
+        // DD mint volatility anchor fix: active from genesis; fast anchor
+        // geometry for functional tests (mainnet: lag 240, window 1440).
+        // -ddvolatilityfixheight=N moves only the fix height, letting tests
+        // exercise the legacy deque rule below the gate.
+        consensus.nDDVolatilityFixHeight = 0;
+        consensus.nDDVolAnchorLag = 24;
+        consensus.nDDVolAnchorWindow = 144;
+        if (opts.dd_volatility_fix_height) {
+            consensus.nDDVolatilityFixHeight = *opts.dd_volatility_fix_height;
+        }
 
         // MuSig2 oracle configuration — 4-of-7 quorum (lower for testing)
         consensus.nOraclePubkeyCount = 7;
