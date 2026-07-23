@@ -321,6 +321,7 @@ BASE_SCRIPTS = [
     'digidollar_mempool_miner_parity.py',
     'digidollar_verifychain_cache_side_effect.py',
     'digidollar_volatility_fix_activation.py',
+    'digidollar_volatility_anchor.py',
     'digidollar_wave14_multinode_ibd_reorg.py',
     'digidollar_wave20_oracle_p2p.py',
     'digidollar_wave21_musig2_p2p_dos.py',
