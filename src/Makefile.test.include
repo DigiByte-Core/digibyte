@@ -200,6 +200,7 @@ DIGIBYTE_TESTS =\
   test/digidollar_change_tests.cpp \
   test/digidollar_txbuilder_tests.cpp \
   test/digidollar_validation_tests.cpp \
+  test/dd_mint_anchor_tests.cpp \
   test/digidollar_txindex_tests.cpp \
   test/digidollar_volatility_tests.cpp \
   test/digidollar_wave6_health_dca_volatility_tests.cpp \
