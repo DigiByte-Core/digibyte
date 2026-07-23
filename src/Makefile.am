@@ -737,6 +737,8 @@ libdigibyte_common_a_SOURCES = \
   compressor.cpp \
   consensus/dca.cpp \
   consensus/dca.h \
+  consensus/dd_mint_anchor.cpp \
+  consensus/dd_mint_anchor.h \
   consensus/err.cpp \
   consensus/err.h \
   consensus/volatility.cpp \
