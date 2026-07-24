@@ -2,6 +2,12 @@
 
 *For exchanges that already support DigiByte and want to add DigiDollar (DD) trading pairs.*
 
+> **Status: live on mainnet.** DigiDollar locked in through BIP9 bit 23 miner
+> signaling and activated at block **23,869,440** on **17 July 2026**, alongside
+> the AlgoLock retired-algorithm rule. DD RPCs are available on any synced
+> v9.26.2+ mainnet node today. Confirm on your own node with
+> `getdigidollardeploymentinfo`.
+
 ---
 
 ## What Is DigiDollar?
@@ -25,14 +31,17 @@ If you already run a DigiByte node, you're most of the way there.
 | Fee unit | DGB/kB (DigiByte uses kB, not vB) |
 | Block time | 15 seconds (same as DGB) |
 | Confirmations | Same security model as DGB |
-| Backend required | DigiByte Core v9.26.2+ with DigiDollar built in; features remain BIP9-gated until activation |
+| Backend required | DigiByte Core v9.26.2+ with DigiDollar built in (v9.26.5 current); **active on mainnet** since block 23,869,440 |
 | Wallet | Spend-capable descriptor wallet required for generated deposit addresses and withdrawals |
 
 ---
 
 ## 1. Node Setup
 
-Upgrade your existing DigiByte node to v9.26.2+ and enable DigiDollar:
+Upgrade your existing DigiByte node to v9.26.2+ and enable DigiDollar. **v9.26.5
+is the current release and is recommended for exchange nodes** — it fixes a
+DigiDollar oracle startup scan that could hang mainnet nodes for 15 minutes or
+more at launch.
 
 ```ini
 # digibyte.conf
@@ -52,7 +61,9 @@ rpcpassword=yourpassword
 
 That's it. Your existing DGB infrastructure stays the same — DD runs alongside it.
 
-`txindex=1` is not optional for DD chains because validation and wallet recovery need creating-transaction metadata. Before activation, `getdigidollardeploymentinfo` remains available, but DD address, balance, history, send, mint, redeem, and running-oracle RPCs are gated.
+`txindex=1` is not optional for DD chains because validation and wallet recovery need creating-transaction metadata.
+
+On a network where DigiDollar has **not** yet activated, `getdigidollardeploymentinfo` remains available but the DD address, balance, history, send, mint, redeem, and running-oracle RPCs are gated. This no longer applies to mainnet, where DigiDollar activated at block 23,869,440.
 
 ---
 
@@ -371,13 +382,15 @@ Exchanges typically handle deposits and withdrawals — not minting or redeeming
 
 ---
 
-## 13. Test on Testnet Now!
+## 13. Rehearse on Testnet First
+
+Mainnet is live, so testnet is no longer where you wait for DigiDollar — it is where you rehearse the full deposit → credit → withdraw → reconcile loop before touching real customer funds.
 
 The current public testnet in this source tree is **testnet26**. DigiDollar activation is BIP9-gated at/after block 600 once 140 of 200 blocks signal; verify status with `getdigidollardeploymentinfo`.
 
 ### Testnet Quick Start
 
-1. **Download** the latest DigiByte Core v9.26.2 release build from this branch
+1. **Download** the latest DigiByte Core v9.26.x release build from this branch
 2. **Configure:**
    ```ini
    testnet=1
@@ -409,7 +422,15 @@ The current public testnet in this source tree is **testnet26**. DigiDollar acti
 
 ## 14. Mainnet Activation
 
-Activation parameters are branch/network-specific. On mainnet, DigiDollar is gated by BIP9 bit 23 with a start time of 2026-06-01, a 40,320-block signaling window, a 70% threshold (28,224 of 40,320), and a minimum activation height of 23,627,520 (`src/kernel/chainparams.cpp:177-180,307`). Always confirm the live state by calling `getdigidollardeploymentinfo` on the target release and network as the source of truth for status, window size, threshold, timeout, and minimum activation height.
+**DigiDollar is active on mainnet.** It locked in through BIP9 bit 23 miner signaling and activated at block **23,869,440** on **17 July 2026**, alongside the AlgoLock retired-algorithm rule.
+
+The original signaling parameters were BIP9 bit 23, a start time of 2026-06-01, a 40,320-block signaling window, a 70% threshold (28,224 of 40,320), and a minimum activation height of 23,627,520.
+
+As of **v9.26.5** the mainnet deployment is **buried** (BIP90): the activation height is hardcoded as `consensus.DigiDollarHeight = 23869440` in `src/kernel/chainparams.cpp` rather than evaluated as a live version-bits deployment.
+
+Activation parameters remain branch- and network-specific. Always confirm the live state by calling `getdigidollardeploymentinfo` on your target release and network as the source of truth for status, window size, threshold, timeout, and activation height.
+
+> **Note on reading the height from a pre-v9.26.5 node.** On v9.26.4 and earlier, `getdigidollardeploymentinfo` reports `activation_height: 23869439` — the final block of the BIP9 `LOCKED_IN` period. DigiDollar rules take effect at the *following* block, **23,869,440**, which is the value buried in consensus from v9.26.5 onward. Use 23,869,440 when recording the activation height.
 
 ---
 
