@@ -21,6 +21,16 @@
 
 namespace DigiDollar {
 
+/**
+ * Minimum fee rate for DigiDollar transactions, in satoshis per kvB
+ * (0.35 DGB/kvB, i.e. 35,000 sat/vB). DigiByte expresses fee rates per
+ * kilo-vbyte, not per vbyte.
+ */
+static constexpr CAmount MIN_DD_FEE_RATE{35000000};
+
+/** Absolute fee floor for any DigiDollar transaction (0.1 DGB). */
+static constexpr CAmount MIN_DD_TX_FEE{10000000};
+
 // Apply the wallet mint collateral safety margin used by MintTxBuilder.
 // The input and output are DGB satoshis.
 CAmount ApplyCollateralSafetyMargin(CAmount requiredCollateral);
@@ -312,6 +322,28 @@ std::string EncodeDigiDollarAddress(const CTxDestination& dest, const CChainPara
  * @return Estimated virtual size in vBytes
  */
 size_t EstimateTransactionVSize(const CMutableTransaction& tx);
+
+/**
+ * Approximate fee that spending one additional input costs at the given fee rate.
+ *
+ * A fee UTXO worth less than this has negative effective value: adding it to a
+ * transaction reduces, rather than increases, the amount available to pay the
+ * fee. Coin selection for DigiDollar fee inputs prices inputs with this.
+ *
+ * The marginal input size is measured against EstimateTransactionVSize() at zero
+ * inputs and comes out at 92 vB (41 base bytes plus the flat 110-byte witness
+ * allowance, i.e. 68.5 vB, carrying the estimator's 35% margin). It is an
+ * approximation, not an exact per-input cost: EstimateTransactionVSize()
+ * truncates twice, so the true marginal alternates between 92 and 93 vB
+ * depending on the size of the rest of the transaction. Callers that must not
+ * come up short re-project the transaction and re-select (see
+ * DigiDollarWallet::SelectRedemptionFeeCoins), which absorbs the difference.
+ *
+ * @param feeRate Fee rate in satoshis per kvB
+ * @return Cost in satoshis of spending one extra input, 0 for a non-positive
+ *         fee rate, MAX_MONEY if the fee rate is large enough to overflow
+ */
+CAmount EstimateInputSpendCost(CAmount feeRate);
 
 } // namespace DigiDollar
 

@@ -99,6 +99,8 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 - Global `g_scriptMetadataMap` protected by `RecursiveMutex`, capped at 10,000 entries
 
 ### src/digidollar/txbuilder.h
+- `DigiDollar::MIN_DD_FEE_RATE` = 35,000,000 sat/kvB (0.35 DGB/kvB) → the DigiDollar fee rate; shared by mint/transfer/redeem RPCs and wallet coin selection
+- `DigiDollar::MIN_DD_TX_FEE` = 10,000,000 sat (0.1 DGB) → absolute fee floor for any DigiDollar transaction
 - `DigiDollar::TxBuilderResult` (struct) → result of tx building: success, CMutableTransaction, error string, totalFees, collateralRequired, ddChange
 - `DigiDollar::TxBuilderMintParams` (struct) → ddAmount, lockDays, lockTier (0-9), ownerKey, feeRate, utxos, optional dgbChangeDest
 - `DigiDollar::TxBuilderTransferParams` (struct) → recipients vector (address, amount), feeRate, ddUtxos, ddAmounts, feeUtxos, feeAmounts, spenderKey, optional dgbChangeDest
@@ -127,6 +129,7 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
   - `CreateRedemptionScript(path, owner)` → creates Schnorr-signed redemption script
 - `DigiDollar::EncodeDigiDollarAddress(dest, chainParams)` → converts CTxDestination to DD address string via CDigiDollarAddress
 - `DigiDollar::EstimateTransactionVSize(tx)` → estimates vsize with 110-byte witness per input + 35% safety margin
+- `DigiDollar::EstimateInputSpendCost(feeRate)` → approximate fee cost of one extra input (92 vB marginal measured against EstimateTransactionVSize at zero inputs → 3,220,000 sat at MIN_DD_FEE_RATE); a fee UTXO worth less has negative effective value. Approximation only: the estimator's double truncation makes the true marginal alternate 92/93 vB, absorbed by the redemption re-projection loop. Returns 0 for a non-positive rate, MAX_MONEY on overflow
 
 ### src/digidollar/txbuilder.cpp
 - Full implementation of all TxBuilder classes (~1,425 lines)
@@ -708,7 +711,8 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
     - `ProcessIncomingTransaction(tx, txid)` → processes any incoming DD tx and adds to history
   - **Coin Selection:**
     - `SelectDDCoins(target, selected_utxos, selected_total, amounts)` → selects DD UTXOs for target amount
-    - `SelectFeeCoins(fee_amount, selected_utxos, selected_total, amounts, exclude)` → selects DGB UTXOs for fees
+    - `SelectFeeCoins(fee_amount, selected_utxos, selected_total, amounts, exclude, minimize_inputs=false, fee_rate=MIN_DD_FEE_RATE)` → selects DGB UTXOs for fees. Prices candidates by EFFECTIVE value (value − `EstimateInputSpendCost(fee_rate)`): UTXOs that cost at least as much to spend as they are worth are skipped, and `fee_amount` must be met by the sum of effective values, not the raw sum (`selected_total` is still the raw total). Smallest-first by default (spends small UTXOs down, at the cost of a larger fee); `minimize_inputs=true` sorts largest-first for the fewest inputs
+    - `SelectRedemptionFeeCoins(params, error, projected_fee)` → `DDFeeSelectionResult` {OK, INSUFFICIENT_FUNDS, INVALID_TRANSACTION}. Fee-input selection for redemptions: excludes the collateral outpoint and the DD UTXOs being burned, then converges (≤6 rounds) by projecting the redemption tx, deriving the real fee from `EstimateTransactionVSize`, and re-selecting against it; enforces MAX_STANDARD_TX_WEIGHT and the MIN_DD_TX_FEE floor. Fills `params.feeUtxos`/`feeAmounts`; `projected_fee` is an upper bound
     - `CalculateTransactionFee(tx)` → estimates fee for transaction
   - **Utility:**
     - `IsLockedByDD(outpoint)` → checks if outpoint is locked by DD (protects from UnlockAllCoins)

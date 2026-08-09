@@ -1308,9 +1308,8 @@ RPCHelpMan mintdigidollar()
             // MIN_DD_TX_FEE = 10,000,000 satoshis = 0.1 DGB
             // For a typical 300-byte tx, we need feeRate = 10,000,000 / 300 * 1000 = 33,333,333 sat/kB
             // We use 35,000,000 sat/kB to ensure minimum is always met
-            static const CAmount MIN_DD_FEE_RATE = 35000000; // 0.35 DGB/kB ensures min 0.1 DGB for typical tx
             CAmount feeRate = OptionalParamIsSet(request, 2) ?
-                std::max(request.params[2].getInt<int64_t>(), MIN_DD_FEE_RATE) : MIN_DD_FEE_RATE;
+                std::max<CAmount>(request.params[2].getInt<int64_t>(), DigiDollar::MIN_DD_FEE_RATE) : DigiDollar::MIN_DD_FEE_RATE;
 
             // Validate parameters
             if (ddAmount <= 0) {
@@ -2307,8 +2306,7 @@ RPCHelpMan redeemdigidollar()
             redeemParams.path = errRedemptionActive ? DigiDollar::RedemptionPath::ERR : DigiDollar::RedemptionPath::NORMAL;
             redeemParams.ownerKey = ownerKey;  // BUG #10 FIX: Use position owner key directly
             // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
-            static const CAmount MIN_DD_FEE_RATE = 35000000; // 0.35 DGB/kB ensures min 0.1 DGB for typical tx
-            redeemParams.feeRate = MIN_DD_FEE_RATE;
+            redeemParams.feeRate = DigiDollar::MIN_DD_FEE_RATE; // 0.35 DGB/kB ensures min 0.1 DGB for typical tx
 
             // Use the caller's requested DGB return address if supplied. If no
             // address is supplied, create a wallet destination so the returned
@@ -2374,33 +2372,26 @@ RPCHelpMan redeemdigidollar()
             LogPrintf("  - DD Minted: %d cents\n", foundPosition.dd_minted);
             LogPrintf("  - Unlock Height: %d\n", foundPosition.unlock_height);
 
-            // Select fee UTXOs from wallet
-            // CRITICAL: Build exclude list to prevent selecting collateral or DD UTXOs as fee inputs
-            std::vector<COutPoint> exclude_utxos;
-            exclude_utxos.push_back(redeemParams.collateralOutpoint);  // Don't select collateral
-            exclude_utxos.insert(exclude_utxos.end(), redeemParams.ddUtxos.begin(), redeemParams.ddUtxos.end());  // Don't select DD UTXOs
-
-            LogPrintf("DigiDollar: Building exclude list with %d UTXOs (1 collateral + %d DD)\n",
-                      exclude_utxos.size(), redeemParams.ddUtxos.size());
-
-            // Bug #9 fix: Calculate fee from feeRate and estimated tx size instead of hardcoding.
-            // Redemption tx: ~3 inputs (collateral + DD + fee), ~2-3 outputs → ~400 vbytes.
-            // Apply 50% safety margin for script-path spending variance.
-            CAmount estimatedFee = (400 * redeemParams.feeRate) / 1000; // vsize * feeRate / 1000
-            estimatedFee = estimatedFee + (estimatedFee / 2); // 50% safety margin
-            if (estimatedFee < 10000000) estimatedFee = 10000000; // Floor at 0.1 DGB
-            LogPrintf("DigiDollar: Estimated redemption fee: %lld sats (%.8f DGB)\n",
-                      static_cast<long long>(estimatedFee), estimatedFee / 100000000.0);
-            CAmount selectedFeeTotal = 0;
-            std::vector<CAmount> feeAmounts;
-
-            if (!dd_wallet->SelectFeeCoins(estimatedFee, redeemParams.feeUtxos, selectedFeeTotal, &feeAmounts, &exclude_utxos)) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient DGB balance for transaction fees");
+            // Select fee UTXOs from the wallet. A fixed size guess cannot work
+            // here: the fee a redemption owes depends on how many fee inputs it
+            // ends up carrying, and each input costs a fee of its own to spend.
+            // SelectRedemptionFeeCoins() re-projects the transaction after every
+            // selection round, and excludes the collateral outpoint and the DD
+            // UTXOs being burned from the candidate set.
+            std::string feeSelectionError;
+            CAmount projectedFee = 0;
+            switch (dd_wallet->SelectRedemptionFeeCoins(redeemParams, feeSelectionError, &projectedFee)) {
+            case DDFeeSelectionResult::OK:
+                break;
+            case DDFeeSelectionResult::INSUFFICIENT_FUNDS:
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, feeSelectionError);
+            case DDFeeSelectionResult::INVALID_TRANSACTION:
+                // Not a funding problem: the redemption cannot be built as asked.
+                throw JSONRPCError(RPC_WALLET_ERROR, feeSelectionError);
             }
 
-            redeemParams.feeAmounts = feeAmounts;
-            LogPrintf("DigiDollar: Selected %d sats in fees from %d UTXOs for redemption\n",
-                     selectedFeeTotal, redeemParams.feeUtxos.size());
+            LogPrintf("DigiDollar: Selected %zu fee UTXOs for redemption (projected fee at most %lld sats)\n",
+                      redeemParams.feeUtxos.size(), static_cast<long long>(projectedFee));
 
             DigiDollar::TxBuilderResult redeemResult = redeemBuilder.BuildRedemptionTransaction(redeemParams);
 

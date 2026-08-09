@@ -38,8 +38,6 @@
 #include <set>
 
 namespace {
-static constexpr CAmount MIN_DD_TRANSFER_FEE_RATE{35000000}; // 0.35 DGB/kB
-static constexpr CAmount MIN_DD_TRANSFER_FEE{10000000};       // 0.1 DGB
 static constexpr CAmount TRANSFER_BUILDER_PRICE_UNUSED{1};    // Transfers are price-independent.
 
 CScript BuildDDTransferMetadataScript(const std::vector<CAmount>& amounts)
@@ -102,7 +100,68 @@ bool PreflightDDTransferCapacity(const DigiDollar::TxBuilderTransferParams& para
                           weight, static_cast<unsigned>(vsize), MAX_STANDARD_TX_WEIGHT);
         return false;
     }
-    const CAmount fee = std::max<CAmount>((static_cast<CAmount>(vsize) * MIN_DD_TRANSFER_FEE_RATE) / 1000, MIN_DD_TRANSFER_FEE);
+    const CAmount fee = std::max<CAmount>((static_cast<CAmount>(vsize) * DigiDollar::MIN_DD_FEE_RATE) / 1000, DigiDollar::MIN_DD_TX_FEE);
+    if (projected_vsize) *projected_vsize = vsize;
+    if (projected_fee) *projected_fee = fee;
+    return true;
+}
+
+/** Worst-case (largest) output script the redemption builder can emit. */
+CScript WorstCaseDDOutputScript()
+{
+    CScript script;
+    script << OP_1 << std::vector<unsigned char>(32, 0);
+    return script;
+}
+
+/**
+ * Project the redemption transaction RedeemTxBuilder::BuildRedemptionTransaction()
+ * will build for `params` (including the fee inputs currently held in
+ * params.feeUtxos) and derive the fee it will owe. Redemption counterpart of
+ * PreflightDDTransferCapacity: the fee follows from the built transaction, so it
+ * cannot be pinned down by a fixed size guess.
+ */
+bool PreflightDDRedemptionCapacity(const DigiDollar::TxBuilderRedeemParams& params,
+                                   std::string& error,
+                                   size_t* projected_vsize = nullptr,
+                                   CAmount* projected_fee = nullptr)
+{
+    if (params.feeRate <= 0) {
+        error = strprintf("Invalid DigiDollar redemption fee rate: %lld sat/kvB. The fee rate must be positive.",
+                          static_cast<long long>(params.feeRate));
+        return false;
+    }
+
+    CMutableTransaction projected;
+    projected.SetDigiDollarType(::DD_TX_REDEEM);
+    projected.vin.push_back(CTxIn(params.collateralOutpoint));
+    for (const auto& utxo : params.ddUtxos) projected.vin.push_back(CTxIn(utxo));
+    for (const auto& utxo : params.feeUtxos) projected.vin.push_back(CTxIn(utxo));
+
+    // Returned collateral.
+    projected.vout.push_back(CTxOut(params.collateralAmount,
+                                    params.collateralDest.has_value()
+                                        ? GetScriptForDestination(*params.collateralDest)
+                                        : WorstCaseDDOutputScript()));
+    // Worst-case DD change output plus the OP_RETURN that carries its amount,
+    // and the DGB fee change output. Including them unconditionally keeps the
+    // projection deterministic and never under-states the built transaction.
+    projected.vout.push_back(CTxOut(0, WorstCaseDDOutputScript()));
+    CScript metadata;
+    metadata << OP_RETURN << std::vector<unsigned char>{'D', 'D'} << CScriptNum(3) << CScriptNum(params.ddToRedeem);
+    projected.vout.push_back(CTxOut(0, metadata));
+    projected.vout.push_back(CTxOut(1, params.dgbChangeDest.has_value()
+                                           ? GetScriptForDestination(*params.dgbChangeDest)
+                                           : WorstCaseDDOutputScript()));
+
+    const size_t vsize = DigiDollar::EstimateTransactionVSize(projected);
+    const int64_t weight = static_cast<int64_t>(vsize) * WITNESS_SCALE_FACTOR;
+    if (weight > MAX_STANDARD_TX_WEIGHT) {
+        error = strprintf("Projected DigiDollar redemption is too large: %d weight units (%u vB) across %u inputs, standard limit is %d WU. Consolidate DGB or DD UTXOs first.",
+                          weight, static_cast<unsigned>(vsize), static_cast<unsigned>(projected.vin.size()), MAX_STANDARD_TX_WEIGHT);
+        return false;
+    }
+    const CAmount fee = std::max<CAmount>((static_cast<CAmount>(vsize) * params.feeRate) / 1000, DigiDollar::MIN_DD_TX_FEE);
     if (projected_vsize) *projected_vsize = vsize;
     if (projected_fee) *projected_fee = fee;
     return true;
@@ -1449,7 +1508,7 @@ bool DigiDollarWallet::TransferDigiDollarMany(const std::vector<std::pair<CDigiD
         DigiDollar::TxBuilderTransferParams params;
         params.recipients = plan.recipients;
         // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
-        params.feeRate = 35000000; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
+        params.feeRate = DigiDollar::MIN_DD_FEE_RATE; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
         params.ddUtxos = plan.dd_utxos;
         params.ddAmounts = plan.dd_amounts;
         LogPrintf("DigiDollar: Transfer - Selected %zu DD UTXOs totaling %lld cents\n",
@@ -3569,8 +3628,8 @@ std::vector<DDTransaction> DigiDollarWallet::GetRedemptionHistory() const {
 CAmount DigiDollarWallet::EstimateRedemptionFee(const COutPoint& position, DigiDollar::RedemptionPath path) const {
     auto locks = LockDDWallet();
     // Bug #9/#17 fix: Use actual DD fee rate for estimation
-    static const CAmount MIN_DD_TX_FEE = 10000000;       // 0.1 DGB minimum
-    static const CAmount FEE_RATE_PER_KB = 35000000;     // 0.35 DGB/kB (matches MIN_DD_FEE_RATE)
+    static const CAmount MIN_DD_TX_FEE = DigiDollar::MIN_DD_TX_FEE;
+    static const CAmount FEE_RATE_PER_KB = DigiDollar::MIN_DD_FEE_RATE;
 
     // Estimate transaction vsize based on redemption path
     // Redemption tx: 3 inputs (collateral + DD + fee), 2-3 outputs
@@ -5143,7 +5202,7 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
         params.feeUtxos = fee_utxos;
         params.feeAmounts = fee_amounts;  // Pass actual fee UTXO amounts
         // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
-        params.feeRate = 35000000; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
+        params.feeRate = DigiDollar::MIN_DD_FEE_RATE; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
 
         // Get the spending key from wallet
         // For DD transfers, we need the key that owns the first DD UTXO
@@ -5558,7 +5617,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         }
 
         // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
-        params.feeRate = 35000000; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
+        params.feeRate = DigiDollar::MIN_DD_FEE_RATE; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
 
         // Select DD UTXOs to burn (any DD can be used - DD is fungible)
         // The key is to burn the EXACT amount that was minted for this vault
@@ -5574,31 +5633,18 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
             LogPrintf("DigiDollar: ddAmounts[%zu] = %lld cents\n", i, static_cast<long long>(params.ddAmounts[i]));
         }
 
-        // Select DGB UTXOs for fees
-        // CRITICAL FIX: Properly estimate redemption transaction fees
-        // Redemption tx structure: 3 inputs (collateral + DD + fee), 2 outputs (return + change)
-        // Approximate vsize: ~400 bytes with script-path spending
-        // Fee calculation: vsize * feeRate / 1000 (feeRate is in sat/kB)
-        CAmount estimatedFee = (400 * params.feeRate) / 1000; // Proper fee estimate
-        // Add safety margin
-        estimatedFee = estimatedFee + (estimatedFee * 50 / 100); // 50% margin for worst case
-        LogPrintf("DigiDollar: Estimated redemption fee: %lld sats (%.8f DGB)\n", static_cast<long long>(estimatedFee), estimatedFee / 100000000.0);
-
-        // Build exclude list: collateral outpoint + all DD UTXOs that will be burned
-        std::vector<COutPoint> exclude_utxos;
-        exclude_utxos.push_back(params.collateralOutpoint);  // Don't select collateral as fee input
-        exclude_utxos.insert(exclude_utxos.end(), params.ddUtxos.begin(), params.ddUtxos.end());  // Don't select DD UTXOs as fee inputs
-
-        LogPrintf("DigiDollar: Built exclude list with %zu UTXOs (1 collateral + %zu DD)\n",
-                  exclude_utxos.size(), params.ddUtxos.size());
-
-        CAmount selectedFeeTotal = 0;
-        std::vector<CAmount> fee_amounts;
-        if (!SelectFeeCoins(estimatedFee, params.feeUtxos, selectedFeeTotal, &fee_amounts, &exclude_utxos)) {
-            LogPrintf("DigiDollar: Insufficient DGB balance for fees\n");
+        // Select DGB UTXOs for fees. The fee depends on how many inputs the
+        // redemption ends up carrying, so converge on it from the projected
+        // transaction instead of guessing a fixed size. This also excludes the
+        // collateral outpoint and the DD UTXOs being burned from selection.
+        std::string fee_error;
+        CAmount projectedFee = 0;
+        if (SelectRedemptionFeeCoins(params, fee_error, &projectedFee) != DDFeeSelectionResult::OK) {
+            LogPrintf("DigiDollar: %s\n", fee_error);
             return false;
         }
-        params.feeAmounts = fee_amounts;  // TxBuilder needs per-UTXO amounts for fee inputs
+        LogPrintf("DigiDollar: Selected %zu DGB fee input(s); projected redemption fee at most %lld sats\n",
+                  params.feeUtxos.size(), static_cast<long long>(projectedFee));
 
         LogPrintf("DigiDollar: CALLING BuildRedemptionTransaction now...\n");
         auto result = builder.BuildRedemptionTransaction(params);
@@ -6166,13 +6212,13 @@ bool DigiDollarWallet::PlanDigiDollarTransfer(const std::vector<std::pair<CDigiD
     params.recipients = plan.recipients;
     params.ddUtxos = plan.dd_utxos;
     params.ddAmounts = plan.dd_amounts;
-    params.feeRate = MIN_DD_TRANSFER_FEE_RATE;
+    params.feeRate = DigiDollar::MIN_DD_FEE_RATE;
     if (!PreflightDDTransferCapacity(params, plan.selected_dd_total, plan.total_amount, error, &plan.projected_vsize, &plan.estimated_fee)) return false;
 
     return true;
 }
 
-bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts, const std::vector<COutPoint>* exclude_utxos) const {
+bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts, const std::vector<COutPoint>* exclude_utxos, bool minimize_inputs, CAmount fee_rate) const {
     auto locks = LockDDWallet();
     // Reset output parameters
     selected_total = 0;
@@ -6182,6 +6228,13 @@ bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COu
     // Validate fee amount
     if (fee_amount <= 0) {
         LogPrintf("DigiDollar: SelectFeeCoins - Invalid fee amount %lld\n", static_cast<long long>(fee_amount));
+        return false;
+    }
+
+    // The fee rate is what makes an input's cost - and therefore its effective
+    // value - meaningful, so it has to be a real rate.
+    if (fee_rate <= 0) {
+        LogPrintf("DigiDollar: SelectFeeCoins - Invalid fee rate %lld sat/kvB\n", static_cast<long long>(fee_rate));
         return false;
     }
 
@@ -6222,15 +6275,28 @@ bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COu
 
     LogPrintf("DigiDollar: SelectFeeCoins - Found %zu available DGB UTXOs before filtering\n", available_coins.size());
 
-    // Sort by amount (smallest first for efficiency)
+    // Adding a fee input is not free: it enlarges the transaction the fee is
+    // computed from. Price every candidate by its effective value (value minus
+    // the cost of spending it) so the selection still covers the fee once the
+    // inputs it chose are paid for.
+    const CAmount input_spend_cost = DigiDollar::EstimateInputSpendCost(fee_rate);
+
+    // Sort by amount. Smallest first by default: that is the order DD transfers
+    // have always used, and it spends small UTXOs down rather than leaving them
+    // behind. It is not the cheapest order - every extra input it takes adds
+    // input_spend_cost to the fee actually paid - so callers that care about the
+    // fee, or that must converge on an exact one, pass minimize_inputs.
     std::sort(available_coins.begin(), available_coins.end(),
-              [](const wallet::COutput& a, const wallet::COutput& b) {
-                  return a.txout.nValue < b.txout.nValue;
+              [minimize_inputs](const wallet::COutput& a, const wallet::COutput& b) {
+                  return minimize_inputs ? a.txout.nValue > b.txout.nValue
+                                         : a.txout.nValue < b.txout.nValue;
               });
 
-    // Select UTXOs until fee covered, excluding any specified UTXOs
+    // Select UTXOs until the fee is covered in effective value, excluding any
+    // specified UTXOs
+    CAmount selected_effective = 0;
     for (const auto& coin : available_coins) {
-        if (selected_total >= fee_amount) break;
+        if (selected_effective >= fee_amount) break;
         if (require_confirmed_fee_inputs && coin.depth < 1) {
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: SelectFeeCoins - skipping unconfirmed fee UTXO %s:%u while Dandelion is enabled\n",
                      coin.outpoint.hash.ToString(), coin.outpoint.n);
@@ -6254,28 +6320,112 @@ bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COu
             if (should_exclude) continue;
         }
 
+        // A UTXO worth no more than it costs to spend can never help pay the
+        // fee: including it would lower the amount available to pay with.
+        if (amount <= input_spend_cost) {
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: SelectFeeCoins - skipping uneconomic fee UTXO %s:%u (%lld sats, costs %lld sats to spend)\n",
+                     outpoint.hash.ToString(), outpoint.n,
+                     static_cast<long long>(amount), static_cast<long long>(input_spend_cost));
+            continue;
+        }
+
         selected_utxos.push_back(outpoint);
         if (selected_amounts) selected_amounts->push_back(amount);
         selected_total += amount;
+        selected_effective += amount - input_spend_cost;
 
-        LogPrintf("DigiDollar: SelectFeeCoins - Selected UTXO %s:%u (%lld sats)\n",
-                  outpoint.hash.ToString(), outpoint.n, static_cast<long long>(amount));
+        LogPrintf("DigiDollar: SelectFeeCoins - Selected UTXO %s:%u (%lld sats, %lld sats effective)\n",
+                  outpoint.hash.ToString(), outpoint.n, static_cast<long long>(amount),
+                  static_cast<long long>(amount - input_spend_cost));
     }
 
-    bool success = (selected_total >= fee_amount);
+    bool success = (selected_effective >= fee_amount);
 
     if (!success) {
-        LogPrintf("DigiDollar: SelectFeeCoins - FAILED: need %lld sats, have %lld\n",
-                  static_cast<long long>(fee_amount), static_cast<long long>(selected_total));
+        LogPrintf("DigiDollar: SelectFeeCoins - FAILED: need %lld sats, have %lld sats effective (%lld sats raw from %zu UTXOs)\n",
+                  static_cast<long long>(fee_amount), static_cast<long long>(selected_effective),
+                  static_cast<long long>(selected_total), selected_utxos.size());
         selected_utxos.clear();
         if (selected_amounts) selected_amounts->clear();
         selected_total = 0;
     } else {
-        LogPrintf("DigiDollar: SelectFeeCoins - SUCCESS: selected %lld sats from %zu UTXOs\n",
-                  static_cast<long long>(selected_total), selected_utxos.size());
+        LogPrintf("DigiDollar: SelectFeeCoins - SUCCESS: selected %lld sats (%lld sats effective) from %zu UTXOs\n",
+                  static_cast<long long>(selected_total), static_cast<long long>(selected_effective),
+                  selected_utxos.size());
     }
 
     return success;
+}
+
+DDFeeSelectionResult DigiDollarWallet::SelectRedemptionFeeCoins(DigiDollar::TxBuilderRedeemParams& params,
+                                                                std::string& error,
+                                                                CAmount* projected_fee) const
+{
+    // Bound the select/re-project loop; each round can only raise the fee
+    // target, so a handful of rounds is plenty for any convergent wallet.
+    static constexpr int MAX_FEE_SELECTION_ATTEMPTS = 6;
+
+    error.clear();
+    params.feeUtxos.clear();
+    params.feeAmounts.clear();
+
+    // Never fund the fee from the collateral being released or from the DD
+    // tokens being burned.
+    std::vector<COutPoint> exclude_utxos;
+    exclude_utxos.reserve(1 + params.ddUtxos.size());
+    exclude_utxos.push_back(params.collateralOutpoint);
+    exclude_utxos.insert(exclude_utxos.end(), params.ddUtxos.begin(), params.ddUtxos.end());
+
+    // Seed the target with the fee of a redemption carrying no fee inputs; each
+    // round then re-projects the transaction and raises the target by whatever
+    // the inputs it picked added to the fee.
+    size_t projected_vsize = 0;
+    CAmount required_fee = 0;
+    if (!PreflightDDRedemptionCapacity(params, error, &projected_vsize, &required_fee)) {
+        return DDFeeSelectionResult::INVALID_TRANSACTION;
+    }
+
+    CAmount fee_target = required_fee;
+    CAmount selected_total = 0;
+    for (int attempt = 0; attempt < MAX_FEE_SELECTION_ATTEMPTS; ++attempt) {
+        params.feeUtxos.clear();
+        params.feeAmounts.clear();
+        selected_total = 0;
+        if (!SelectFeeCoins(fee_target, params.feeUtxos, selected_total, &params.feeAmounts,
+                            &exclude_utxos, /*minimize_inputs=*/true, /*fee_rate=*/params.feeRate)) {
+            error = strprintf("Insufficient spendable DGB for the redemption fee: need %lld sats net of the cost of spending the fee inputs (about %lld sats per input at %lld sat/kvB). Add DGB, or consolidate small DGB UTXOs into fewer, larger ones and retry.",
+                              static_cast<long long>(fee_target),
+                              static_cast<long long>(DigiDollar::EstimateInputSpendCost(params.feeRate)),
+                              static_cast<long long>(params.feeRate));
+            return DDFeeSelectionResult::INSUFFICIENT_FUNDS;
+        }
+
+        if (!PreflightDDRedemptionCapacity(params, error, &projected_vsize, &required_fee)) {
+            params.feeUtxos.clear();
+            params.feeAmounts.clear();
+            return DDFeeSelectionResult::INVALID_TRANSACTION;
+        }
+
+        if (selected_total >= required_fee) {
+            if (projected_fee) *projected_fee = required_fee;
+            // required_fee is an upper bound: the projection carries a worst-case
+            // output set, so the built transaction may owe slightly less.
+            LogPrintf("DigiDollar: Redemption fee inputs converged after %d round(s): %zu input(s) totalling %lld sats for a projected %u vB transaction owing at most %lld sats\n",
+                      attempt + 1, params.feeUtxos.size(), static_cast<long long>(selected_total),
+                      static_cast<unsigned>(projected_vsize), static_cast<long long>(required_fee));
+            return DDFeeSelectionResult::OK;
+        }
+
+        // Short by exactly this much once the selected inputs are paid for.
+        fee_target += required_fee - selected_total;
+    }
+
+    error = strprintf("Could not assemble DGB fee inputs for this redemption after %d attempts: last selection was %zu input(s) totalling %lld sats against a projected %lld sat fee. The wallet's DGB is too fragmented - consolidate small DGB UTXOs into fewer, larger ones and retry.",
+                      MAX_FEE_SELECTION_ATTEMPTS, params.feeUtxos.size(),
+                      static_cast<long long>(selected_total), static_cast<long long>(required_fee));
+    params.feeUtxos.clear();
+    params.feeAmounts.clear();
+    return DDFeeSelectionResult::INSUFFICIENT_FUNDS;
 }
 
 CAmount DigiDollarWallet::CalculateTransactionFee(const CMutableTransaction& tx) const {
@@ -6285,10 +6435,10 @@ CAmount DigiDollarWallet::CalculateTransactionFee(const CMutableTransaction& tx)
     static const CAmount MIN_RELAY_FEE_PER_KB = 100000;  // 0.001 DGB/kB (matches network min relay fee)
     // Bug #9 fix: Use the actual DD fee rate (35M sat/kB) instead of the generic 200K sat/kB.
     // DD transactions require higher fees to ensure relay at the DD minimum fee rate.
-    static const CAmount DEFAULT_FEE_RATE = 35000000;    // 0.35 DGB/kB (matches MIN_DD_FEE_RATE)
+    static const CAmount DEFAULT_FEE_RATE = DigiDollar::MIN_DD_FEE_RATE;
 
     // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
-    static const CAmount MIN_DD_TX_FEE = 10000000;       // 0.1 DGB minimum for DigiDollar transactions
+    static const CAmount MIN_DD_TX_FEE = DigiDollar::MIN_DD_TX_FEE;
 
     // Calculate transaction size
     // NOTE: This is an estimate. Actual size determined after signing

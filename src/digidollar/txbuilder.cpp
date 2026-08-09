@@ -34,7 +34,6 @@ static const size_t ESTIMATED_TX_VSIZE = 500;      // Estimated transaction size
 static const int DEFAULT_SYSTEM_COLLATERAL = 150;   // Default system health (150%)
 static const double MAX_FEE_RATIO = 0.5;           // Maximum fee as ratio of total input
 static const size_t MAX_TX_INPUTS = 400;           // Maximum inputs per transaction to stay under MAX_STANDARD_TX_WEIGHT
-static const CAmount MIN_DD_TX_FEE = 10000000;     // 0.1 DGB minimum DD transaction fee
 
 CAmount ApplyCollateralSafetyMargin(CAmount requiredCollateral)
 {
@@ -1295,14 +1294,24 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     LogPrintf("DigiDollar: Calculated fees: %d sats (fee inputs: %d sats)\n", result.totalFees, totalFeeIn);
 
     if (totalFeeIn <= 0) {
-        result.error = "Insufficient fee inputs for DD redemption fee";
+        result.error = strprintf("Insufficient fee inputs for DD redemption fee: no DGB fee input was supplied "
+                                 "for a transaction that owes %lld sats. Fund the wallet with spendable DGB and retry.",
+                                 static_cast<long long>(result.totalFees));
         LogPrintf("DigiDollar: BuildRedemptionTransaction FAILED - %s\n", result.error);
         return result;
     }
 
     CAmount feeChange = totalFeeIn - result.totalFees;
     if (feeChange < 0) {
-        result.error = "Insufficient fee inputs for DD redemption fee";
+        // Every fee input costs a fee of its own to spend, so a pile of small
+        // UTXOs can total more than the fee and still not pay it.
+        result.error = strprintf("Insufficient fee inputs for DD redemption fee: %u fee input(s) totalling %lld sats "
+                                 "against a %lld sat fee (each extra fee input costs about %lld sats to spend). "
+                                 "Consolidate small DGB UTXOs into fewer, larger ones and retry.",
+                                 static_cast<unsigned>(params.feeUtxos.size()),
+                                 static_cast<long long>(totalFeeIn),
+                                 static_cast<long long>(result.totalFees),
+                                 static_cast<long long>(EstimateInputSpendCost(params.feeRate)));
         LogPrintf("DigiDollar: BuildRedemptionTransaction FAILED - %s\n", result.error);
         return result;
     }
@@ -1488,6 +1497,29 @@ size_t EstimateTransactionVSize(const CMutableTransaction& tx) {
     // Add 35% safety margin to account for estimation errors
     // Taproot transactions with script-path spending can be larger than key-path estimates
     return vsize + (vsize * 35 / 100);
+}
+
+namespace {
+//! Marginal vsize of one extra input, measured against EstimateTransactionVSize()
+//! at zero inputs. The estimator truncates twice, so the true marginal alternates
+//! between 92 and 93 vB with the size of the rest of the transaction; this is the
+//! lower of the two and therefore an approximation, not a bound. See
+//! EstimateInputSpendCost() in the header.
+size_t EstimateInputVSize() {
+    CMutableTransaction probe;
+    const size_t without_input = EstimateTransactionVSize(probe);
+    probe.vin.emplace_back();
+    const size_t with_input = EstimateTransactionVSize(probe);
+    return with_input - without_input;
+}
+} // namespace
+
+CAmount EstimateInputSpendCost(CAmount feeRate) {
+    if (feeRate <= 0) return 0;
+    const CAmount vsize = static_cast<CAmount>(EstimateInputVSize());
+    // Fee rates reach this from RPC parameters, so guard the multiply.
+    if (feeRate > std::numeric_limits<CAmount>::max() / vsize) return MAX_MONEY;
+    return (vsize * feeRate) / 1000;
 }
 
 } // namespace DigiDollar

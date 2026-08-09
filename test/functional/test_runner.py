@@ -263,6 +263,7 @@ BASE_SCRIPTS = [
     'digidollar_persistence.py',
     'digidollar_network_tracking.py',
     'digidollar_redeem.py',
+    'digidollar_redeem_fragmented_fees.py',
     'digidollar_redemption_e2e.py',
     'digidollar_transactions.py',
     'digidollar_wallet.py',

@@ -138,6 +138,17 @@ struct DDTransferPlan {
     CAmount estimated_fee{0};
 };
 
+/** Outcome of DigiDollarWallet::SelectRedemptionFeeCoins(). */
+enum class DDFeeSelectionResult {
+    OK,
+    //! The wallet cannot fund the fee: not enough spendable DGB once the cost of
+    //! spending each fee input is accounted for, or the DGB is too fragmented.
+    INSUFFICIENT_FUNDS,
+    //! The redemption cannot be built as specified: invalid fee rate, or the
+    //! projected transaction exceeds MAX_STANDARD_TX_WEIGHT.
+    INVALID_TRANSACTION,
+};
+
 /**
  * DigiDollar wallet functionality
  * Provides high-level interface for DD operations
@@ -810,7 +821,56 @@ public:
     bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr) const;
     bool SelectDDCoins(const CAmount& target_amount, const std::vector<COutPoint>& preset_inputs, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr) const;
     bool PlanDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr) const;
-    bool SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts = nullptr, const std::vector<COutPoint>* exclude_utxos = nullptr) const;
+    /**
+     * Select spendable DGB UTXOs to fund a DigiDollar transaction fee.
+     *
+     * Spending an input is not free: each extra fee input costs
+     * DigiDollar::EstimateInputSpendCost(fee_rate) to spend. UTXOs are therefore
+     * priced by effective value (value minus that cost); UTXOs with a
+     * non-positive effective value are skipped, and `fee_amount` must be covered
+     * by the sum of the effective values, not by the raw sum.
+     *
+     * @param[in]  fee_amount       Fee, in satoshis, the selection must still
+     *                              cover after paying for its own inputs.
+     * @param[out] selected_utxos   Chosen outpoints.
+     * @param[out] selected_total   RAW total value of the chosen outpoints.
+     * @param[out] selected_amounts Per-outpoint values, parallel to selected_utxos.
+     * @param[in]  exclude_utxos    Outpoints that must not be selected.
+     * @param[in]  minimize_inputs  Prefer high-value UTXOs so the selection uses
+     *                              as few inputs as possible. Off by default,
+     *                              which keeps the smallest-first order DD
+     *                              transfers have always used: it spends down
+     *                              small UTXOs at the cost of a larger fee.
+     *                              Redemption opts in because it must converge
+     *                              on an exact fee.
+     * @param[in]  fee_rate         Fee rate, in satoshis per kvB, the transaction
+     *                              will pay. Must be positive; it is what makes
+     *                              the per-input cost meaningful, so a caller
+     *                              spending at a rate other than the DigiDollar
+     *                              minimum has to pass its own.
+     */
+    bool SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts = nullptr, const std::vector<COutPoint>* exclude_utxos = nullptr, bool minimize_inputs = false, CAmount fee_rate = DigiDollar::MIN_DD_FEE_RATE) const;
+
+    /**
+     * Select the DGB fee inputs for a DigiDollar redemption, converging on the
+     * fee the built transaction will actually owe.
+     *
+     * The fee of a DigiDollar transaction depends on how many inputs it ends up
+     * with, so it cannot be known from a fixed size guess: each selection round
+     * re-projects the redemption transaction and re-selects against the updated
+     * fee. Fills params.feeUtxos / params.feeAmounts on success and excludes the
+     * collateral outpoint and the DD UTXOs being burned from the selection, so
+     * that a redemption can never pay its fee out of the collateral it releases
+     * or the DD it burns.
+     *
+     * @param[in,out] params        Redemption parameters; fee inputs are filled in.
+     * @param[out]    error         Actionable message when the result is not OK.
+     * @param[out]    projected_fee Upper bound on the fee the built redemption
+     *                              will owe (the projection carries a worst-case
+     *                              output set, so the final fee can be lower).
+     */
+    DDFeeSelectionResult SelectRedemptionFeeCoins(DigiDollar::TxBuilderRedeemParams& params, std::string& error, CAmount* projected_fee = nullptr) const;
+
     CAmount CalculateTransactionFee(const CMutableTransaction& tx) const;
 
     // Phase 3.1: P2TR signing for DD inputs (Schnorr signatures)

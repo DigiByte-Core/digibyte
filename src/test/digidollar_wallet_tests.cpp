@@ -10,7 +10,10 @@
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
 #include <digidollar/digidollar.h>
+#include <digidollar/txbuilder.h>
 #include <digidollar/validation.h>
+#include <addresstype.h>
+#include <outputtype.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <key.h>
@@ -20,6 +23,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <memory>
 
 using namespace DigiDollar;
 
@@ -99,6 +103,54 @@ struct DDWalletTestFixture : public TestingSetup {
         tx.incoming = incoming;
         tx.address = CreateDDAddress(incoming ? walletKey.GetPubKey() : recipientKey.GetPubKey());
         return tx;
+    }
+
+    //! Keeps every synthetic funding txid produced below distinct.
+    uint32_t m_next_funding_locktime{0};
+
+    /**
+     * Create an empty descriptor wallet that can be stocked with exact-value
+     * DGB UTXOs via AddConfirmedUTXO(). Its chain tip is set to height 200 so
+     * anything added at height 101 is deeply confirmed (SelectFeeCoins skips
+     * depth < 1 while Dandelion is on).
+     */
+    std::unique_ptr<wallet::CWallet> CreateFeeSelectionWallet(const std::string& name) {
+        auto cwallet = std::make_unique<wallet::CWallet>(
+            m_node.chain.get(), name, wallet::CreateMockableWalletDatabase());
+        BOOST_REQUIRE(cwallet->LoadWallet() == wallet::DBErrors::LOAD_OK);
+        LOCK(cwallet->cs_wallet);
+        cwallet->SetWalletFlag(wallet::WALLET_FLAG_DESCRIPTORS);
+        cwallet->SetupDescriptorScriptPubKeyMans();
+        cwallet->SetLastBlockProcessed(200, InsecureRand256());
+        return cwallet;
+    }
+
+    /** Add one confirmed, spendable DGB UTXO of `value` satoshis. */
+    COutPoint AddConfirmedUTXO(wallet::CWallet& cwallet, CAmount value) {
+        LOCK(cwallet.cs_wallet);
+        CMutableTransaction tx;
+        tx.nLockTime = m_next_funding_locktime++;
+        tx.vout.resize(1);
+        tx.vout[0].nValue = value;
+        tx.vout[0].scriptPubKey = GetScriptForDestination(
+            *Assert(cwallet.GetNewDestination(OutputType::BECH32, "")));
+        CTransactionRef txref = MakeTransactionRef(std::move(tx));
+        BOOST_REQUIRE(cwallet.AddToWallet(
+            txref, wallet::TxStateConfirmed{InsecureRand256(), /*height=*/101, /*index=*/0}) != nullptr);
+        return COutPoint(txref->GetHash(), 0);
+    }
+
+    /** Redemption parameters with no fee inputs chosen yet. */
+    DigiDollar::TxBuilderRedeemParams MakeRedeemParams(CAmount fee_rate = DigiDollar::MIN_DD_FEE_RATE) {
+        DigiDollar::TxBuilderRedeemParams params;
+        params.collateralOutpoint = COutPoint(InsecureRand256(), 0);
+        params.collateralAmount = 20000000000;  // 200 DGB locked
+        params.ddToRedeem = TEST_DD_AMOUNT;     // $100.00
+        params.ddMinted = TEST_DD_AMOUNT;
+        params.ddUtxos = {COutPoint(InsecureRand256(), 1)};
+        params.ddAmounts = {TEST_DD_AMOUNT};
+        params.feeRate = fee_rate;
+        return params;
     }
 };
 
@@ -2032,6 +2084,338 @@ BOOST_FIXTURE_TEST_CASE(test_select_fee_coins_clears_on_failure, DDWalletTestFix
     BOOST_CHECK_EQUAL(result, false);
     BOOST_CHECK_EQUAL(total, 0);  // Should be cleared
     BOOST_CHECK_EQUAL(selected.size(), 0);  // Should be cleared
+}
+
+/**
+ * REGRESSION: redeemdigidollar fails with
+ *   "Insufficient fee inputs for DD redemption fee"
+ * on a wallet whose DGB is fragmented into small UTXOs, even though the wallet
+ * holds plenty of spendable DGB.
+ *
+ * DigiDollarWallet::SelectFeeCoins() sorts the wallet's spendable DGB UTXOs
+ * SMALLEST-FIRST (src/wallet/digidollarwallet.cpp, std::sort in SelectFeeCoins)
+ * and breaks out of the loop as soon as the RAW sum of the picked UTXOs reaches
+ * the requested fee. It never accounts for what it costs to *spend* each input
+ * it just added. On a fragmented wallet it therefore hands back a pile of tiny
+ * UTXOs whose real (net) contribution to the fee is far below the target, and
+ * DigiDollar::BuildRedemptionTransaction() -- which recomputes the fee from the
+ * transaction it actually built -- then hard-fails with
+ * "Insufficient fee inputs for DD redemption fee". There is no re-selection.
+ *
+ * ---------------------------------------------------------------------------
+ * Per-fee-input cost arithmetic (every number comes from the shipped code)
+ * ---------------------------------------------------------------------------
+ * DigiDollar::EstimateTransactionVSize() (src/digidollar/txbuilder.cpp):
+ *   - each extra input adds to the serialized BASE size:
+ *         32 (prevout hash) + 4 (prevout n) + 1 (empty scriptSig len)
+ *       +  4 (nSequence)                                       =  41 bytes
+ *   - each extra input adds a flat  110 bytes of WITNESS
+ *       (conservative P2TR script-path estimate, hardcoded)
+ *   - vsize = base + witness/4  =>  41 + 110/4                 =  68.5 vB
+ *   - the function then adds a 35% safety margin:
+ *         68.5 * 1.35                                          = ~92   vB
+ *
+ * Redemptions pay MIN_DD_FEE_RATE = 35,000,000 sat/kvB (src/rpc/digidollar.cpp),
+ * i.e. 35,000 sat/vB, so every extra fee input costs
+ *         ~92 vB * 35,000 sat/vB = ~3,220,000 sat = ~0.0322 DGB
+ *
+ * => a fee UTXO's EFFECTIVE contribution is (value - ~0.0322 DGB).
+ *    Any fee UTXO smaller than ~0.0322 DGB has NEGATIVE effective value.
+ *
+ * ---------------------------------------------------------------------------
+ * Scenario modelled here (the reported reproduction)
+ * ---------------------------------------------------------------------------
+ * Wallet holds:
+ *   - 8 fragmented UTXOs of 0.0525 DGB (5,250,000 sat) each
+ *       effective each:  5,250,000 - 3,220,000 =   2,030,000 sat
+ *       all 8 together: 42,000,000 - 25,760,000 =  16,240,000 sat  (< target)
+ *   - 1 large UTXO of 5 DGB (500,000,000 sat)
+ *       effective:     500,000,000 - 3,220,000 = 496,780,000 sat  (>> target)
+ *
+ * Target fee = exactly what redeemdigidollar asks SelectFeeCoins for
+ * (src/rpc/digidollar.cpp):
+ *       (400 vB * 35,000,000) / 1000 = 14,000,000
+ *       + 50% safety margin          = 21,000,000 sat  (floor 10,000,000)
+ *
+ * CORRECT behaviour: the returned selection must still cover the target fee
+ * AFTER paying to spend the inputs it selected. Here that is only achievable
+ * by using the 5 DGB UTXO -- the eight small ones cannot cover it even all
+ * together.
+ *
+ * CURRENT (buggy) behaviour: smallest-first + raw-sum break picks exactly four
+ * 0.0525 DGB UTXOs (4 * 5,250,000 == 21,000,000, target "reached"), leaves the
+ * 5 DGB UTXO untouched, and reports success with an effective value of only
+ *       21,000,000 - 4 * 3,220,000 = 8,120,000 sat
+ * i.e. 12,880,000 sat short of the fee it is supposed to pay.
+ */
+BOOST_FIXTURE_TEST_CASE(test_select_fee_coins_fragmented_uneconomic_utxos, DDWalletTestFixture)
+{
+    // Marginal cost of adding one more fee input, in satoshis (see block above),
+    // taken from the shipped helper so this test prices inputs the way the
+    // selector does. Note the helper is an approximation: it measures the
+    // marginal input at zero inputs (92 vB), while the estimator's double
+    // truncation makes the true marginal alternate between 92 and 93 vB.
+    const CAmount PER_INPUT_SPEND_COST =
+        DigiDollar::EstimateInputSpendCost(DigiDollar::MIN_DD_FEE_RATE);
+    // Tripwire, not an invariant: the arithmetic in the comment block above is
+    // derived from this exact value, so re-derive it if the estimator changes.
+    BOOST_REQUIRE_EQUAL(PER_INPUT_SPEND_COST, 3220000);        // 92 vB * 35,000 sat/vB
+    // Fee a redemption asks SelectFeeCoins() to cover.
+    static constexpr CAmount TARGET_FEE           = 21000000;  // 0.21 DGB
+    // Fragmented change-sized UTXOs.
+    static constexpr CAmount SMALL_UTXO           = 5250000;   // 0.0525 DGB
+    static constexpr int     NUM_SMALL_UTXOS      = 8;
+    // One comfortably economic UTXO that covers the whole fee on its own.
+    static constexpr CAmount LARGE_UTXO           = 500000000; // 5 DGB
+
+    // --- A real descriptor wallet we can stock with exact-value UTXOs --------
+    auto cwallet = CreateFeeSelectionWallet("dd-fee-fragmentation");
+    for (int i = 0; i < NUM_SMALL_UTXOS; ++i) {
+        AddConfirmedUTXO(*cwallet, SMALL_UTXO);
+    }
+    const COutPoint large_outpoint = AddConfirmedUTXO(*cwallet, LARGE_UTXO);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    // --- Act ----------------------------------------------------------------
+    std::vector<COutPoint> selected;
+    std::vector<CAmount> selected_amounts;
+    CAmount selected_total = 0;
+
+    const bool ok = wallet.SelectFeeCoins(TARGET_FEE, selected, selected_total, &selected_amounts);
+
+    // The wallet holds 5.42 DGB of confirmed spendable DGB against a 0.21 DGB
+    // fee, so selection must succeed at all.
+    BOOST_REQUIRE_MESSAGE(ok, "SelectFeeCoins failed outright despite 5.42 DGB spendable");
+    BOOST_REQUIRE(!selected.empty());
+    BOOST_REQUIRE_EQUAL(selected.size(), selected_amounts.size());
+
+    // --- Assert the property that SHOULD hold -------------------------------
+    // The selection has to cover the fee once the cost of spending each input
+    // it chose is subtracted. Anything less and BuildRedemptionTransaction()
+    // aborts with "Insufficient fee inputs for DD redemption fee".
+    const CAmount input_spend_cost = static_cast<CAmount>(selected.size()) * PER_INPUT_SPEND_COST;
+    const CAmount effective_value = selected_total - input_spend_cost;
+
+    BOOST_CHECK_MESSAGE(effective_value >= TARGET_FEE,
+        "SelectFeeCoins returned an uneconomic fragmented selection: "
+        << selected.size() << " input(s) totalling " << selected_total
+        << " sat, minus " << input_spend_cost << " sat to spend them ("
+        << PER_INPUT_SPEND_COST << " sat/input), leaves only " << effective_value
+        << " sat towards a " << TARGET_FEE << " sat fee (short by "
+        << (TARGET_FEE - effective_value) << " sat). "
+        << "A single " << LARGE_UTXO << " sat UTXO was available and would have covered it.");
+
+    // The eight 0.0525 DGB UTXOs cannot cover this fee even all together
+    // (42,000,000 - 8 * 3,220,000 = 16,240,000 < 21,000,000), so no correct
+    // selection exists that leaves the large UTXO out. This call uses the
+    // default smallest-first order, so it reaches the large UTXO only after
+    // taking all eight small ones; the redemption path opts into
+    // minimize_inputs and picks the large UTXO on its own (see
+    // test_select_redemption_fee_coins_converges_on_fragmented_wallet).
+    const bool used_large_utxo =
+        std::find(selected.begin(), selected.end(), large_outpoint) != selected.end();
+    BOOST_CHECK_MESSAGE(used_large_utxo,
+        "SelectFeeCoins left the only economically viable fee UTXO ("
+        << LARGE_UTXO << " sat) unused and picked " << selected.size()
+        << " fragmented UTXO(s) instead");
+}
+
+/** Sum of the fee amounts a redemption selection returned. */
+static CAmount TotalFeeInputs(const DigiDollar::TxBuilderRedeemParams& params)
+{
+    CAmount total = 0;
+    for (const CAmount amount : params.feeAmounts) total += amount;
+    return total;
+}
+
+/**
+ * Companion to the regression above, on the redemption path proper:
+ * DigiDollarWallet::SelectRedemptionFeeCoins() must return a fee selection that
+ * covers the fee of the transaction that will actually be built from it (the
+ * check BuildRedemptionTransaction() applies), using as few inputs as possible.
+ */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_converges_on_fragmented_wallet, DDWalletTestFixture)
+{
+    static constexpr CAmount SMALL_UTXO      = 5250000;    // 0.0525 DGB, uneconomic on its own
+    static constexpr int     NUM_SMALL_UTXOS = 8;
+    static constexpr CAmount LARGE_UTXO      = 500000000;  // 5 DGB
+
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-convergence");
+    for (int i = 0; i < NUM_SMALL_UTXOS; ++i) AddConfirmedUTXO(*cwallet, SMALL_UTXO);
+    const COutPoint large_outpoint = AddConfirmedUTXO(*cwallet, LARGE_UTXO);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    CAmount projected_fee = 0;
+    BOOST_REQUIRE_MESSAGE(wallet.SelectRedemptionFeeCoins(params, error, &projected_fee) == DDFeeSelectionResult::OK, error);
+    BOOST_REQUIRE_EQUAL(params.feeUtxos.size(), params.feeAmounts.size());
+    BOOST_REQUIRE(!params.feeUtxos.empty());
+
+    // The selection must pay the projected fee outright - that is exactly the
+    // totalFeeIn >= totalFees test BuildRedemptionTransaction() applies.
+    const CAmount selected_total = TotalFeeInputs(params);
+    BOOST_CHECK_MESSAGE(selected_total >= projected_fee,
+        "Redemption fee selection of " << selected_total << " sat across "
+        << params.feeUtxos.size() << " input(s) does not cover the projected "
+        << projected_fee << " sat fee");
+
+    // And it must do so with the single economic UTXO rather than dragging in
+    // the fragmented ones, each of which would add more fee than it contributes.
+    BOOST_CHECK_EQUAL(params.feeUtxos.size(), 1U);
+    BOOST_CHECK(params.feeUtxos.front() == large_outpoint);
+}
+
+/**
+ * A redemption must never pay its fee out of the collateral it is releasing or
+ * out of the DD tokens it is burning: those inputs are already spent by the
+ * transaction, so selecting them again would build a double-spend. Guards the
+ * exclude list SelectRedemptionFeeCoins() builds from the redemption params.
+ */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_never_spends_collateral_or_dd, DDWalletTestFixture)
+{
+    // All three are wallet-owned and individually cover the fee, so nothing but
+    // the exclude list can keep the first two out of the selection.
+    //
+    // The values are deliberately DESCENDING, with the only selectable UTXO the
+    // smallest. SelectRedemptionFeeCoins() sorts largest-first and stops as soon
+    // as the target is covered, so this forces both excluded outpoints to be
+    // examined - and skipped - before the free one is reached. Equal values would
+    // leave candidate order up to mapWallet's unordered_map iteration (salted by
+    // the real RNG, so it varies per process) and the exclusion branch would go
+    // unexercised on the runs where the free UTXO happened to come first.
+    static constexpr CAmount COLLATERAL_UTXO = 700000000;  // 7 DGB
+    static constexpr CAmount DD_TOKEN_UTXO   = 600000000;  // 6 DGB
+    static constexpr CAmount FREE_UTXO       = 500000000;  // 5 DGB, still ample
+
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-exclusions");
+    const COutPoint collateral_outpoint = AddConfirmedUTXO(*cwallet, COLLATERAL_UTXO);
+    const COutPoint dd_outpoint         = AddConfirmedUTXO(*cwallet, DD_TOKEN_UTXO);
+    const COutPoint free_outpoint       = AddConfirmedUTXO(*cwallet, FREE_UTXO);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams();
+    params.collateralOutpoint = collateral_outpoint;
+    params.ddUtxos = {dd_outpoint};
+    params.ddAmounts = {TEST_DD_AMOUNT};
+
+    std::string error;
+    CAmount projected_fee = 0;
+    BOOST_REQUIRE_MESSAGE(wallet.SelectRedemptionFeeCoins(params, error, &projected_fee) == DDFeeSelectionResult::OK, error);
+    BOOST_REQUIRE(!params.feeUtxos.empty());
+
+    const auto contains = [&params](const COutPoint& outpoint) {
+        return std::find(params.feeUtxos.begin(), params.feeUtxos.end(), outpoint) != params.feeUtxos.end();
+    };
+    BOOST_CHECK_MESSAGE(!contains(collateral_outpoint),
+        "Redemption fee selection picked the collateral outpoint it is releasing");
+    BOOST_CHECK_MESSAGE(!contains(dd_outpoint),
+        "Redemption fee selection picked a DD token outpoint it is burning");
+    BOOST_CHECK(contains(free_outpoint));
+    BOOST_CHECK_EQUAL(params.feeUtxos.size(), 1U);
+    BOOST_CHECK_GE(TotalFeeInputs(params), projected_fee);
+}
+
+/**
+ * A wallet holding nothing but sub-cost dust cannot fund a redemption at all.
+ * The failure has to say so in terms the user can act on, and must leave no
+ * fee inputs behind on the params.
+ */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_dust_only_wallet_fails_actionably, DDWalletTestFixture)
+{
+    // Below DigiDollar::EstimateInputSpendCost(MIN_DD_FEE_RATE) == 3,220,000 sat,
+    // so each of these costs more to spend than it is worth.
+    static constexpr CAmount DUST_UTXO  = 1000000;  // 0.01 DGB
+    static constexpr int     NUM_DUST   = 50;       // 0.5 DGB in total
+
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-dust-only");
+    for (int i = 0; i < NUM_DUST; ++i) AddConfirmedUTXO(*cwallet, DUST_UTXO);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    BOOST_CHECK(wallet.SelectRedemptionFeeCoins(params, error) == DDFeeSelectionResult::INSUFFICIENT_FUNDS);
+    BOOST_CHECK(params.feeUtxos.empty());
+    BOOST_CHECK(params.feeAmounts.empty());
+    BOOST_CHECK_MESSAGE(error.find("consolidate") != std::string::npos,
+        "Fee selection failure does not tell the user to consolidate: " << error);
+}
+
+/** A wallet with no spendable DGB at all fails the same way, without crashing. */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_empty_wallet_fails, DDWalletTestFixture)
+{
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-empty");
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    BOOST_CHECK(wallet.SelectRedemptionFeeCoins(params, error) == DDFeeSelectionResult::INSUFFICIENT_FUNDS);
+    BOOST_CHECK(params.feeUtxos.empty());
+    BOOST_CHECK(params.feeAmounts.empty());
+    BOOST_CHECK(!error.empty());
+}
+
+/**
+ * The per-input cost has to follow the fee rate the redemption actually pays.
+ * At the lowest fee rate ValidateFeeRate accepts (100,000 sat/kvB) an input
+ * costs ~9,200 sat, not the ~3,220,000 sat it costs at the DigiDollar minimum,
+ * so 0.05 DGB UTXOs are perfectly economic. Pricing them at a hardcoded
+ * DigiDollar rate would reject this fundable redemption.
+ *
+ * This is also the case where the MIN_DD_TX_FEE floor genuinely binds: a
+ * ~580 vB redemption at 100,000 sat/kvB owes ~58,000 sat by size, well under
+ * the 0.1 DGB DigiDollar minimum.
+ */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_prices_inputs_at_caller_fee_rate, DDWalletTestFixture)
+{
+    static constexpr CAmount LOW_FEE_RATE = 100000;   // 0.001 DGB/kvB
+    static constexpr CAmount UTXO_VALUE   = 5000000;  // 0.05 DGB
+    static constexpr int     NUM_UTXOS    = 3;        // 0.15 DGB total
+
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-low-rate");
+    for (int i = 0; i < NUM_UTXOS; ++i) AddConfirmedUTXO(*cwallet, UTXO_VALUE);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    BOOST_CHECK_EQUAL(DigiDollar::EstimateInputSpendCost(LOW_FEE_RATE), 9200);
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams(LOW_FEE_RATE);
+    std::string error;
+    CAmount projected_fee = 0;
+    BOOST_REQUIRE_MESSAGE(wallet.SelectRedemptionFeeCoins(params, error, &projected_fee) == DDFeeSelectionResult::OK, error);
+
+    // Size alone would owe far less than the floor, so the floor is what the
+    // selection had to cover.
+    BOOST_CHECK_EQUAL(projected_fee, DigiDollar::MIN_DD_TX_FEE);
+    BOOST_CHECK_GE(TotalFeeInputs(params), projected_fee);
+    BOOST_CHECK(!params.feeUtxos.empty());
+}
+
+/** A non-positive fee rate is a malformed redemption, not a funding shortfall. */
+BOOST_FIXTURE_TEST_CASE(test_select_redemption_fee_coins_rejects_invalid_fee_rate, DDWalletTestFixture)
+{
+    auto cwallet = CreateFeeSelectionWallet("dd-redeem-fee-bad-rate");
+    AddConfirmedUTXO(*cwallet, 500000000);
+
+    DigiDollarWallet wallet;
+    wallet.SetWallet(cwallet.get());
+
+    DigiDollar::TxBuilderRedeemParams params = MakeRedeemParams(/*fee_rate=*/0);
+    std::string error;
+    BOOST_CHECK(wallet.SelectRedemptionFeeCoins(params, error) == DDFeeSelectionResult::INVALID_TRANSACTION);
+    BOOST_CHECK(params.feeUtxos.empty());
+    BOOST_CHECK(!error.empty());
 }
 
 // =============================================================================
