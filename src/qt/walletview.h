@@ -100,8 +100,13 @@ public Q_SLOTS:
     void backupWallet();
     /** Change encrypted wallet passphrase */
     void changePassphrase();
-    /** Ask for passphrase to unlock wallet temporarily */
+    /** Ask for passphrase to unlock wallet temporarily.
+        Synchronous: WalletModel::requestUnlock() depends on the dialog having
+        returned before it inspects the encryption status again. */
     void unlockWallet();
+    /** Ask for passphrase to unlock the wallet, driven from the menu.
+        Asynchronous: no caller is waiting on the result. */
+    void unlockWalletFromMenu();
 
     /** Show used sending addresses */
     void usedSendingAddresses();

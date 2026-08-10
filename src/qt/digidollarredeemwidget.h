@@ -99,7 +99,12 @@ private:
     bool validateAmount() const;
     bool validateRedeemable() const;
     bool validateDDBalance() const;
+    /** True unless the wallet can never sign a redemption (no wallet model, or
+     *  private keys disabled). A locked but encrypted wallet still holds its
+     *  keys, so it returns true; see walletNeedsUnlockToRedeem(). */
     bool canWalletSignRedemption() const;
+    /** True when redeeming will first prompt for the wallet passphrase. */
+    bool walletNeedsUnlockToRedeem() const;
     QString redeemDisabledReason() const;
 
     QString formatDDAmount(double amount) const;

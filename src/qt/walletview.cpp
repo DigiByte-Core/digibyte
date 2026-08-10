@@ -265,6 +265,19 @@ void WalletView::unlockWallet()
     }
 }
 
+void WalletView::unlockWalletFromMenu()
+{
+    // Unlike unlockWallet() above, nothing is waiting on the result here, so
+    // show the dialog asynchronously like the other menu-driven wallet dialogs
+    // instead of nesting a modal event loop inside the action handler.
+    if (walletModel->getEncryptionStatus() != WalletModel::Locked) return;
+
+    auto dlg = new AskPassphraseDialog(AskPassphraseDialog::Unlock, this);
+    dlg->setModel(walletModel);
+    connect(dlg, &QDialog::finished, this, &WalletView::encryptionStatusChanged);
+    GUIUtil::ShowModalDialogAsynchronously(dlg);
+}
+
 void WalletView::usedSendingAddresses()
 {
     GUIUtil::bringToFront(usedSendingAddressesPage);

@@ -95,13 +95,15 @@ private Q_SLOTS:
     void positionsWidgetInitialLoadNotThrottled();
     void positionsWidgetHealthUsesMicroUsdOraclePrice();
     void positionsWidgetDisablesRedeemForPrivateKeyDisabledWallet();
-    void positionsWidgetDisablesRedeemForLockedEncryptedWallet();
+    void positionsWidgetKeepsRedeemActionableForLockedEncryptedWallet();
     void redeemWidgetButtonStateNoSelection();
     void redeemWidgetButtonStateTimelockActive();
     void redeemWidgetButtonStateInvalidAmount();
     void redeemWidgetButtonStateInsufficientDDBalance();
     void redeemWidgetButtonStatePrivateKeyDisabledWallet();
-    void redeemWidgetButtonStateLockedWallet();
+    void redeemWidgetButtonStateLockedWalletOffersUnlock();
+    void redeemWidgetLockedWalletRequestsUnlockOnRedeem();
+    void widgetsDisableRedeemForEncryptedWatchOnlyWallet();
     void redeemWidgetRefreshesWhenWalletUnlocks();
     void redeemWidgetButtonStateReady();
     void positionsWidgetLockedTooltipShowsRemainingBlocksAndTime();

@@ -92,8 +92,10 @@ public Q_SLOTS:
     void backupWallet();
     /** Change encrypted wallet passphrase */
     void changePassphrase();
-    /** Ask for passphrase to unlock wallet temporarily */
+    /** Ask for passphrase to unlock wallet temporarily (synchronous) */
     void unlockWallet();
+    /** Ask for passphrase to unlock the wallet from the menu (asynchronous) */
+    void unlockWalletFromMenu();
 
     /** Show used sending addresses */
     void usedSendingAddresses();

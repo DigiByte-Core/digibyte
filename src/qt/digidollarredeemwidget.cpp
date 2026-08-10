@@ -753,12 +753,20 @@ void DigiDollarRedeemWidget::updateRedeemButtons()
         validateDDBalance() &&
         canWalletSignRedemption();
 
+    // A locked wallet keeps the action available: the redeem flow prompts for
+    // the passphrase. Only advertise the extra step up front.
+    const bool needsUnlock = canRedeem && walletNeedsUnlockToRedeem();
+
     m_redeemButton->setEnabled(canRedeem);
     if (canRedeem) {
-        m_redeemButton->setText(tr("Redeem && Unlock DGB"));
-        const QString readyText = tr("Ready to redeem this DigiDollar vault and release the locked DGB collateral.");
+        m_redeemButton->setText(needsUnlock ? tr("Unlock && Redeem") : tr("Redeem && Unlock DGB"));
+        const QString readyText = needsUnlock
+            ? tr("Wallet is locked.\nYou will be asked for your passphrase, then this DigiDollar vault is redeemed and the locked DGB collateral released.")
+            : tr("Ready to redeem this DigiDollar vault and release the locked DGB collateral.");
         m_redeemButton->setToolTip(readyText);
-        m_positionValidationLabel->setText(tr("Vault ready to redeem."));
+        m_positionValidationLabel->setText(needsUnlock
+            ? tr("Vault ready to redeem — you will be asked for your passphrase.")
+            : tr("Vault ready to redeem."));
         m_positionValidationLabel->setToolTip(readyText);
     } else {
         const QString reason = redeemDisabledReason();
@@ -838,10 +846,11 @@ void DigiDollarRedeemWidget::loadPositionDetails()
     auto loadPositionFromWallet = [&]() -> bool {
         DigiDollarWallet* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
         if (!ddWallet) return false;
-        const bool walletCannotSign =
-            m_walletModel->wallet().privateKeysDisabled() ||
-            m_walletModel->getEncryptionStatus() == WalletModel::Locked;
-        if (!walletCannotSign) {
+        // ReconcilePositionStates() only reads the wallet's transactions and the
+        // chain UTXO set and rewrites the is_active flag; it never touches key
+        // material, so a locked wallet must still refresh.
+        const bool walletIsWatchOnly = m_walletModel->wallet().privateKeysDisabled();
+        if (!walletIsWatchOnly) {
             ddWallet->ReconcilePositionStates();
         }
 
@@ -1014,13 +1023,22 @@ bool DigiDollarRedeemWidget::canWalletSignRedemption() const
     if (!m_walletModel) {
         return false;
     }
+    // Private keys disabled (watch-only) is a permanent incapability: no
+    // passphrase can make this wallet produce a redemption witness.
+    //
+    // A locked but encrypted wallet is NOT in that category. It still holds the
+    // keys, and onRedeemClicked() asks for the passphrase through
+    // WalletModel::requestUnlock() before building the transaction, exactly
+    // like the send and mint flows do.
     if (m_walletModel->wallet().privateKeysDisabled()) {
         return false;
     }
-    if (m_walletModel->getEncryptionStatus() == WalletModel::Locked) {
-        return false;
-    }
     return true;
+}
+
+bool DigiDollarRedeemWidget::walletNeedsUnlockToRedeem() const
+{
+    return m_walletModel && m_walletModel->getEncryptionStatus() == WalletModel::Locked;
 }
 
 QString DigiDollarRedeemWidget::redeemDisabledReason() const
@@ -1038,9 +1056,6 @@ QString DigiDollarRedeemWidget::redeemDisabledReason() const
     }
     if (m_walletModel->wallet().privateKeysDisabled()) {
         return tr("Watch-only wallet.\nThis wallet cannot sign DigiDollar redemptions because private keys are disabled.");
-    }
-    if (m_walletModel->getEncryptionStatus() == WalletModel::Locked) {
-        return tr("Wallet is locked.\nUnlock the wallet to redeem this DigiDollar vault.");
     }
     if (!validateAmount()) {
         return tr("Invalid redeem amount.\nDigiDollar redemptions must use the exact vault amount.");

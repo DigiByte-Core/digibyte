@@ -465,9 +465,10 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
     // Get current oracle price in micro-USD; regtest can use mock helpers,
     // while testnet/mainnet use the live oracle price.
     CAmount oraclePrice = GetMockOraclePrice();
-    const bool isWatchOnly = m_walletModel->wallet().privateKeysDisabled();
-    const bool isWalletLocked = m_walletModel->getEncryptionStatus() == WalletModel::Locked;
-    const bool walletCanSign = !isWatchOnly && !isWalletLocked;
+    // Only a watch-only wallet can never sign a redemption. A locked but
+    // encrypted wallet still holds its keys and the redeem flow prompts for the
+    // passphrase, so its vaults stay redeemable.
+    const bool walletCanSign = !m_walletModel->wallet().privateKeysDisabled();
 
     // Get positions from wallet backend
     std::vector<WalletCollateralPosition> walletPositions = GetWalletPositions();
@@ -515,7 +516,7 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
         pos.health = CalculatePositionHealth(wp.dd_minted, wp.dgb_collateral, oraclePrice);
 
         // Can redeem if timelock expired, position is active, and the wallet can sign.
-        // Private-key-disabled/watch-only wallets may observe vaults but cannot unlock them.
+        // Private-key-disabled/watch-only wallets may observe vaults but can never redeem them.
         pos.canRedeem = walletCanSign && (pos.blocksRemaining == 0) && wp.is_active;
 
         // A freshly-created mint can be known to the wallet before the collateral
@@ -856,8 +857,8 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
     // - "Redeemed" if already redeemed (with strikethrough)
     // - "Watch-Only" if the wallet has private keys disabled and so cannot
     //   ever construct a redemption witness
-    // - "Wallet Locked" if private keys exist but are currently unavailable
-    // - "Redeem" if can redeem now (green, clickable)
+    // - "Redeem" if can redeem now (clickable; a locked wallet is prompted for
+    //   its passphrase by the redeem flow, so it stays clickable too)
     // - "Locked" if vault hasn't matured yet (grayed out)
     QString buttonText;
     if (isPendingMint) {
@@ -868,8 +869,6 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
         buttonText = tr("Redeemed");
     } else if (isWatchOnly) {
         buttonText = tr("Watch-Only");
-    } else if (isWalletLocked) {
-        buttonText = tr("Wallet Locked");
     } else if (canRedeem) {
         buttonText = tr("Redeem");
     } else {
@@ -967,25 +966,30 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
             .arg(woText);
         tooltip = tr("Watch-only wallet\nThis wallet cannot sign DigiDollar redemptions because private keys are disabled.");
         button->setEnabled(false);
-    } else if (isWalletLocked) {
+    } else if (canRedeem && isWalletLocked) {
+        // Redeemable, but the wallet is locked: keep the action available and
+        // use a distinct styling to flag the extra passphrase step.
         QString lockedWalletBg = isDarkTheme ? "#4a4655" : "#e4dfea";
         QString lockedWalletText = isDarkTheme ? "#d6c6e6" : "#4d3f5f";
 
+        // Metrics match the plain redeemable branch below so that the same
+        // "Redeem" label does not change size with the wallet lock state; only
+        // the colour differs.
         buttonStyle = QString(
             "QPushButton { "
             "  background-color: %1; "
             "  color: %2; "
             "  border: 1px solid %2; "
             "  border-radius: 5px; "
-            "  padding: 6px 8px; "
+            "  padding: 6px 12px; "
             "  font-weight: 600; "
-            "  font-size: 10px; "
-            "  min-width: 72px; "
+            "  font-size: 11px; "
+            "  min-width: 60px; "
             "}")
             .arg(lockedWalletBg)
             .arg(lockedWalletText);
-        tooltip = tr("Wallet is locked\nUnlock the wallet to redeem this DigiDollar vault.");
-        button->setEnabled(false);
+        tooltip = tr("Wallet is locked\nYou will be asked for your passphrase before this DigiDollar vault is redeemed.");
+        button->setEnabled(true);
     } else if (canRedeem) {
         // Can redeem - green button
         QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
@@ -1242,10 +1246,12 @@ std::vector<WalletCollateralPosition> DigiDollarPositionsWidget::GetWalletPositi
     // Access DigiDollarWallet directly from wallet model
     DigiDollarWallet* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
     if (ddWallet) {
-        const bool walletCannotSign =
-            m_walletModel->wallet().privateKeysDisabled() ||
-            m_walletModel->getEncryptionStatus() == WalletModel::Locked;
-        if (!walletCannotSign) {
+        // ReconcilePositionStates() only reads the wallet's transactions and the
+        // chain UTXO set and rewrites the is_active flag; it never touches key
+        // material, so a locked wallet must still refresh. Skipping it there
+        // would leave the row action enabled off a stale is_active flag.
+        const bool walletIsWatchOnly = m_walletModel->wallet().privateKeysDisabled();
+        if (!walletIsWatchOnly) {
             ddWallet->ReconcilePositionStates();
         }
         positions = ddWallet->GetDDTimeLocks(false); // Get ALL time locks including redeemed ones

@@ -44,6 +44,7 @@
 #include <cmath>
 #include <memory>
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QColor>
 #include <QCoreApplication>
@@ -400,6 +401,30 @@ QDialog* FindVisibleDialogByTitle(const QString& title)
         if (dialog && dialog->isVisible() && dialog->windowTitle() == title) return dialog;
     }
     return nullptr;
+}
+
+//! Click "Yes" on the modal "Confirm Redeem" box as soon as it appears.
+//! Re-arms itself so it works whether or not the dialog is up yet, and closes
+//! any leftover modal after the last attempt so a failure never hangs the run.
+void AcceptRedeemConfirmation(int attempts_left = 40)
+{
+    QTimer::singleShot(25, [attempts_left]() {
+        if (QDialog* dialog = FindVisibleDialogByTitle(QStringLiteral("Confirm Redeem"))) {
+            auto* box = qobject_cast<QMessageBox*>(dialog);
+            QAbstractButton* yes = box ? box->button(QMessageBox::Yes) : nullptr;
+            if (yes) {
+                yes->click();
+            } else {
+                dialog->reject();
+            }
+            return;
+        }
+        if (attempts_left > 0) {
+            AcceptRedeemConfirmation(attempts_left - 1);
+        } else if (QWidget* modal = QApplication::activeModalWidget()) {
+            modal->close();
+        }
+    });
 }
 
 bool SelectCoinControlDialogInput(const COutPoint& outpoint, QString& error)
@@ -1340,7 +1365,7 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForPrivateKeyDisabledWa
     QVERIFY(redeemButton->toolTip().contains("Watch-only"));
 }
 
-void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForLockedEncryptedWallet()
+void DigiDollarWidgetTests::positionsWidgetKeepsRedeemActionableForLockedEncryptedWallet()
 {
 #ifdef Q_OS_MACOS
     if (QApplication::platformName() == "minimal") {
@@ -1357,7 +1382,13 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForLockedEncryptedWalle
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
-    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    // A locked wallet now runs ReconcilePositionStates() like any other, so the
+    // position must be backed by a collateral outpoint that is really unspent;
+    // otherwise reconciliation correctly retires it and the row reads
+    // "Redeemed". Anchor it on a live coinbase output so that the wallet lock
+    // stays the only variable under test.
+    const uint256 position_id = test.m_coinbase_txns[0]->GetHash();
+    AddMockDigiDollarPosition(wallet, position_id, 10000, 300 * COIN, 1, 100);
 
     SecureString passphrase{"wave17-qt-locked-wallet"};
     QVERIFY(wallet->EncryptWallet(passphrase));
@@ -1381,9 +1412,13 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForLockedEncryptedWalle
     QPushButton* redeemButton = qobject_cast<QPushButton*>(
         table->cellWidget(0, DigiDollarPositionsWidget::COL_ACTIONS));
     QVERIFY(redeemButton != nullptr);
-    QCOMPARE(redeemButton->text(), QString("Wallet Locked"));
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    // A locked encrypted wallet still holds its keys. The redeem flow prompts
+    // for the passphrase via WalletModel::requestUnlock(), so the row action
+    // must stay clickable; only its tooltip warns about the extra step.
+    QCOMPARE(redeemButton->text(), QString("Redeem"));
+    QVERIFY(redeemButton->isEnabled());
+    QVERIFY(redeemButton->toolTip().contains("Wallet is locked"));
+    QVERIFY(redeemButton->toolTip().contains("passphrase"));
 }
 
 void DigiDollarWidgetTests::redeemWidgetButtonStateNoSelection()
@@ -1588,7 +1623,7 @@ void DigiDollarWidgetTests::redeemWidgetButtonStatePrivateKeyDisabledWallet()
     QVERIFY(validationLabel->toolTip().contains("Watch-only"));
 }
 
-void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWallet()
+void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWalletOffersUnlock()
 {
 #ifdef Q_OS_MACOS
     if (QApplication::platformName() == "minimal") {
@@ -1606,7 +1641,11 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWallet()
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-wallet-locked");
     AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
-    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 10000);
+    // Fund the $DD burn generously so that the wallet lock is the only thing
+    // this test can be measuring (the ERR-adjusted burn can exceed the minted
+    // amount). The previous exact-amount funding was never exercised because
+    // the lock check short-circuited before the balance check.
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
     SecureString passphrase{"qt-dd-redeem-wallet-locked"};
     QVERIFY(wallet->EncryptWallet(passphrase));
 
@@ -1625,11 +1664,143 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWallet()
 
     QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
     QVERIFY(redeemButton != nullptr);
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    // A locked encrypted wallet is only temporarily unable to sign. Keeping the
+    // button enabled is what makes the WalletModel::requestUnlock() passphrase
+    // prompt in onRedeemClicked() reachable at all.
+    QVERIFY(redeemButton->isEnabled());
+    QCOMPARE(redeemButton->text(), QString("Unlock && Redeem"));
+    QVERIFY(redeemButton->toolTip().contains("Wallet is locked"));
+    QVERIFY(redeemButton->toolTip().contains("passphrase"));
     QLabel* validationLabel = redeemWidget.findChild<QLabel*>("positionValidationLabel");
     QVERIFY(validationLabel != nullptr);
-    QVERIFY(validationLabel->toolTip().contains("Unlock"));
+    QVERIFY(validationLabel->toolTip().contains("passphrase"));
+}
+
+void DigiDollarWidgetTests::redeemWidgetLockedWalletRequestsUnlockOnRedeem()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-requests-unlock");
+    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
+    SecureString passphrase{"qt-dd-redeem-requests-unlock"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    QCOMPARE(mini_gui.walletModel->getEncryptionStatus(), WalletModel::Locked);
+    WalletContext& context = *m_node.walletLoader().context();
+    AddWallet(context, wallet);
+
+    DigiDollarRedeemWidget redeemWidget;
+    redeemWidget.setWalletModel(mini_gui.walletModel.get());
+    redeemWidget.setClientModel(mini_gui.clientModel.get());
+    redeemWidget.setPosition(QString::fromStdString(uint256::ONE.GetHex()));
+    QCoreApplication::processEvents();
+
+    QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
+    QVERIFY(redeemButton != nullptr);
+    QVERIFY(redeemButton->isEnabled());
+
+    // This is the behaviour the whole change exists for: driving the redeem
+    // action on a LOCKED wallet must reach WalletModel::requestUnlock(), which
+    // emits requireUnlock so the GUI can raise AskPassphraseDialog. While the
+    // button was disabled that call site was unreachable.
+    QSignalSpy unlockSpy(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy completedSpy(&redeemWidget, &DigiDollarRedeemWidget::redemptionCompleted);
+
+    AcceptRedeemConfirmation();
+    redeemWidget.onRedeemClicked();
+    QCoreApplication::processEvents();
+
+    QCOMPARE(unlockSpy.count(), 1);
+    // Nothing answers requireUnlock in this harness, which is exactly the
+    // "user dismissed the passphrase prompt" path: the UnlockContext is invalid,
+    // so onRedeemClicked() must return without building a redemption.
+    QVERIFY(wallet->IsLocked());
+    QCOMPARE(completedSpy.count(), 0);
+
+    RemoveWallet(context, wallet, std::nullopt);
+}
+
+void DigiDollarWidgetTests::widgetsDisableRedeemForEncryptedWatchOnlyWallet()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-encrypted-watchonly");
+    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
+    SecureString passphrase{"qt-dd-redeem-encrypted-watchonly"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    WalletContext& context = *m_node.walletLoader().context();
+    AddWallet(context, wallet);
+
+    // A wallet that is both crypted and private-keys-disabled reports Locked,
+    // not NoKeys (see WalletModel::getEncryptionStatus). This is the one state
+    // where the two conditions this change separates overlap, so pin it: the
+    // permanent incapability must still win over the temporary lock.
+    QCOMPARE(mini_gui.walletModel->getEncryptionStatus(), WalletModel::Locked);
+    QVERIFY(mini_gui.walletModel->wallet().privateKeysDisabled());
+
+    DigiDollarPositionsWidget positionsWidget;
+    positionsWidget.setClientModel(mini_gui.clientModel.get());
+    positionsWidget.setWalletModel(mini_gui.walletModel.get());
+    positionsWidget.show();
+    QCoreApplication::processEvents();
+    positionsWidget.updateView();
+
+    QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->rowCount(), 1);
+    QPushButton* rowButton = qobject_cast<QPushButton*>(
+        table->cellWidget(0, DigiDollarPositionsWidget::COL_ACTIONS));
+    QVERIFY(rowButton != nullptr);
+    QCOMPARE(rowButton->text(), QString("Watch-Only"));
+    QVERIFY(!rowButton->isEnabled());
+    QVERIFY(rowButton->toolTip().contains("Watch-only"));
+
+    DigiDollarRedeemWidget redeemWidget;
+    redeemWidget.setWalletModel(mini_gui.walletModel.get());
+    redeemWidget.setClientModel(mini_gui.clientModel.get());
+    redeemWidget.setPosition(QString::fromStdString(uint256::ONE.GetHex()));
+    QCoreApplication::processEvents();
+
+    QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
+    QVERIFY(redeemButton != nullptr);
+    QVERIFY(!redeemButton->isEnabled());
+    QCOMPARE(redeemButton->text(), QString("Cannot Redeem"));
+    QVERIFY(redeemButton->toolTip().contains("Watch-only"));
+
+    RemoveWallet(context, wallet, std::nullopt);
 }
 
 void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
@@ -1667,8 +1838,8 @@ void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
 
     QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
     QVERIFY(redeemButton != nullptr);
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    QVERIFY(redeemButton->isEnabled());
+    QCOMPARE(redeemButton->text(), QString("Unlock && Redeem"));
 
     QVERIFY(mini_gui.walletModel->setWalletLocked(false, passphrase));
     mini_gui.walletModel->updateStatus();
