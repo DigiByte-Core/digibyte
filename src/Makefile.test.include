@@ -108,6 +108,7 @@ DIGIBYTE_TESTS =\
   test/digidollar_oracle_feeds_wave11_tests.cpp \
   test/digidollar_hot_path_logging_tests.cpp \
   test/musig2_net_processing_tests.cpp \
+  test/oracle_shutdown_tests.cpp \
   test/rh50_oracle_keyset_alignment_tests.cpp \
   test/rh51_checkphase3_v1_split_tests.cpp \
   test/rh52_bip34_scriptnum_escape_tests.cpp \
