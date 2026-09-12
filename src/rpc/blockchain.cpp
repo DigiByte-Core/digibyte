@@ -83,8 +83,10 @@ double GetDifficulty(const CBlockIndex* tip, const CBlockIndex* blockindex, int 
             nBits = powLimit;
         else
         {
-            // Use fast O(1) lookup instead of O(n) chain walking for RPC performance
-            blockindex = GetLastBlockIndexForAlgoFast(tip, Params().GetConsensus(), algo);
+            // This walks back block by block from the tip. It is the same
+            // lookup the difficulty rules use, so the number reported here
+            // always matches the number blocks are checked against.
+            blockindex = GetLastBlockIndexForAlgo(tip, Params().GetConsensus(), algo);
             if (blockindex == nullptr)
                 nBits = powLimit;
             else

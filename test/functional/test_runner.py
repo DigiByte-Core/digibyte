@@ -105,6 +105,7 @@ BASE_SCRIPTS = [
     # DigiByte: Multi-Algorithm Mining Tests
     'feature_digibyte_multialgo_mining.py',
     'feature_digibyte_groestl_deactivation.py',
+    'feature_digibyte_difficulty_lookup.py',
     
     # vv Tests less than 5m vv
     'feature_fee_estimation.py',

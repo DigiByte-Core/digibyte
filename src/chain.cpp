@@ -12,16 +12,6 @@
 #include <logging.h>
 
 /**
- * CBlockIndex default constructor
- */
-CBlockIndex::CBlockIndex()
-{
-    for (unsigned i = 0; i < NUM_ALGOS_IMPL; i++) {
-        lastAlgoBlocks[i] = nullptr;
-    }
-}
-
-/**
  * CBlockIndex constructor that copies from a block header.
  * We can safely call LogPrintf here because we are in a .cpp file that includes logging.
  */
@@ -32,17 +22,10 @@ CBlockIndex::CBlockIndex(const CBlockHeader& block)
       nBits(block.nBits),
       nNonce(block.nNonce)
 {
-    // Initialize lastAlgoBlocks to null.
-    for (unsigned i = 0; i < NUM_ALGOS_IMPL; i++) {
-        lastAlgoBlocks[i] = nullptr;
-    }
-
-    // Determine raw algo index from version bits:
-    int rawAlgo = block.GetAlgo(); // This returns ALGO_UNKNOWN if it doesn't match recognized bits
-    if (rawAlgo >= 0 && rawAlgo < NUM_ALGOS_IMPL) {
-        lastAlgoBlocks[rawAlgo] = this;
-    } else {
-        // We can log this occurrence:
+    // A block header names its mining algorithm in its version bits. Say so
+    // once here if the bits are not one of DigiByte's five algorithms; GetAlgo
+    // below then treats the block as Scrypt.
+    if (block.GetAlgo() == ALGO_UNKNOWN) {
         LogPrintf("CBlockIndex ctor: ALGO_UNKNOWN in block version=0x%08x\n", block.nVersion);
     }
 }
@@ -116,8 +99,8 @@ CBlockIndex* CChain::FindEarliestAtLeast(int64_t nTime, int height) const
 }
 
 /**
- * Return recognized mining algo for this block, forcibly mapping blocks
- * below height 145,000 to ALGO_SCRYPT. If none recognized, logs a warning.
+ * Return the mining algorithm named in this block's version bits. If the bits
+ * name none of them, log a warning and call it Scrypt.
  */
 int CBlockIndex::GetAlgo() const
 {
@@ -126,13 +109,13 @@ int CBlockIndex::GetAlgo() const
     // that naturally map to BLOCK_VERSION_SCRYPT (algo bits = 0x0000), so no
     // special height check is needed.
     //
-    // CRITICAL FIX: Previously this had a hardcoded `if (nHeight < 145000)`
-    // check that forced ALGO_SCRYPT for all blocks below mainnet's multi-algo
-    // height. This broke testnet/regtest where multi-algo activates much earlier
-    // (block 100), causing the lastAlgoBlocks[] index to only track Scrypt.
-    // As a result, GetLastBlockIndexForAlgoFast() returned NULL for all non-Scrypt
-    // algos, and DigiShield V4 fell back to InitialDifficulty (powLimit) every
-    // time — difficulty never adjusted for Qubit, Skein, SHA256D, or Odocrypt.
+    // This used to force Scrypt for every block below mainnet height 145,000.
+    // That broke testnet and regtest, where multi-algorithm mining starts much
+    // earlier, at block 100: every earlier block looked like a Scrypt block,
+    // the difficulty rules could not find a previous block of the other
+    // algorithms, and DigiShield V4 fell back to the easiest possible
+    // difficulty every time. Difficulty never adjusted there for Qubit,
+    // Skein, SHA256D or Odocrypt.
     switch (nVersion & BLOCK_VERSION_ALGO) {
         case BLOCK_VERSION_SCRYPT:   return ALGO_SCRYPT;
         case BLOCK_VERSION_SHA256D:  return ALGO_SHA256D;

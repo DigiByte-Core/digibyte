@@ -330,16 +330,6 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
         pindexNew->BuildSkip();
     }
-    // Use memcpy to copy the entire array at once.
-    if (pindexNew->pprev) {
-        memcpy(pindexNew->lastAlgoBlocks, pindexNew->pprev->lastAlgoBlocks, sizeof(pindexNew->lastAlgoBlocks));
-        // DGB-BUG-011 FIX: Check bounds before array access to prevent crash
-        // when GetAlgo() returns ALGO_UNKNOWN (-1) for unrecognized block versions
-        int algo = pindexNew->GetAlgo();
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-            pindexNew->lastAlgoBlocks[algo] = pindexNew;
-        }
-    }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
@@ -568,16 +558,6 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             return error("%s: block index is non-contiguous, index of height %d missing", __func__, previous_index->nHeight + 1);
         }
         previous_index = pindex;
-        // Use memcpy to copy the entire array at once.
-        if (pindex->pprev) {
-            memcpy(pindex->lastAlgoBlocks, pindex->pprev->lastAlgoBlocks, sizeof(pindex->lastAlgoBlocks));
-            // DGB-BUG-011 FIX: Check bounds before array access to prevent crash
-            // when GetAlgo() returns ALGO_UNKNOWN (-1) for unrecognized block versions
-            int algo = pindex->GetAlgo();
-            if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-                pindex->lastAlgoBlocks[algo] = pindex;
-            }
-        }
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
 

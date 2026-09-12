@@ -208,10 +208,6 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
-    //! DigiByte: Track last block per algorithm for multi-algo mining
-    CBlockIndex *lastAlgoBlocks[NUM_ALGOS_IMPL];
-
-
     /**
      * Full constructor that copies fields from a block header.
      * (Definition is moved to chain.cpp so we can log from there)
@@ -364,7 +360,7 @@ public:
     CBlockIndex* GetAncestor(int height);
     const CBlockIndex* GetAncestor(int height) const;
 
-    CBlockIndex();
+    CBlockIndex() = default;
     ~CBlockIndex() = default;
 
 protected:
