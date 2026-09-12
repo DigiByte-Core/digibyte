@@ -6,9 +6,12 @@
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/digidollar_state.h>
+#include <digidollar/health.h>
 #include <digidollar/validation.h>
 #include <kernel/context.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
+#include <test/util/validation.h>
 #include <txdb.h>
 #include <validation.h>
 
@@ -181,11 +184,192 @@ BOOST_AUTO_TEST_CASE(verified_saved_totals_are_independently_repaired)
     SaveRecord(WrongTotals());
     const auto before = Snapshot();
     std::string error;
+    ASSERT_DEBUG_LOG("DigiDollar health totals repaired at block " + before.active_tip.ToString());
     BOOST_REQUIRE_MESSAGE(chainstate.InitializeDigiDollarState({}, error), error);
     BOOST_CHECK(chainstate.CoinsTip().GetDigiDollarState() == correct);
     CheckChainUnchanged(before);
     BOOST_REQUIRE(chainstate.CoinsTip().Flush());
     BOOST_CHECK(chainstate.CoinsDB().GetDigiDollarState() == correct);
+}
+
+BOOST_AUTO_TEST_CASE(unchanged_saved_totals_report_verification)
+{
+    LOCK(cs_main);
+    auto& chainstate = m_node.chainman->ActiveChainstate();
+    const auto before = Snapshot();
+    const auto expected = chainstate.CoinsTip().GetDigiDollarState();
+    std::vector<DigiDollarRecoveryPhase> phases;
+    std::string error;
+    ASSERT_DEBUG_LOG("DigiDollar health totals verified at block " + before.active_tip.ToString());
+    BOOST_REQUIRE_MESSAGE(chainstate.InitializeDigiDollarState({}, error,
+        [&](DigiDollarRecoveryPhase phase, uint64_t completed, uint64_t total) {
+            BOOST_CHECK(total == 0 || completed <= total);
+            if (phases.empty() || phases.back() != phase) phases.push_back(phase);
+        }), error);
+    const std::vector<DigiDollarRecoveryPhase> expected_phases{
+        DigiDollarRecoveryPhase::VERIFY_TOTALS, DigiDollarRecoveryPhase::PERSIST};
+    BOOST_CHECK(phases == expected_phases);
+    BOOST_CHECK(chainstate.CoinsDB().GetDigiDollarState() == expected);
+    CheckChainUnchanged(before);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_progress_counts_only_activated_history)
+{
+    LOCK(cs_main);
+    auto& chainstate = m_node.chainman->ActiveChainstate();
+    auto& params = const_cast<Consensus::Params&>(m_node.chainman->GetConsensus());
+    RestoreHeight restore_dd{params.DigiDollarHeight};
+    params.DigiDollarHeight = 123;
+    SaveRecord(std::nullopt);
+    const auto before = Snapshot();
+    std::map<DigiDollarRecoveryPhase, uint64_t> completed_phases;
+    std::string error;
+
+    BOOST_REQUIRE_MESSAGE(chainstate.InitializeDigiDollarState({}, error,
+        [&](DigiDollarRecoveryPhase phase, uint64_t completed, uint64_t total) {
+            if (phase == DigiDollarRecoveryPhase::PREFLIGHT ||
+                phase == DigiDollarRecoveryPhase::REWIND ||
+                phase == DigiDollarRecoveryPhase::REPLAY) {
+                // Only blocks 123, 124 and 125 need the activated rules.
+                BOOST_CHECK_EQUAL(total, 3U);
+                BOOST_CHECK_LE(completed, 3U);
+                completed_phases[phase] = completed;
+            }
+        }), error);
+    BOOST_REQUIRE_EQUAL(completed_phases.size(), 3U);
+    for (const auto& [phase, completed] : completed_phases) {
+        BOOST_CHECK_EQUAL(completed, 3U);
+    }
+    CheckChainUnchanged(before);
+    const auto state = chainstate.CoinsTip().GetDigiDollarState();
+    BOOST_REQUIRE(state);
+    BOOST_CHECK(state->history_checked);
+    BOOST_CHECK(state->Matches(params.hashGenesisBlock, before.active_tip,
+                               params.nDDThawDayHeight, params.DigiDollarHeight));
+}
+
+BOOST_AUTO_TEST_CASE(recovery_phase_cancellation_keeps_a_resumable_prefix)
+{
+    auto& chainstate = m_node.chainman->ActiveChainstate();
+    const std::vector<DigiDollarRecoveryPhase> cancel_phases{
+        DigiDollarRecoveryPhase::PREFLIGHT, DigiDollarRecoveryPhase::REWIND,
+        DigiDollarRecoveryPhase::REBUILD_ANCHOR, DigiDollarRecoveryPhase::REPLAY,
+        DigiDollarRecoveryPhase::PERSIST};
+    for (const auto cancel_phase : cancel_phases) {
+        ChainSnapshot before;
+        std::optional<DigiDollar::ChainstateHealth> expected;
+        {
+            LOCK(cs_main);
+            before = Snapshot();
+            expected = chainstate.CoinsTip().GetDigiDollarState();
+            SaveRecord(std::nullopt);
+            std::optional<DigiDollarRecoveryPhase> current_phase;
+            std::string error;
+            const auto interrupted = [&] {
+                if (current_phase != cancel_phase) return false;
+                if (cancel_phase == DigiDollarRecoveryPhase::REWIND) return chainstate.m_chain.Height() < TIP_HEIGHT;
+                if (cancel_phase == DigiDollarRecoveryPhase::REPLAY) return chainstate.m_chain.Height() >= THAW_HEIGHT;
+                return true;
+            };
+            BOOST_CHECK(!chainstate.InitializeDigiDollarState(interrupted, error,
+                [&](DigiDollarRecoveryPhase phase, uint64_t, uint64_t) {
+                    // Preserve the requested phase through the mandatory prefix write.
+                    if (current_phase != cancel_phase) current_phase = phase;
+                }));
+            BOOST_CHECK(error.find("interrupted") != std::string::npos || error.find("cancelled") != std::string::npos);
+            const int expected_height = cancel_phase == DigiDollarRecoveryPhase::PREFLIGHT ? TIP_HEIGHT :
+                cancel_phase == DigiDollarRecoveryPhase::REWIND ? TIP_HEIGHT - 1 :
+                cancel_phase == DigiDollarRecoveryPhase::REPLAY ? THAW_HEIGHT : THAW_HEIGHT - 1;
+            BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), expected_height);
+            BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == chainstate.CoinsTip().GetBestBlock());
+            const auto prefix = chainstate.CoinsDB().GetDigiDollarState();
+            if (cancel_phase == DigiDollarRecoveryPhase::REPLAY) {
+                BOOST_REQUIRE(prefix);
+                BOOST_CHECK(prefix->history_checked);
+                BOOST_CHECK(prefix->best_block == chainstate.CoinsDB().GetBestBlock());
+            } else {
+                BOOST_CHECK(!prefix);
+            }
+
+            chainstate.ResetCoinsViews();
+            chainstate.InitCoinsDB(1 << 20, false, false);
+            BOOST_REQUIRE(chainstate.ReplayBlocks());
+            chainstate.InitCoinsCache(1 << 20);
+            BOOST_REQUIRE(chainstate.LoadChainTip());
+            error.clear();
+            BOOST_REQUIRE_MESSAGE(chainstate.InitializeDigiDollarState({}, error), error);
+        }
+        BlockValidationState accepted;
+        BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(accepted), accepted.ToString());
+        {
+            LOCK(cs_main);
+            CheckChainUnchanged(before);
+            BOOST_CHECK(chainstate.CoinsTip().GetDigiDollarState() == expected);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(legacy_reconstruction_cancels_without_publishing_and_holds_the_snapshot_lock)
+{
+    using DigiDollar::HealthScanResult;
+    using DigiDollar::SystemHealthMonitor;
+    auto& chainman = *m_node.chainman;
+    auto& chainstate = chainman.ActiveChainstate();
+    auto& params = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    RestoreHeight restore_thaw{params.nDDThawDayHeight};
+    params.nDDThawDayHeight = std::numeric_limits<int>::max();
+    const auto original = SystemHealthMonitor::GetCachedMetrics();
+    struct RestoreMetrics {
+        DigiDollar::SystemMetrics value;
+        ~RestoreMetrics() { SystemHealthMonitor::RestoreLegacyMetrics(value); }
+    } restore_metrics{original};
+    DigiDollar::SystemMetrics sentinel = original;
+    sentinel.totalDDSupply = 12345;
+    sentinel.totalCollateral = 17 * COIN;
+    sentinel.totalActivePositions = 3;
+    sentinel.systemHealth = 138;
+    sentinel.hasCanonicalHealth = true;
+    sentinel.tiers = {{30, 456, 7 * COIN, 2, 144}};
+    SystemHealthMonitor::RestoreLegacyMetrics(sentinel);
+    const auto expected_tip = WITH_LOCK(cs_main, return chainstate.m_chain.Tip()->GetBlockHash());
+    unsigned int polls{0};
+    unsigned int progress_calls{0};
+    DigiDollar::HealthScanCallbacks callbacks;
+    callbacks.cancelled = [&] {
+        AssertLockHeld(cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip()->GetBlockHash() == expected_tip);
+        return ++polls >= 4;
+    };
+    callbacks.progress = [&](uint64_t, uint64_t) {
+        AssertLockHeld(cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip()->GetBlockHash() == expected_tip);
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == expected_tip);
+        ++progress_calls;
+    };
+    const auto cancelled = SystemHealthMonitor::ReconstructFromChain(chainman, callbacks);
+    BOOST_CHECK(cancelled.status == HealthScanResult::Status::CANCELLED);
+    BOOST_CHECK_GE(polls, 4U);
+    const auto unchanged = SystemHealthMonitor::GetCachedMetrics();
+    BOOST_CHECK_EQUAL(unchanged.totalDDSupply, sentinel.totalDDSupply);
+    BOOST_CHECK_EQUAL(unchanged.totalCollateral, sentinel.totalCollateral);
+    BOOST_CHECK_EQUAL(unchanged.totalActivePositions, sentinel.totalActivePositions);
+    BOOST_CHECK_EQUAL(unchanged.systemHealth, sentinel.systemHealth);
+    BOOST_CHECK_EQUAL(unchanged.hasCanonicalHealth, sentinel.hasCanonicalHealth);
+    BOOST_REQUIRE_EQUAL(unchanged.tiers.size(), 1U);
+    BOOST_CHECK_EQUAL(unchanged.tiers[0].ddMinted, sentinel.tiers[0].ddMinted);
+    BOOST_CHECK_EQUAL(unchanged.tiers[0].dgbLocked, sentinel.tiers[0].dgbLocked);
+    BOOST_CHECK_EQUAL(unchanged.tiers[0].positions, sentinel.tiers[0].positions);
+    BOOST_CHECK_EQUAL(unchanged.tiers[0].healthRatio, sentinel.tiers[0].healthRatio);
+    callbacks.cancelled = {};
+    const auto complete = SystemHealthMonitor::ReconstructFromChain(chainman, callbacks);
+    BOOST_REQUIRE_MESSAGE(complete.status == HealthScanResult::Status::COMPLETE, complete.error);
+    BOOST_CHECK_LE(progress_calls, 4U);
+    const auto rebuilt = SystemHealthMonitor::GetCachedMetrics();
+    BOOST_CHECK_EQUAL(rebuilt.totalDDSupply, 0);
+    BOOST_CHECK_EQUAL(rebuilt.totalCollateral, 0);
+    BOOST_CHECK_EQUAL(rebuilt.totalActivePositions, 0);
+    BOOST_CHECK_EQUAL(rebuilt.tiers[0].lockDays, sentinel.tiers[0].lockDays);
+    BOOST_CHECK_EQUAL(rebuilt.tiers[0].ddMinted, 0);
 }
 
 BOOST_AUTO_TEST_CASE(absent_and_unchecked_records_revalidate_the_same_post_activation_chain)
@@ -225,8 +409,12 @@ BOOST_AUTO_TEST_CASE(unchecked_history_requires_available_blocks_and_undo)
         {
             UnavailableRecoveryData unavailable{missing_undo ? missing->nUndoPos : missing->nDataPos};
             BOOST_CHECK(!chainstate.InitializeDigiDollarState({}, error));
+            const auto first_error = error;
+            BOOST_CHECK(!chainstate.InitializeDigiDollarState({}, error));
+            BOOST_CHECK_EQUAL(error, first_error);
         }
         CheckActionableRecoveryError(error, missing_undo ? "undo" : "block");
+        BOOST_CHECK(error.find(missing->GetBlockHash().ToString()) != std::string::npos);
         CheckChainUnchanged(before);
         BOOST_CHECK(!chainstate.CoinsTip().GetDigiDollarState());
         BOOST_CHECK(!chainstate.CoinsDB().GetDigiDollarState());
@@ -235,6 +423,39 @@ BOOST_AUTO_TEST_CASE(unchecked_history_requires_available_blocks_and_undo)
         BOOST_REQUIRE_MESSAGE(chainstate.InitializeDigiDollarState({}, error), error);
         BOOST_CHECK(chainstate.CoinsTip().GetDigiDollarState() == correct);
         CheckChainUnchanged(before);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(fixed_retention_floor_survives_disconnect_while_index_locks_move)
+{
+    auto& chainstate = m_node.chainman->ActiveChainstate();
+    auto& blockman = chainstate.m_blockman;
+    BlockManagerTest fixed_lock{blockman, "digidollar"};
+    BlockManagerTest index_lock{blockman, "test_index"};
+    CBlockIndex* tip;
+    constexpr int future_floor{TIP_HEIGHT + 200};
+    {
+        LOCK(cs_main);
+        tip = chainstate.m_chain.Tip();
+        blockman.UpdatePruneLock("digidollar", {.height_first = future_floor, .reorg_sensitive = false});
+        blockman.UpdatePruneLock("test_index", {.height_first = future_floor});
+    }
+    BlockValidationState disconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(disconnected, tip), disconnected.ToString());
+    {
+        LOCK(cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), TIP_HEIGHT - 1);
+        BOOST_CHECK_EQUAL(fixed_lock.PruneLock().height_first, future_floor);
+        BOOST_CHECK_EQUAL(index_lock.PruneLock().height_first, TIP_HEIGHT - 1);
+        chainstate.ResetBlockFailureFlags(tip);
+    }
+    BlockValidationState reconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(reconnected), reconnected.ToString());
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip() == tip);
+        BOOST_CHECK_EQUAL(fixed_lock.PruneLock().height_first, future_floor);
+        BOOST_CHECK_EQUAL(index_lock.PruneLock().height_first, TIP_HEIGHT - 1);
     }
 }
 

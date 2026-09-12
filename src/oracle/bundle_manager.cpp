@@ -1736,6 +1736,12 @@ void OracleBundleManager::Shutdown()
 
 bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
 {
+    return LoadPricesFromChain(chainman, {}).status == LoadStatus::COMPLETE;
+}
+
+OracleBundleManager::LoadResult OracleBundleManager::LoadPricesFromChain(
+    ChainstateManager& chainman, const LoadCallbacks& callbacks)
+{
     OracleBundleManager& manager = GetInstance();
     const Consensus::Params& consensus = Params().GetConsensus();
 
@@ -1745,7 +1751,7 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
     CBlockIndex* pindex = chainman.ActiveChain().Tip();
     if (!pindex) {
         LogPrintf("Oracle: No active chain tip, skipping price loading\n");
-        return true;
+        return {};
     }
 
     int tip_height = pindex->nHeight;
@@ -1754,7 +1760,7 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
     if (!DigiDollar::IsDigiDollarEnabled(pindex, chainman)) {
         LogPrintf("Oracle: DigiDollar not yet active (BIP9) at height %d, skipping price loading\n",
                  tip_height);
-        return true;
+        return {};
     }
 
     // DigiDollar activation floor: blocks at/above it are guaranteed retained on a
@@ -1772,14 +1778,34 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
     const int price_cache_start_height = std::max(0, tip_height - ORACLE_VALIDITY_BLOCKS + 1);
     int prices_found = 0;
     int skipped_pre_activation = 0;
+    std::vector<DigiDollar::Volatility::PricePoint> cached_prices;
     std::vector<DigiDollar::Volatility::PricePoint> volatility_prices;
 
     LogPrintf("Oracle: Scanning last %d blocks for oracle prices (height %d to %d)...\n",
              scan_depth, tip_height - scan_depth + 1, tip_height);
 
     const int start_height = std::max(0, tip_height - scan_depth + 1);
+    const uint64_t total_blocks = tip_height - start_height + 1;
+    const uint64_t progress_step = std::max<uint64_t>(1, (total_blocks + 99) / 100);
+    uint64_t reported_blocks = 0;
+    auto last_progress = std::chrono::steady_clock::now();
+    if (callbacks.progress && total_blocks != 0) callbacks.progress(0, total_blocks);
+
     for (int height = start_height; height <= tip_height; ++height) {
         CBlockIndex* block_index = chainman.ActiveChain()[height];
+        if (callbacks.cancelled && callbacks.cancelled()) {
+            LogPrintf("Oracle: Price reconstruction cancelled at height %d\n", height);
+            return {LoadStatus::CANCELLED, height, block_index ? block_index->GetBlockHash() : uint256{}};
+        }
+        const uint64_t completed_blocks = height - start_height;
+        if (callbacks.progress && completed_blocks - reported_blocks >= progress_step) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_progress >= std::chrono::seconds{1}) {
+                callbacks.progress(completed_blocks, total_blocks);
+                reported_blocks = completed_blocks;
+                last_progress = now;
+            }
+        }
         if (!block_index) continue;
 
         // L1 (startup-hang fix): evaluate the BIP9 DigiDollar-activation gate through
@@ -1803,10 +1829,11 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
                 // freeze state reconstructed here is enforced as a consensus rule
                 // post-activation, so refusing to start beats rebuilding it from
                 // partial price history and diverging from the network.
-                LogPrintf("ERROR: Oracle: failed to read block at height %d during startup "
-                          "price reconstruction (>= DigiDollar floor %d). Block data is "
-                          "incomplete; restart with -reindex.\n", height, dd_floor);
-                return false;
+                LogPrintf("ERROR: Oracle: failed to read block %s at height %d during "
+                          "price reconstruction (>= DigiDollar floor %d). Restore or "
+                          "redownload the required block data before restarting.\n",
+                          block_index->GetBlockHash().ToString(), height, dd_floor);
+                return {LoadStatus::READ_ERROR, height, block_index->GetBlockHash()};
             }
             // Below the floor (or floor 0, e.g. default regtest / assumeutxo gaps)
             // a missing block is a legitimate prune state, not damage.
@@ -1816,36 +1843,38 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
             continue;
         }
 
-        // Extract oracle bundle from coinbase
-        if (block.vtx.empty()) continue;
-        const CTransaction& coinbase = *block.vtx[0];
+        std::optional<COracleBundle> bundle;
+        BlockValidationState state;
+        if (!OracleDataValidator::ValidateBlockOracleData(block, block_index->pprev, consensus, state, &bundle)) {
+            LogPrintf("Oracle: Skipping invalid startup oracle bundle at height %d: %s\n",
+                      height, state.ToString());
+            continue;
+        }
+        if (!bundle || bundle->median_price_micro_usd == 0) continue;
 
-        COracleBundle bundle;
-        if (manager.ExtractOracleBundle(coinbase, bundle)) {
-            if (bundle.median_price_micro_usd > 0) {
-                BlockValidationState state;
-                if (!OracleDataValidator::ValidateBlockOracleData(block, block_index->pprev, consensus, state)) {
-                    LogPrintf("Oracle: Skipping invalid startup oracle bundle at height %d: %s\n",
-                             height, state.ToString());
-                    continue;
-                }
-                if (height >= price_cache_start_height) {
-                    manager.UpdatePriceCache(height, bundle.median_price_micro_usd, bundle.timestamp);
-                    prices_found++;
-                }
-                if (BlockHasDigiDollarMint(block)) {
-                    const int64_t block_time = block.GetBlockTime();
-                    if (volatility_prices.empty() ||
-                        block_time - volatility_prices.back().timestamp >= 3600) {
-                        volatility_prices.emplace_back(static_cast<CAmount>(bundle.median_price_micro_usd),
-                                                       block_time,
-                                                       static_cast<uint32_t>(height));
-                    }
-                }
-                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Found price %llu micro-USD at height %d\n",
-                         bundle.median_price_micro_usd, height);
+        if (height >= price_cache_start_height) {
+            // Resolve the existing timestamp fallback at the original update point.
+            const int64_t source_time = bundle->timestamp > 0 ? bundle->timestamp : GetTime();
+            cached_prices.emplace_back(static_cast<CAmount>(bundle->median_price_micro_usd),
+                                       source_time, static_cast<uint32_t>(height));
+            prices_found++;
+        }
+        if (BlockHasDigiDollarMint(block)) {
+            const int64_t block_time = block.GetBlockTime();
+            if (volatility_prices.empty() ||
+                block_time - volatility_prices.back().timestamp >= 3600) {
+                volatility_prices.emplace_back(static_cast<CAmount>(bundle->median_price_micro_usd),
+                                               block_time,
+                                               static_cast<uint32_t>(height));
             }
         }
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Found price %llu micro-USD at height %d\n",
+                 bundle->median_price_micro_usd, height);
+    }
+
+    if (callbacks.cancelled && callbacks.cancelled()) {
+        LogPrintf("Oracle: Price reconstruction cancelled before publication at height %d\n", tip_height);
+        return {LoadStatus::CANCELLED, tip_height, pindex->GetBlockHash()};
     }
 
     if (skipped_pre_activation > 0) {
@@ -1854,6 +1883,11 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
                  skipped_pre_activation);
     }
 
+    // Publish only after the complete scan. Keep the existing ordered cache
+    // updates, and do not report cancellation once publication has begun.
+    for (const auto& price : cached_prices) {
+        manager.UpdatePriceCache(price.height, price.price, price.timestamp);
+    }
     DigiDollar::Volatility::VolatilityMonitor::ReconstructFromBlockData(
         volatility_prices, static_cast<uint32_t>(tip_height));
 
@@ -1863,7 +1897,8 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
     } else {
         LogPrintf("Oracle: No oracle prices found in recent blocks\n");
     }
-    return true;
+    if (callbacks.progress) callbacks.progress(total_blocks, total_blocks);
+    return {LoadStatus::COMPLETE, tip_height, pindex->GetBlockHash()};
 }
 
 bool OracleBundleManager::ShouldLoadStartupOraclePriceForBlock(int height, const CBlockIndex* block_index, const Consensus::Params& params)
@@ -2149,8 +2184,9 @@ void OracleBundleManager::RemovePriceCache(int height)
  * OracleDataValidator Implementation
  */
 
-bool OracleDataValidator::ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state)
+bool OracleDataValidator::ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state, std::optional<COracleBundle>* validated_bundle)
 {
+    if (validated_bundle) validated_bundle->reset();
     // Oracle validation runs identically on testnet and mainnet. The
     // previous chain-type short-circuit (return true on any chain other
     // than testnet/regtest) meant mainnet would never run the phase-
@@ -2287,6 +2323,7 @@ bool OracleDataValidator::ValidateBlockOracleData(const CBlock& block, const CBl
     LogPrint(BCLog::DIGIDOLLAR, "Oracle: Block %d oracle bundle validated: price=%llu micro-USD\n",
              block_height, bundle.median_price_micro_usd);
 
+    if (validated_bundle) *validated_bundle = std::move(bundle);
     return true;
 }
 
@@ -2506,7 +2543,9 @@ bool OracleBundleManager::ValidateMuSig2Bundle(const COracleBundle& bundle,
     }
 
     // Compute aggregate pubkey for participating oracles
-    MuSig2OracleAggregator aggregator;
+    // The cache binds every aggregate to the supplied parameters and signer set.
+    // Its context is used only through const operations, which may run concurrently.
+    static MuSig2OracleAggregator aggregator;
     secp256k1_xonly_pubkey agg_pk;
     secp256k1_musig_keyagg_cache cache;
 
@@ -2535,12 +2574,10 @@ bool OracleBundleManager::ValidateMuSig2Bundle(const COracleBundle& bundle,
     uint256 msg_hash = ComputeOracleBundleHash(bundle, params.hashGenesisBlock);
 
     // Verify aggregate signature using BIP-340 Schnorr verification
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-    int result = secp256k1_schnorrsig_verify(ctx,
+    int result = secp256k1_schnorrsig_verify(secp256k1_context_static,
                                               bundle.aggregate_sig.data(),
                                               msg_hash.begin(), 32,
                                               &agg_pk);
-    secp256k1_context_destroy(ctx);
 
     if (!result) {
         error = "v0x03 aggregate signature verification failed";

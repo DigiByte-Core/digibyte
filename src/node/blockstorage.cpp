@@ -400,6 +400,7 @@ void BlockManager::FindFilesToPruneManual(
     }
 
     const auto [min_block_to_prune, last_block_can_prune] = chainman.GetPruneRange(chain, nManualPruneHeight);
+    if (last_block_can_prune < min_block_to_prune) return;
 
     int count = 0;
     for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
@@ -427,7 +428,7 @@ void BlockManager::FindFilesToPrune(
     const auto target = std::max(
         MIN_DISK_SPACE_FOR_BLOCK_FILES, GetPruneTarget() / chainman.GetAll().size());
 
-    if (chain.m_chain.Height() < 0 || target == 0) {
+    if (chain.m_chain.Height() < 0 || target == 0 || last_prune < 0) {
         return;
     }
     if (static_cast<uint64_t>(chain.m_chain.Height()) <= chainman.GetParams().PruneAfterHeight()) {
@@ -435,6 +436,7 @@ void BlockManager::FindFilesToPrune(
     }
 
     const auto [min_block_to_prune, last_block_can_prune] = chainman.GetPruneRange(chain, last_prune);
+    if (last_block_can_prune < min_block_to_prune) return;
 
     uint64_t nCurrentUsage = CalculateCurrentUsage();
     // We don't check to prune until after we've allocated new space for files

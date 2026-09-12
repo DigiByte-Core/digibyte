@@ -29,6 +29,7 @@
 #include <vector>
 
 class BlockValidationState;
+class BlockManagerTest;
 class CAutoFile;
 class CBlock;
 class CBlockUndo;
@@ -94,6 +95,7 @@ struct CBlockIndexHeightOnlyComparator {
 
 struct PruneLockInfo {
     int height_first{std::numeric_limits<int>::max()}; //! Height of earliest block that should be kept and not pruned
+    bool reorg_sensitive{true}; //! Moving index locks follow disconnects; fixed retention floors do not.
 };
 
 enum BlockfileType {
@@ -136,6 +138,7 @@ class BlockManager
 {
     friend Chainstate;
     friend ChainstateManager;
+    friend class ::BlockManagerTest;
 
 private:
     const CChainParams& GetParams() const { return m_opts.chainparams; }

@@ -434,6 +434,8 @@ enum class FlushStateMode {
     ALWAYS
 };
 
+enum class DigiDollarRecoveryPhase { VERIFY_TOTALS, PREFLIGHT, REWIND, REBUILD_ANCHOR, REPLAY, PERSIST };
+
 /**
  * A convenience class for constructing the CCoinsView* hierarchy used
  * to facilitate access to the UTXO set.
@@ -739,7 +741,8 @@ public:
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Verify canonical DD state, replaying previously unchecked activated history. */
-    bool InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& error,
+                                  const std::function<void(DigiDollarRecoveryPhase, uint64_t, uint64_t)>& progress = {}) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();

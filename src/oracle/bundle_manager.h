@@ -7,9 +7,11 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <protocol.h>
 #include <set>
 #include <unordered_map>
@@ -218,6 +220,21 @@ public:
     //! not be read (incomplete/damaged block data) — the caller must abort
     //! startup rather than reconstruct price/volatility state from partial data.
     static bool LoadPricesFromChain(ChainstateManager& chainman);
+
+    enum class LoadStatus { COMPLETE, CANCELLED, READ_ERROR };
+    struct LoadResult {
+        LoadStatus status{LoadStatus::COMPLETE};
+        int height{-1};
+        uint256 block_hash;
+    };
+    struct LoadCallbacks {
+        std::function<bool()> cancelled;
+        std::function<void(uint64_t completed, uint64_t total)> progress;
+    };
+
+    //! Callbacks run under cs_main and must not block or acquire validation locks.
+    //! Cancellation and read errors do not publish reconstructed state.
+    static LoadResult LoadPricesFromChain(ChainstateManager& chainman, const LoadCallbacks& callbacks);
     //! Startup price-scan per-block gate = the BIP9 DigiDollar-activation predicate for
     //! block_index. Production uses the ChainstateManager overload (shared, memoized
     //! versionbits cache — O(1) amortized, the fix for the ~15-minute startup hang); the
@@ -290,7 +307,8 @@ class OracleDataValidator
 {
 public:
     //! Block validation
-    static bool ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state);
+    //! The optional output is cleared on entry and populated only after all checks.
+    static bool ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state, std::optional<COracleBundle>* validated_bundle = nullptr);
 
     //! Transaction validation for DigiDollar operations
     static bool ValidateOraclePriceForTx(const CTransaction& tx, CAmount oracle_price, int32_t block_height);

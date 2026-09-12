@@ -48,6 +48,92 @@ See the [activation guide](../DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for the height
 boundary and the [wallet guide](../DIGIDOLLAR_WALLET_INTEGRATION.md) for key
 recovery and wallet support.
 
+## Startup progress and interrupted recovery
+
+Required oracle and health reconstruction finishes before RPC warmup ends.
+Follow the startup log and Qt splash messages. Oracle reconstruction reports
+the number of blocks checked out of its scan range. Legacy health
+reconstruction reports unspent outputs checked; its total is unknown during
+the scan. These are counts for the current stage, not an estimate of remaining
+time. Updates are periodic, and a disk operation can delay the next update.
+Normal logging includes this progress without `debug=digidollar`.
+
+When canonical recovery is needed, its first log identifies the chain height,
+block hash, genesis hash, record and rule versions, and configured DigiDollar
+and accounting heights. Later messages identify the work being performed:
+
+| Stage | Meaning |
+|-------|---------|
+| Verifying saved DigiDollar health totals | Reconstructing principal, collateral and vault count from the matching unspent outputs and creating transactions. |
+| Checking retained DigiDollar history | Reading the required blocks and undo data before changing an unchecked chain. |
+| Rewinding unchecked DigiDollar history | Moving back through history whose activated rules have not yet been checked. |
+| Reconstructing DigiDollar health before activation | Establishing the accounting state from which the remaining history can be validated. |
+| Verifying DigiDollar history in order | Validating the retained blocks in order under each block's applicable rules. |
+| Saving DigiDollar recovery progress | Persisting the resulting chainstate and health record. |
+
+A start with matching checked history need not visit every stage. Block stages
+show completed/total counts; output scans report counts while the total is
+unknown. A stage's completion or a cleared progress display does not establish
+that startup succeeded. Check the final completion or error message and the
+accepted height and hash. Recovery's final log includes elapsed time and the
+height and hash where it completed or stopped.
+
+`DigiDollar health totals verified` means the independently reconstructed
+totals agree with the saved totals, or that no prior totals needed comparison.
+`DigiDollar health totals repaired` reports the old and new principal in cents,
+collateral in satoshis and open-vault count after saving the replacement.
+This repairs derived accounting from available source data. It does not repair
+missing or damaged block, undo or chainstate files.
+
+To interrupt startup, press `q` on the Qt splash screen or use the service's
+normal stop procedure. RPC commands may still be unavailable during warmup.
+Allow the process to exit before copying data or starting it again. Cancellation
+is checked between reconstruction steps; it does not interrupt an individual
+disk read or an atomic database write immediately.
+
+Cancelled oracle and legacy-health scans do not publish their partial results.
+Canonical recovery can have already saved an earlier chain height. A restart
+rechecks that saved state: a rewind leaves unchecked history, while replay
+preserves only the history completed so far. The remaining blocks still need
+normal validation. Do not assume an interrupted recovery kept the original
+tip or that the previous stage's percentage is a durable restart position.
+
+If startup reports unavailable required history, preserve the error, its stage,
+the height and hash, and the build and configuration identity. Keep every
+wallet and backup, the original data directory, logs, retained blocks and undo
+files. Restore the required source data through a reviewed restore or download
+procedure that keeps block files, chainstate and indexes consistent. After
+repair, start normally with the same network and data directory. These startup
+paths do not download or repair missing source files automatically.
+
+Reported DigiDollar retained-history and canonical-recovery failures end the
+current startup attempt without entering the generic database-rebuild prompt.
+Reported oracle or late legacy-health reconstruction failures also stop
+startup. A service supervisor can still launch another process, so pause its
+restart loop while diagnosing a repeated failure. There is no persistent
+retry marker to clear and no index to delete to unlock a retry. Repeated
+restarts cannot supply missing data.
+
+After successful startup, check `getdigidollarstats` against the accepted tip.
+At and above Thaw Day, `canonical_health.ready` and `history_checked` must be
+true, with the matching `block_hash`, genesis, rule versions and activation
+heights. Unavailable state is not zero. `open_vault_principal` counts the
+original DD amounts attached to vaults that remain open; `total_dd_supply`
+reports circulating cents separately. Extra burns can make those values differ
+without corrupting accounting. Below Thaw Day, use a synchronized stats index
+for verified circulation because the legacy fallback scans vault amounts.
+Tip health and `next_block_health` have separate heights, rules and readiness;
+the next-block result also requires its applicable oracle quote. A ready tip
+record alone does not establish next-block readiness at the activation boundary.
+
+Source: [startup handling](../src/init.cpp),
+[retained-history checks](../src/node/chainstate.cpp),
+[canonical recovery](../src/validation.cpp),
+[health reconstruction](../src/digidollar/health.cpp),
+[oracle reconstruction](../src/oracle/bundle_manager.cpp),
+[splash shutdown](../src/qt/splashscreen.cpp) and
+[health reporting](../src/rpc/digidollar.cpp).
+
 ## Two nodes behind one router
 
 Give each node its own peer-to-peer (P2P) listening port and matching TCP

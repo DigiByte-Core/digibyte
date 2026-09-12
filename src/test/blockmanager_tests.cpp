@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <chainparams.h>
 #include <clientversion.h>
+#include <kernel/context.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
@@ -13,7 +14,9 @@
 
 #include <boost/test/unit_test.hpp>
 #include <test/util/logging.h>
+#include <test/util/mining.h>
 #include <test/util/setup_common.h>
+#include <test/util/validation.h>
 
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
@@ -198,6 +201,108 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     //   SaveBlockToDisk() did not call WriteBlockToDisk() because `FlatFilePos* dbp` was non-null
     blockman.ReadBlockFromDisk(read_block, pos2);
     BOOST_CHECK_EQUAL(read_block.nVersion, 2);
+}
+
+struct ZeroFloorPruneSetup : ChainTestingSetup {
+    explicit ZeroFloorPruneSetup(uint64_t prune_target = BlockManager::PRUNE_TARGET_MANUAL)
+        : ChainTestingSetup(ChainType::REGTEST, {"-fastprune"})
+    {
+        const auto chainman_options = m_node.chainman->m_options;
+        const BlockManager::Options blockman_options{
+            .chainparams = Params(),
+            .prune_target = prune_target,
+            .fast_prune = true,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = *m_node.notifications,
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            m_node.kernel->interrupt, chainman_options, blockman_options);
+        LoadVerifyActivateChainstate();
+    }
+
+    void CheckEarlyFileRetention(bool keep_lock, bool automatic = false)
+    {
+        auto& chainman = *m_node.chainman;
+        auto& chainstate = chainman.ActiveChainstate();
+        auto& blockman = chainman.m_blockman;
+        BlockManagerTest prune_lock{blockman, "digidollar"};
+        auto* genesis = WITH_LOCK(cs_main, return chainstate.m_chain.Genesis());
+        BOOST_REQUIRE(genesis);
+        const FlatFilePos early_pos = WITH_LOCK(cs_main, return genesis->GetBlockPos());
+        BOOST_REQUIRE_EQUAL(early_pos.nFile, 0);
+
+        // Close the first file before the next save, as the existing storage
+        // fixture does. Keep its actual size and height range after that save.
+        unsigned int early_size;
+        {
+            LOCK(cs_main);
+            BOOST_REQUIRE_EQUAL(prune_lock.PruneLock().height_first, 0);
+            auto* early = blockman.GetBlockFileInfo(early_pos.nFile);
+            BOOST_REQUIRE_EQUAL(early->nHeightFirst, 0U);
+            BOOST_REQUIRE_EQUAL(early->nHeightLast, 0U);
+            early_size = early->nSize;
+            early->nSize = 0x10000;
+        }
+        auto blocks = CreateBlockChain(automatic ? Params().PruneAfterHeight() + 1 : 1, Params());
+        for (auto& block : blocks) BOOST_REQUIRE(!MineBlock(m_node, block).IsNull());
+        LOCK(cs_main);
+        const auto later_pos = chainstate.m_chain.Tip()->GetBlockPos();
+        BOOST_REQUIRE_EQUAL(later_pos.nFile, 1);
+        {
+            blockman.GetBlockFileInfo(early_pos.nFile)->nSize = early_size;
+        }
+
+        CBlock read;
+        BOOST_REQUIRE(blockman.ReadBlockFromDisk(read, *genesis));
+        BOOST_REQUIRE(read.GetHash() == genesis->GetBlockHash());
+        if (!keep_lock) blockman.UpdatePruneLock("digidollar", {});
+
+        if (automatic) {
+            // Account for disk pressure in the closed file's metadata without
+            // allocating a large physical file for this storage test.
+            struct RestoreSize {
+                BlockManager& blockman;
+                int file;
+                unsigned int size;
+                ~RestoreSize() {
+                    auto* info = blockman.GetBlockFileInfo(file);
+                    if (info->nSize) info->nSize = size;
+                }
+            } restore_size{blockman, early_pos.nFile, early_size};
+            blockman.GetBlockFileInfo(early_pos.nFile)->nSize = MIN_DISK_SPACE_FOR_BLOCK_FILES;
+            chainstate.PruneAndFlush();
+        } else {
+            BlockValidationState state;
+            BOOST_REQUIRE_MESSAGE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS, 1), state.ToString());
+        }
+        BOOST_CHECK_EQUAL(bool(genesis->nStatus & BLOCK_HAVE_DATA), keep_lock);
+        BOOST_CHECK_EQUAL(blockman.ReadBlockFromDisk(read, early_pos), keep_lock);
+        BOOST_CHECK_EQUAL(fs::exists(m_args.GetBlocksDirPath() / "blk00000.dat"), keep_lock);
+    }
+};
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_zero_floor_retains_early_file, ZeroFloorPruneSetup)
+{
+    CheckEarlyFileRetention(true);
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_early_file_is_prunable_without_retention_lock, ZeroFloorPruneSetup)
+{
+    CheckEarlyFileRetention(false);
+}
+
+struct ZeroFloorAutomaticPruneSetup : ZeroFloorPruneSetup {
+    ZeroFloorAutomaticPruneSetup() : ZeroFloorPruneSetup(MIN_DISK_SPACE_FOR_BLOCK_FILES) {}
+};
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_zero_floor_retains_early_file_automatically, ZeroFloorAutomaticPruneSetup)
+{
+    CheckEarlyFileRetention(true, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_early_file_is_automatically_prunable_without_retention_lock, ZeroFloorAutomaticPruneSetup)
+{
+    CheckEarlyFileRetention(false, true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

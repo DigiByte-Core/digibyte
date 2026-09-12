@@ -42,6 +42,18 @@ namespace DigiDollar {
 
 using CanonicalTxLookup = std::function<bool(const uint256&, uint32_t, CTransactionRef&)>;
 
+struct HealthScanCallbacks {
+    std::function<bool()> cancelled;
+    //! A zero total means that only the completed count is known.
+    std::function<void(uint64_t completed, uint64_t total)> progress;
+};
+
+struct HealthScanResult {
+    enum class Status { COMPLETE, CANCELLED, READ_ERROR };
+    Status status{Status::COMPLETE};
+    std::string error;
+};
+
 struct CanonicalVault {
     COutPoint outpoint;
     CAmount principal{0};
@@ -65,7 +77,8 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
                                 const CanonicalTxLookup& lookup,
                                 ChainstateHealth& health, std::string& error,
                                 const std::function<bool()>& interrupted = {},
-                                CAmount* circulating_supply = nullptr);
+                                CAmount* circulating_supply = nullptr,
+                                const std::function<void(uint64_t, uint64_t)>& progress = {});
 
 /** Apply or undo a transaction using the original amounts of its creating vaults. */
 bool UpdateChainstateHealth(const CTransaction& tx, const std::vector<Coin>& inputs,
@@ -243,6 +256,12 @@ public:
     //! old silent-undercount behavior. Every caller must decide explicitly.
     static bool ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view, const node::BlockManager* blockman, const CTxMemPool* mempool, const CChain* chain, const Consensus::Params* consensus);
 
+    //! Cancellation and existing read failures leave the cached metrics unchanged.
+    static HealthScanResult ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view,
+                                       const node::BlockManager* blockman, const CTxMemPool* mempool,
+                                       const CChain* chain, const Consensus::Params* consensus,
+                                       const HealthScanCallbacks& callbacks);
+
     /**
      * Reconstruct the cached system-health metrics (total DD supply + total
      * collateral) from the on-chain UTXO set at node startup.
@@ -264,6 +283,7 @@ public:
     //! (see ScanUTXOSet) — the caller must abort startup rather than run
     //! consensus with an incomplete health baseline.
     static bool ReconstructFromChain(ChainstateManager& chainman);
+    static HealthScanResult ReconstructFromChain(ChainstateManager& chainman, const HealthScanCallbacks& callbacks);
 
     /**
      * Get cached metrics without triggering updates

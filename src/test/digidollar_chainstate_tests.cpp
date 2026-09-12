@@ -287,6 +287,22 @@ BOOST_AUTO_TEST_CASE(reconstructs_actual_unspent_vault_outpoints)
     DigiDollar::ChainstateHealth health;
     std::string error;
     CAmount supply{-1};
+    const auto untouched_health = health;
+    bool cancel_at_completion{false};
+    unsigned int progress_calls{0};
+    BOOST_CHECK(!DigiDollar::ReconstructChainstateHealth(cache, params, lookup, health, error,
+        [&] { return cancel_at_completion; }, &supply,
+        [&](uint64_t completed, uint64_t total) {
+            ++progress_calls;
+            if (total != 0) {
+                BOOST_CHECK_EQUAL(completed, total);
+                cancel_at_completion = true;
+            }
+        }));
+    BOOST_CHECK_EQUAL(progress_calls, 2U);
+    BOOST_CHECK(health == untouched_health);
+    BOOST_CHECK_EQUAL(supply, -1);
+    BOOST_CHECK(error.find("cancelled") != std::string::npos);
     BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(cache, params, lookup, health, error, {}, &supply), error);
     BOOST_CHECK_EQUAL(health.open_vault_principal, 10000);
     BOOST_CHECK_EQUAL(health.collateral, 100 * COIN);

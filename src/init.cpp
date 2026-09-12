@@ -2225,25 +2225,41 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_signing_orchestrator->SetConnman(node.connman.get());
     // Initialize oracle P2P connection for broadcasting
     OracleBundleManager::GetInstance().SetConnman(node.connman.get());
-    // Load oracle prices from blockchain (must be after chainstate is loaded).
-    // Fail CLOSED on unreadable post-activation blocks: the reconstructed price
-    // history feeds the consensus volatility freeze, and the reconstructed health
-    // metrics feed consensus DCA/ERR. A truncated/partially-restored block file
-    // passes the index-flag startup guard but must never let the node run
-    // DigiDollar validation on partial data.
-    if (!OracleBundleManager::LoadPricesFromChain(chainman)) {
-        return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
-                           "Restart with -reindex to rebuild it (a pruned node will "
-                           "redownload and re-prune)."));
+    // Keep required reconstruction synchronous and publish only a complete scan.
+    OracleBundleManager::LoadCallbacks oracle_load_callbacks;
+    oracle_load_callbacks.cancelled = ShutdownRequested;
+    oracle_load_callbacks.progress = [](uint64_t completed, uint64_t total) {
+        const int percent = total == 0 ? 100 : static_cast<int>(completed * 100 / total);
+        uiInterface.InitMessage(strprintf(_("Reconstructing oracle prices: %u of %u blocks").translated,
+                                          completed, total));
+        uiInterface.ShowProgress(_("Reconstructing oracle prices").translated, percent, false);
+    };
+    const auto oracle_load = OracleBundleManager::LoadPricesFromChain(chainman, oracle_load_callbacks);
+    if (oracle_load.status == OracleBundleManager::LoadStatus::CANCELLED) {
+        return false;
     }
-    // DD-FINAL-003 / AR-CONSENSUS-1: reconstruct cached system-health metrics
-    // (total DD supply + collateral) from the on-chain UTXO set so consensus
-    // DCA/ERR health does not depend on process restart history. No-op until
-    // DigiDollar is active at the tip.
-    if (!DigiDollar::SystemHealthMonitor::ReconstructFromChain(chainman)) {
-        return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
-                           "Restart with -reindex to rebuild it (a pruned node will "
-                           "redownload and re-prune)."));
+    if (oracle_load.status == OracleBundleManager::LoadStatus::READ_ERROR) {
+        return InitError(strprintf(_("Oracle price reconstruction could not read block %s at height %d. "
+                                    "Restore or redownload the required block data before restarting."),
+                                   oracle_load.block_hash.ToString(), oracle_load.height));
+    }
+    // Canonical health was prepared before import. Legacy health still needs
+    // its complete synchronous scan before startup can finish.
+    DigiDollar::HealthScanCallbacks health_callbacks;
+    health_callbacks.cancelled = ShutdownRequested;
+    health_callbacks.progress = [](uint64_t completed, uint64_t total) {
+        uiInterface.InitMessage(strprintf(_("Reconstructing DigiDollar health: %u outputs checked").translated, completed));
+        uiInterface.ShowProgress(_("Reconstructing DigiDollar health").translated,
+                                 total ? static_cast<int>(100 * completed / total) : 0, false);
+    };
+    const auto health_load = DigiDollar::SystemHealthMonitor::ReconstructFromChain(chainman, health_callbacks);
+    uiInterface.ShowProgress("", 100, false);
+    if (health_load.status == DigiDollar::HealthScanResult::Status::CANCELLED) {
+        uiInterface.InitMessage(_("DigiDollar health reconstruction cancelled").translated);
+        return false;
+    }
+    if (health_load.status == DigiDollar::HealthScanResult::Status::READ_ERROR) {
+        return InitError(Untranslated(health_load.error));
     }
 
     // DD-FINAL-005 / AR-0: OP_CHECKPRICE is deterministically DISABLED (it now

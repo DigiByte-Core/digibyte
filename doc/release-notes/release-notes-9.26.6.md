@@ -44,6 +44,16 @@ redemptions no longer use the old volatility freezes there. Other oracle,
 health, timelock, burn and fee requirements remain. A large price move can
 still restrict minting, with no exact wall-clock recovery promise.
 
+## Explicit units for DigiDollar RPC amounts
+
+The send, batch-send and redeem RPCs keep integer cents as the default. A
+decimal amount without an `amount_unit` is now rejected, instead of being
+interpreted as dollars. For example, `25000` without a unit still means
+$250.00. To use dollar amounts, set `amount_unit` to `dollars`; then `250.00`
+means $250.00. Explicit `cents` values must be integers, and `dollars` values
+allow at most two decimal places. Update scripts that relied on the old
+decimal handling before upgrading. See the [wallet amount guide](../../DIGIDOLLAR_WALLET_INTEGRATION.md#amount-units-cents-by-default-amount_unit-to-say-otherwise).
+
 ## Mint wallet support and oracle names
 
 Qt checks mint-wallet capability before either confirmation dialog. RPC mint

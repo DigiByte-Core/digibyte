@@ -172,6 +172,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         if (options.prune && dd_floor >= 0 && chainman.GetConsensus().DigiDollarHeight != std::numeric_limits<int>::max()) {
             PruneLockInfo dd_lock;
             dd_lock.height_first = dd_floor;
+            dd_lock.reorg_sensitive = false;
             chainman.m_blockman.UpdatePruneLock("digidollar", dd_lock);
             LogPrintf("DigiDollar: pruning enabled; retaining all blocks at/above height %d (DigiDollar activation floor)\n", dd_floor);
 
@@ -180,13 +181,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 if (tip && tip->nHeight >= dd_floor) {
                     const CBlockIndex* floor_block = chainman.ActiveChain()[dd_floor];
                     if (!floor_block || !chainman.m_blockman.CheckBlockDataAvailability(*tip, *floor_block)) {
-                        if (DigiDollar::IsThawDayActive(chainman.GetConsensus(), tip->nHeight + 1)) {
-                            return {ChainstateLoadStatus::FAILURE_FATAL,
-                                    _("DigiDollar state not ready: retained block history is incomplete. Restore the required block and undo files or download the missing DigiDollar-era history.")};
-                        }
-                        return {ChainstateLoadStatus::FAILURE,
-                                _("DigiDollar-era block data is incomplete on this pruned node. "
-                                  "Restart with -reindex to rebuild it (the node will redownload and re-prune).")};
+                        return {ChainstateLoadStatus::FAILURE_FATAL,
+                                _("DigiDollar state not ready: retained block history is incomplete. Restore the required block and undo files or download the missing DigiDollar-era history.")};
                     }
                 }
             }

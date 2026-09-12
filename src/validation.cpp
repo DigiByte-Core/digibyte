@@ -3806,8 +3806,9 @@ bool Chainstate::FlushStateToDisk(
             for (const auto& prune_lock : m_blockman.m_prune_locks) {
                 if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
                 // Remove the buffer and one additional block here to get actual height that is outside of the buffer
-                const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
-                last_prune = std::max(1, std::min(last_prune, lock_height));
+                const int lock_height{prune_lock.second.height_first <= PRUNE_LOCK_BUFFER ? -1 :
+                                      prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
+                last_prune = std::min(last_prune, lock_height);
                 if (last_prune == lock_height) {
                     limiting_lock = prune_lock.first;
                 }
@@ -3820,10 +3821,14 @@ bool Chainstate::FlushStateToDisk(
             if (nManualPruneHeight > 0) {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
 
-                m_blockman.FindFilesToPruneManual(
-                    setFilesToPrune,
-                    std::min(last_prune, nManualPruneHeight),
-                    *this, m_chainman);
+                // A manual request must stay positive. A floor at the start
+                // of the chain may leave no eligible requested height.
+                if (last_prune > 0) {
+                    m_blockman.FindFilesToPruneManual(
+                        setFilesToPrune,
+                        std::min(last_prune, nManualPruneHeight),
+                        *this, m_chainman);
+                }
             } else {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
 
@@ -4075,6 +4080,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // Prune locks that began at or after the tip should be moved backward so they get a chance to reorg
         const int max_height_first{pindexDelete->nHeight - 1};
         for (auto& prune_lock : m_blockman.m_prune_locks) {
+            if (!prune_lock.second.reorg_sensitive) continue;
             if (prune_lock.second.height_first <= max_height_first) continue;
 
             prune_lock.second.height_first = max_height_first;
@@ -4273,7 +4279,8 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     return true;
 }
 
-bool Chainstate::InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& reason)
+bool Chainstate::InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& reason,
+                                          const std::function<void(DigiDollarRecoveryPhase, uint64_t, uint64_t)>& progress)
 {
     AssertLockHeld(cs_main);
     LOCK(MempoolMutex());
@@ -4281,110 +4288,182 @@ bool Chainstate::InitializeDigiDollarState(const std::function<bool()>& interrup
     const auto& params = m_chainman.GetConsensus();
     const CBlockIndex* tip = m_chain.Tip();
     if (!tip || !DigiDollar::IsThawDayActive(params, tip->nHeight + 1)) return true;
-    if (CoinsTip().GetBestBlock() != tip->GetBlockHash()) {
-        reason = "DigiDollar state not ready: UTXO best block does not match the chain tip";
-        return false;
-    }
-    if (this == &m_chainman.ActiveChainstate() && DigiDollar::IsThawDayActive(params, tip->nHeight))
-        m_dd_legacy_restore_needed = true;
-    auto cancelled = [&] {
-        if (interrupted && interrupted()) {
-            reason = "DigiDollar initialization interrupted";
+    const auto started = SteadyClock::now();
+    auto last_progress = started;
+    std::optional<DigiDollarRecoveryPhase> phase;
+    bilingual_str phase_title;
+    const auto report = [&](DigiDollarRecoveryPhase next_phase, uint64_t completed, uint64_t total, bool force = false) {
+        if (!force && phase == next_phase && SteadyClock::now() - last_progress < std::chrono::seconds{1}) return;
+        phase = next_phase;
+        last_progress = SteadyClock::now();
+        switch (next_phase) {
+        case DigiDollarRecoveryPhase::VERIFY_TOTALS: phase_title = _("Verifying saved DigiDollar health totals"); break;
+        case DigiDollarRecoveryPhase::PREFLIGHT: phase_title = _("Checking retained DigiDollar history"); break;
+        case DigiDollarRecoveryPhase::REWIND: phase_title = _("Rewinding unchecked DigiDollar history"); break;
+        case DigiDollarRecoveryPhase::REBUILD_ANCHOR: phase_title = _("Reconstructing DigiDollar health before activation"); break;
+        case DigiDollarRecoveryPhase::REPLAY: phase_title = _("Verifying DigiDollar history in order"); break;
+        case DigiDollarRecoveryPhase::PERSIST: phase_title = _("Saving DigiDollar recovery progress"); break;
+        }
+        if (total) LogPrintf("DigiDollar recovery: %s (%u/%u completed)\n", phase_title.original, completed, total);
+        else LogPrintf("DigiDollar recovery: %s (%u completed)\n", phase_title.original, completed);
+        m_chainman.GetNotifications().progress(phase_title, total ? static_cast<int>(100 * completed / total) : 0, false);
+        if (progress) progress(next_phase, completed, total);
+    };
+    LogPrintf("DigiDollar recovery: checking height %d block %s, genesis %s, format %u, rules %u, DigiDollar height %d, accounting height %d\n",
+              tip->nHeight, tip->GetBlockHash().ToString(), params.hashGenesisBlock.ToString(),
+              DigiDollar::ChainstateHealth::FORMAT_VERSION, DigiDollar::ChainstateHealth::RULES_VERSION,
+              params.DigiDollarHeight, params.nDDThawDayHeight);
+    const auto initialize = [&]() -> bool {
+        if (CoinsTip().GetBestBlock() != tip->GetBlockHash()) {
+            reason = "DigiDollar state not ready: UTXO best block does not match the chain tip";
+            return false;
+        }
+        if (this == &m_chainman.ActiveChainstate() && DigiDollar::IsThawDayActive(params, tip->nHeight))
+            m_dd_legacy_restore_needed = true;
+        auto cancelled = [&] {
+            if (interrupted && interrupted()) {
+                reason = "DigiDollar initialization interrupted";
+                LogPrintf("DigiDollar recovery cancelled during %s\n", phase_title.original);
+                return true;
+            }
+            return false;
+        };
+        if (cancelled()) return false;
+        auto persist = [&] {
+            report(DigiDollarRecoveryPhase::PERSIST, 0, 1, true);
+            BlockValidationState state;
+            if (FlushStateToDisk(state, FlushStateMode::ALWAYS)) {
+                report(DigiDollarRecoveryPhase::PERSIST, 1, 1, true);
+                return true;
+            }
+            reason = "DigiDollar state not ready: failed to persist recovered chainstate: " + state.ToString();
+            return false;
+        };
+        auto lookup_for = [&](const CBlockIndex* at) {
+            return MakeCachedBlockTxLookup([at](uint32_t height) -> const CBlockIndex* {
+                return height <= static_cast<uint32_t>(at->nHeight) ? at->GetAncestor(height) : nullptr;
+            }, m_blockman, /*verify_block_data=*/true);
+        };
+        const auto saved = CoinsTip().GetDigiDollarState();
+        const bool checked = saved && saved->Matches(params.hashGenesisBlock, tip->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight) && saved->history_checked;
+        if (checked || !DigiDollar::IsThawDayActive(params, tip->nHeight) || tip->nHeight == 0) {
+            report(DigiDollarRecoveryPhase::VERIFY_TOTALS, 0, 0, true);
+            DigiDollar::ChainstateHealth rebuilt;
+            if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(tip), rebuilt, reason, interrupted, nullptr,
+                [&](uint64_t completed, uint64_t total) { report(DigiDollarRecoveryPhase::VERIFY_TOTALS, completed, total, total != 0); })) return false;
+            if (cancelled()) return false;
+            rebuilt.history_checked = checked || (tip->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0));
+            CoinsTip().SetDigiDollarState(rebuilt);
+            if (!persist()) return false;
+            if (saved && (saved->open_vault_principal != rebuilt.open_vault_principal ||
+                          saved->collateral != rebuilt.collateral || saved->active_vaults != rebuilt.active_vaults)) {
+                LogPrintf("DigiDollar health totals repaired at block %s: principal %d -> %d cents, collateral %d -> %d satoshis, open vaults %u -> %u\n",
+                          rebuilt.best_block.ToString(), saved->open_vault_principal, rebuilt.open_vault_principal,
+                          saved->collateral, rebuilt.collateral, saved->active_vaults, rebuilt.active_vaults);
+            } else {
+                LogPrintf("DigiDollar health totals verified at block %s: principal %d cents, collateral %d satoshis, open vaults %u\n",
+                          rebuilt.best_block.ToString(), rebuilt.open_vault_principal, rebuilt.collateral, rebuilt.active_vaults);
+            }
             return true;
         }
-        return false;
-    };
-    if (cancelled()) return false;
-    auto persist = [&] {
-        BlockValidationState state;
-        if (FlushStateToDisk(state, FlushStateMode::ALWAYS)) return true;
-        reason = "DigiDollar state not ready: failed to persist recovered chainstate: " + state.ToString();
-        return false;
-    };
-    auto lookup_for = [&](const CBlockIndex* at) {
-        return MakeCachedBlockTxLookup([at](uint32_t height) -> const CBlockIndex* {
-            return height <= static_cast<uint32_t>(at->nHeight) ? at->GetAncestor(height) : nullptr;
-        }, m_blockman, /*verify_block_data=*/true);
-    };
-    const auto saved = CoinsTip().GetDigiDollarState();
-    const bool checked = saved && saved->Matches(params.hashGenesisBlock, tip->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight) && saved->history_checked;
-    if (checked || !DigiDollar::IsThawDayActive(params, tip->nHeight) || tip->nHeight == 0) {
-        DigiDollar::ChainstateHealth rebuilt;
-        if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(tip), rebuilt, reason, interrupted)) return false;
+
+        LogPrintf("DigiDollar recovery: %s at block %s; retained activated history must be checked\n",
+                  saved ? "saved history proof is missing or incompatible" : "saved health record is missing", tip->GetBlockHash().ToString());
+
+        // Availability checks are read-only. Keep only one block and undo at a time;
+        // an unchecked segment may be much larger than the configured UTXO cache.
+        CBlockIndex* original_tip = m_chain.Tip();
+        CBlockIndex* anchor_index = original_tip;
+        const int first_activated_height = std::max(params.nDDThawDayHeight, params.DigiDollarHeight);
+        const uint64_t history_blocks = original_tip->nHeight - std::max(0, first_activated_height - 1);
+        report(DigiDollarRecoveryPhase::PREFLIGHT, 0, history_blocks, true);
+        while (anchor_index->pprev && DigiDollar::IsThawDayActive(params, anchor_index->nHeight)) {
+            if (cancelled()) return false;
+            CBlock block;
+            if (!(anchor_index->nStatus & BLOCK_HAVE_DATA) || !m_blockman.ReadBlockFromDisk(block, *anchor_index)) {
+                reason = strprintf("DigiDollar state not ready: missing block at height %d (%s); restore retained block files or download the required history", anchor_index->nHeight, anchor_index->GetBlockHash().ToString());
+                return false;
+            }
+            CBlockUndo undo;
+            if (!(anchor_index->nStatus & BLOCK_HAVE_UNDO) || !m_blockman.UndoReadFromDisk(undo, *anchor_index)) {
+                reason = strprintf("DigiDollar state not ready: missing undo at height %d (%s); restore retained undo files for the required history", anchor_index->nHeight, anchor_index->GetBlockHash().ToString());
+                return false;
+            }
+            anchor_index = anchor_index->pprev;
+            report(DigiDollarRecoveryPhase::PREFLIGHT, original_tip->nHeight - anchor_index->nHeight, history_blocks);
+        }
+        report(DigiDollarRecoveryPhase::PREFLIGHT, history_blocks, history_blocks, true);
+        report(DigiDollarRecoveryPhase::REWIND, 0, history_blocks, true);
+        while (m_chain.Tip() != anchor_index) {
+            if (cancelled()) { persist(); return false; }
+            CBlockIndex* cursor = m_chain.Tip();
+            CBlock block;
+            if (!m_blockman.ReadBlockFromDisk(block, *cursor)) {
+                if (!persist()) return false;
+                reason = strprintf("DigiDollar state not ready: restore block at height %d (%s) to resume unchecked history recovery", cursor->nHeight, cursor->GetBlockHash().ToString());
+                return false;
+            }
+            CCoinsViewCache rewind(&CoinsTip());
+            if (DisconnectBlockInternal(block, cursor, rewind, true, true) != DISCONNECT_OK) {
+                if (!persist()) return false;
+                reason = strprintf("DigiDollar state not ready: inconsistent block or undo at height %d (%s); restore retained chainstate history", cursor->nHeight, cursor->GetBlockHash().ToString());
+                return false;
+            }
+            if (!rewind.Flush()) {
+                reason = "DigiDollar state not ready: unable to stage unchecked recovery progress";
+                return false;
+            }
+            m_chain.SetTip(*cursor->pprev);
+            BlockValidationState state;
+            if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
+                reason = "DigiDollar state not ready: unable to persist unchecked recovery progress: " + state.ToString();
+                return false;
+            }
+            report(DigiDollarRecoveryPhase::REWIND, original_tip->nHeight - m_chain.Height(), history_blocks);
+        }
+        report(DigiDollarRecoveryPhase::REWIND, history_blocks, history_blocks, true);
+        // Persist the UTXO anchor with no history proof before checking new rules.
+        // An interruption during rewind therefore resumes from an unchecked prefix.
+        CoinsTip().SetDigiDollarState(std::nullopt);
+        if (!persist()) return false;
+        DigiDollar::ChainstateHealth anchor;
+        report(DigiDollarRecoveryPhase::REBUILD_ANCHOR, 0, 0, true);
+        if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(anchor_index), anchor, reason, interrupted, nullptr,
+            [&](uint64_t completed, uint64_t total) { report(DigiDollarRecoveryPhase::REBUILD_ANCHOR, completed, total, total != 0); })) return false;
         if (cancelled()) return false;
-        rebuilt.history_checked = checked || (tip->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0));
-        CoinsTip().SetDigiDollarState(rebuilt);
+        anchor.history_checked = anchor_index->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0);
+        CoinsTip().SetDigiDollarState(anchor);
+
+        DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
+        report(DigiDollarRecoveryPhase::REPLAY, 0, history_blocks, true);
+        for (int height = anchor_index->nHeight + 1; height <= original_tip->nHeight; ++height) {
+            if (cancelled()) { persist(); return false; }
+            CBlockIndex* next = original_tip->GetAncestor(height);
+            ConnectTrace trace;
+            BlockValidationState state;
+            if (!ConnectTip(state, next, {}, trace, disconnectpool)) {
+                const std::string failure = strprintf("DigiDollar history verification failed at height %d (%s): %s", height, next->GetBlockHash().ToString(), state.ToString());
+                if (!persist()) return false;
+                reason = failure;
+                return false;
+            }
+            report(DigiDollarRecoveryPhase::REPLAY, height - anchor_index->nHeight, history_blocks);
+        }
+        report(DigiDollarRecoveryPhase::REPLAY, history_blocks, history_blocks, true);
         return persist();
+    };
+    bool complete = initialize();
+    // Finish an atomic database write before honoring cancellation requested
+    // while that write was in progress.
+    if (complete && interrupted && interrupted()) {
+        reason = "DigiDollar initialization interrupted";
+        complete = false;
     }
-
-    // Availability checks are read-only. Keep only one block and undo at a time;
-    // an unchecked segment may be much larger than the configured UTXO cache.
-    CBlockIndex* original_tip = m_chain.Tip();
-    CBlockIndex* anchor_index = original_tip;
-    while (anchor_index->pprev && DigiDollar::IsThawDayActive(params, anchor_index->nHeight)) {
-        if (cancelled()) return false;
-        CBlock block;
-        if (!(anchor_index->nStatus & BLOCK_HAVE_DATA) || !m_blockman.ReadBlockFromDisk(block, *anchor_index)) {
-            reason = strprintf("DigiDollar state not ready: missing block at height %d; restore retained block files or download the required history", anchor_index->nHeight);
-            return false;
-        }
-        CBlockUndo undo;
-        if (!(anchor_index->nStatus & BLOCK_HAVE_UNDO) || !m_blockman.UndoReadFromDisk(undo, *anchor_index)) {
-            reason = strprintf("DigiDollar state not ready: missing undo at height %d; restore retained undo files for the required history", anchor_index->nHeight);
-            return false;
-        }
-        anchor_index = anchor_index->pprev;
-    }
-    while (m_chain.Tip() != anchor_index) {
-        if (cancelled()) { persist(); return false; }
-        CBlockIndex* cursor = m_chain.Tip();
-        CBlock block;
-        if (!m_blockman.ReadBlockFromDisk(block, *cursor)) {
-            if (!persist()) return false;
-            reason = strprintf("DigiDollar state not ready: restore block at height %d to resume unchecked history recovery", cursor->nHeight);
-            return false;
-        }
-        CCoinsViewCache rewind(&CoinsTip());
-        if (DisconnectBlockInternal(block, cursor, rewind, true, true) != DISCONNECT_OK) {
-            if (!persist()) return false;
-            reason = strprintf("DigiDollar state not ready: inconsistent block or undo at height %d; restore retained chainstate history", cursor->nHeight);
-            return false;
-        }
-        if (!rewind.Flush()) {
-            reason = "DigiDollar state not ready: unable to stage unchecked recovery progress";
-            return false;
-        }
-        m_chain.SetTip(*cursor->pprev);
-        BlockValidationState state;
-        if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
-            reason = "DigiDollar state not ready: unable to persist unchecked recovery progress: " + state.ToString();
-            return false;
-        }
-    }
-    // Persist the UTXO anchor with no history proof before checking new rules.
-    // An interruption during rewind therefore resumes from an unchecked prefix.
-    CoinsTip().SetDigiDollarState(std::nullopt);
-    if (!persist()) return false;
-    DigiDollar::ChainstateHealth anchor;
-    if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(anchor_index), anchor, reason, interrupted)) return false;
-    if (cancelled()) return false;
-    anchor.history_checked = anchor_index->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0);
-    CoinsTip().SetDigiDollarState(anchor);
-
-    DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
-    for (int height = anchor_index->nHeight + 1; height <= original_tip->nHeight; ++height) {
-        if (cancelled()) { persist(); return false; }
-        CBlockIndex* next = original_tip->GetAncestor(height);
-        ConnectTrace trace;
-        BlockValidationState state;
-        if (!ConnectTip(state, next, {}, trace, disconnectpool)) {
-            const std::string failure = "DigiDollar history verification failed at height " + std::to_string(height) + ": " + state.ToString();
-            if (!persist()) return false;
-            reason = failure;
-            return false;
-        }
-    }
-    return persist();
+    m_chainman.GetNotifications().progress(bilingual_str{}, 100, false);
+    LogPrintf("DigiDollar recovery %s after %d ms at height %d block %s%s\n",
+              complete ? "complete" : "stopped", Ticks<std::chrono::milliseconds>(SteadyClock::now() - started),
+              m_chain.Height(), m_chain.Tip()->GetBlockHash().ToString(), complete ? "" : ": " + reason);
+    return complete;
 }
 
 /**
