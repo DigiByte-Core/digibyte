@@ -1789,7 +1789,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Initialize DigiByte stempool for Dandelion++ privacy protocol
         CTxMemPool::Options stempool_opts{
             .estimator = nullptr,
-            .check_ratio = 0,
+            // The stempool checks its own bookkeeping as often as the main
+            // mempool does (-checkmempool; regtest and the tests use 1, so
+            // every block and transaction is checked). This used to be
+            // hard-wired to 0, so a corrupted stempool went unnoticed until
+            // the node crashed.
+            .check_ratio = mempool_opts.check_ratio,
             .min_relay_feerate = mempool_opts.min_relay_feerate,  // Use same relay fee as mempool
             .max_datacarrier_bytes = mempool_opts.max_datacarrier_bytes,  // Use same datacarrier settings as mempool
             .is_stempool = true,

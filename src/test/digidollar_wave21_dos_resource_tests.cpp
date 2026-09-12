@@ -72,6 +72,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -232,11 +233,26 @@ BOOST_AUTO_TEST_CASE(update_bundle_prunes_stale_epochs)
 // ============================================================================
 BOOST_AUTO_TEST_CASE(testnet_oracle_deploy_script_does_not_broad_kill_digibyted)
 {
-    const std::string script = ReadFirstExistingTextFile({
-        "deploy_testnet_oracle.sh",
-        "../deploy_testnet_oracle.sh",
-        "../../deploy_testnet_oracle.sh",
-    });
+    // The script lives in contrib/ since the release branch's scripts cleanup
+    // moved it out of the repository root. Look there first, anchored on the
+    // three working directories the unit binary is run from (repository root,
+    // src/, src/test/) and on SRCDIR when a runner exports it; keep the old
+    // root-relative locations so an older layout still resolves.
+    std::vector<std::string> candidates;
+    if (const char* srcdir = std::getenv("SRCDIR"); srcdir && *srcdir) {
+        candidates.push_back(std::string(srcdir) + "/contrib/deploy_testnet_oracle.sh");
+    }
+    for (const char* rel : {
+             "contrib/deploy_testnet_oracle.sh",
+             "../contrib/deploy_testnet_oracle.sh",
+             "../../contrib/deploy_testnet_oracle.sh",
+             "deploy_testnet_oracle.sh",
+             "../deploy_testnet_oracle.sh",
+             "../../deploy_testnet_oracle.sh",
+         }) {
+        candidates.push_back(rel);
+    }
+    const std::string script = ReadFirstExistingTextFile(candidates);
     BOOST_REQUIRE_MESSAGE(!script.empty(), "could not locate deploy_testnet_oracle.sh");
 
     BOOST_CHECK_MESSAGE(script.find("pkill") == std::string::npos,

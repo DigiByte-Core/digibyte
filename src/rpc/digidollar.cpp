@@ -502,6 +502,16 @@ namespace {
     }
 
 #ifdef ENABLE_WALLET
+    // The largest DigiDollar amount a single senddigidollar or
+    // redeemdigidollar request may name: 10,000,000 cents = $100,000.00.
+    // Checked before any coin selection or transaction construction. It is
+    // the same limit sendmanydigidollar
+    // applies per recipient, the per-output transfer consensus limit, and the
+    // mainnet maximum mint, so no legitimate send or full vault redemption is
+    // ever blocked by it. It exists to stop a typo (a decimal point turns
+    // "10000" cents into $10,000) from moving far more than intended.
+    constexpr CAmount MAX_DD_RPC_AMOUNT_CENTS{10000000};
+
     CAmount ParseDigiDollarRpcAmount(const UniValue& amount_param)
     {
         if (!amount_param.isStr() && !amount_param.isNum()) {
@@ -1734,7 +1744,7 @@ RPCHelpMan senddigidollar()
                 "This is the primary RPC command for Phase 7.7 - DD transfers via API.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "DigiDollar address to send to (DD/TD/RD prefix)"},
-                    {"amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "Amount to send: integer cents (e.g. 10000 = $100.00) OR decimal dollars (e.g. 100.00 = $100.00). A decimal point means dollars, so 10000.00 = $10,000.00.", RPCArgOptions{.skip_type_check = true}},
+                    {"amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "Amount to send: integer cents (e.g. 10000 = $100.00) OR decimal dollars (e.g. 100.00 = $100.00). A decimal point means dollars, so 10000.00 = $10,000.00. Maximum 10000000 cents ($100,000.00) per request.", RPCArgOptions{.skip_type_check = true}},
                     {"comment", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional comment for the transaction"},
                     {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Deprecated compatibility argument; ignored because DigiDollar sends use the fixed DD fee policy", RPCArgOptions{.skip_type_check = true}},
                     {"selected_inputs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional DigiDollar inputs to spend, matching listdigidollarunspent output",
@@ -1829,6 +1839,14 @@ RPCHelpMan senddigidollar()
             // Validate amount
             if (amount <= 0) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be positive");
+            }
+            // Reject an over-cap amount here, before the balance query and the
+            // transfer build. The parser reads "10000.00" as $10,000 (not $100),
+            // so a habitual decimal point asks for 100 times the intended
+            // amount. Such a request used to reach the wallet first and come
+            // back as a misleading balance or transfer error.
+            if (amount > MAX_DD_RPC_AMOUNT_CENTS) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum transfer limit ($100,000)");
             }
 
             // Parse and validate DD address
@@ -2105,7 +2123,7 @@ RPCHelpMan redeemdigidollar()
                 "Only positions that have reached maturity can be redeemed.\n",
                 {
                     {"position_id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Position ID (transaction hash of mint)"},
-                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of DD to redeem (in cents)"},
+                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of DD to redeem (in cents); must equal the vault's full minted amount. Maximum 10000000 cents ($100,000.00)."},
                     {"redemption_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "DGB address to receive unlocked collateral (default: new address)"},
                     {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Deprecated compatibility argument; ignored because DigiDollar redemptions use the fixed DD fee policy", RPCArgOptions{.skip_type_check = true}}
                 },
@@ -2142,6 +2160,16 @@ RPCHelpMan redeemdigidollar()
             // Validate parameters
             if (ddAmount <= 0) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Redemption amount must be positive");
+            }
+            // ddAmount is the vault principal the caller wants to redeem, and
+            // a vault principal can never exceed $100,000 (the consensus
+            // maximum mint), so a larger request is always a mistake. Reject
+            // it before the wallet or any position is consulted. Only this
+            // caller-supplied principal is capped: the emergency burn computed
+            // below from the position itself may legitimately exceed the
+            // principal and is left alone.
+            if (ddAmount > MAX_DD_RPC_AMOUNT_CENTS) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum redemption limit ($100,000)");
             }
 
             if (!IsHex(positionIdStr) || positionIdStr.length() != 64) {

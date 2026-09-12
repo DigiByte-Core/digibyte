@@ -531,8 +531,18 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         },
         m_blockman);
 
-    const auto filter_final_and_mature = [this, &reorg_tx_lookup](CTxMemPool::txiter it)
-        EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
+    // This predicate runs over the regular mempool and then over the
+    // Dandelion stempool, so it is built once per pool and every write it
+    // makes goes to the pool the iterator came from. It used to call
+    // m_mempool->mapTx.modify() for stempool iterators as well; boost's
+    // multi_index then re-linked the stempool entry into the mempool's
+    // indexes and cross-wired the two pools' internal trees, and the next
+    // tree walk (removeForBlock during a later block connect) crashed the
+    // node with a null read.
+    const auto make_filter_final_and_mature = [this, &reorg_tx_lookup](CTxMemPool& pool) {
+        return [this, &pool, &reorg_tx_lookup](CTxMemPool::txiter it)
+            EXCLUSIVE_LOCKS_REQUIRED(pool.cs, ::cs_main) {
+        AssertLockHeld(pool.cs);
         AssertLockHeld(m_mempool->cs);
         AssertLockHeld(::cs_main);
         const CTransaction& tx = it->GetTx();
@@ -557,7 +567,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
             const std::optional<LockPoints> new_lock_points{CalculateLockPointsAtTip(m_chain.Tip(), view_mempool, tx)};
             if (new_lock_points.has_value() && CheckSequenceLocksAtTip(m_chain.Tip(), *new_lock_points)) {
                 // Now update the mempool entry lockpoints as well.
-                m_mempool->mapTx.modify(it, [&new_lock_points](CTxMemPoolEntry& e) { e.UpdateLockPoints(*new_lock_points); });
+                pool.mapTx.modify(it, [&new_lock_points](CTxMemPoolEntry& e) { e.UpdateLockPoints(*new_lock_points); });
             } else {
                 return true;
             }
@@ -566,9 +576,10 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         // If the transaction spends any coinbase outputs, it must be mature.
         if (it->GetSpendsCoinbase()) {
             for (const CTxIn& txin : tx.vin) {
-                auto it2 = m_mempool->mapTx.find(txin.prevout.hash);
-                if (it2 != m_mempool->mapTx.end())
-                    continue;
+                // An input supplied by an unconfirmed transaction cannot be a
+                // coinbase. Mempool entries only spend mempool outputs; stempool
+                // entries may spend outputs from either pool.
+                if (pool.mapTx.count(txin.prevout.hash) || m_mempool->mapTx.count(txin.prevout.hash)) continue;
                 const Coin& coin{CoinsTip().AccessCoin(txin.prevout)};
                 // Check if coin is spent - if so, the transaction is invalid
                 if (coin.IsSpent()) {
@@ -624,14 +635,38 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
         // Transaction is still valid and cached LockPoints are updated.
         return false;
+        };
     };
 
     // We also need to remove any now-immature transactions
-    m_mempool->removeForReorg(m_chain, filter_final_and_mature);
-    if (m_stempool) m_stempool->removeForReorg(m_chain, filter_final_and_mature);
+    m_mempool->removeForReorg(m_chain, make_filter_final_and_mature(*m_mempool));
+    if (m_stempool) m_stempool->removeForReorg(m_chain, make_filter_final_and_mature(*m_stempool));
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
     if (m_stempool) LimitMempoolSize(*m_stempool, this->CoinsTip());
+}
+
+/**
+ * Run the Dandelion stempool's consistency check when -checkmempool is on
+ * (regtest and the functional tests default to 1). The stempool used to be
+ * built with check_ratio 0, so corrupted stempool bookkeeping went unnoticed
+ * until the node crashed. Stem transactions may
+ * spend outputs that only exist in the regular mempool, so the check looks
+ * through a view that includes the mempool. Lock order: mempool.cs is taken
+ * here before check() takes stempool.cs, the order ActivateBestChain uses
+ * (cs_main, mempool, stempool); nothing takes mempool.cs while holding
+ * stempool.cs.
+ */
+static void CheckStempoolConsistency(const CTxMemPool& mempool, const CTxMemPool* stempool,
+                                     CCoinsViewCache& coins_tip, int64_t spendheight)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (!stempool) return;
+    AssertLockHeld(::cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool view_with_mempool(&coins_tip, mempool);
+    CCoinsViewCache coins_with_mempool(&view_with_mempool);
+    stempool->check(coins_with_mempool, spendheight);
 }
 
 /**
@@ -2028,6 +2063,8 @@ MempoolAcceptResult AcceptToMemoryPoolForStempool(Chainstate& active_chainstate,
     // After we've (potentially) uncached entries, ensure our coins cache is still within its size limits
     BlockValidationState state_dummy;
     active_chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
+    // The stempool's own "every n transactions" consistency check.
+    CheckStempoolConsistency(mempool, &stempool, active_chainstate.CoinsTip(), active_chainstate.m_chain.Height() + 1);
     return result;
 }
 
@@ -3703,6 +3740,11 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
+    // The Dandelion stempool is changed below too (removeRecursive for
+    // evicted disconnectpool entries), so its lock must be held as well.
+    // ActivateBestChain and InvalidateBlock take it; this makes that a
+    // checked requirement instead of an unstated one.
+    if (m_stempool) AssertLockHeld(m_stempool->cs);
 
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
@@ -3815,6 +3857,9 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
+    // removeForBlock below changes the Dandelion stempool as well, so its
+    // lock must be held (ActivateBestChain takes it).
+    if (m_stempool) AssertLockHeld(m_stempool->cs);
 
     assert(pindexNew->pprev == m_chain.Tip());
     // Read block from disk.
@@ -3998,6 +4043,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
+    if (m_stempool) AssertLockHeld(m_stempool->cs);
 
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
@@ -4073,6 +4119,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         MaybeUpdateMempoolForReorg(disconnectpool, true);
     }
     if (m_mempool) m_mempool->check(this->CoinsTip(), this->m_chain.Height() + 1);
+    if (m_mempool) CheckStempoolConsistency(*m_mempool, m_stempool, this->CoinsTip(), this->m_chain.Height() + 1);
 
     CheckForkWarningConditions();
 
@@ -5245,6 +5292,7 @@ MempoolAcceptResult ChainstateManager::ProcessTransaction(const CTransactionRef&
     }
     auto result = AcceptToMemoryPool(active_chainstate, tx, GetTime(), /*bypass_limits=*/ false, test_accept);
     active_chainstate.GetMempool()->check(active_chainstate.CoinsTip(), active_chainstate.m_chain.Height() + 1);
+    CheckStempoolConsistency(*active_chainstate.GetMempool(), active_chainstate.GetStempool(), active_chainstate.CoinsTip(), active_chainstate.m_chain.Height() + 1);
     return result;
 }
 
@@ -6352,6 +6400,14 @@ bool ChainstateManager::ActivateSnapshot(
     Assert(!m_snapshot_chainstate->m_mempool);
     m_snapshot_chainstate->m_mempool = m_active_chainstate->m_mempool;
     m_active_chainstate->m_mempool = nullptr;
+    // The Dandelion stempool moves with the mempool. Leaving it on the
+    // background chainstate made that chainstate lock the stempool without
+    // the mempool in ActivateBestChain while the active chainstate's flush
+    // took the mempool lock underneath, an inconsistent lock order
+    // (mempool.cs is taken before stempool.cs everywhere else).
+    Assert(!m_snapshot_chainstate->m_stempool);
+    m_snapshot_chainstate->m_stempool = m_active_chainstate->m_stempool;
+    m_active_chainstate->m_stempool = nullptr;
     m_active_chainstate = m_snapshot_chainstate.get();
     m_blockman.m_snapshot_height = this->GetSnapshotBaseHeight();
 
@@ -6863,6 +6919,10 @@ Chainstate& ChainstateManager::ActivateExistingSnapshot(uint256 base_blockhash)
     Assert(!m_snapshot_chainstate->m_mempool);
     m_snapshot_chainstate->m_mempool = m_active_chainstate->m_mempool;
     m_active_chainstate->m_mempool = nullptr;
+    // The stempool moves with the mempool (see ActivateSnapshot).
+    Assert(!m_snapshot_chainstate->m_stempool);
+    m_snapshot_chainstate->m_stempool = m_active_chainstate->m_stempool;
+    m_active_chainstate->m_stempool = nullptr;
     m_active_chainstate = m_snapshot_chainstate.get();
     return *m_snapshot_chainstate;
 }

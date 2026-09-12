@@ -257,6 +257,10 @@ BASE_SCRIPTS = [
     'p2p_addrfetch.py',
     # DigiByte-specific tests
     'p2p_dandelion.py',
+    'p2p_dandelion_lockorder.py',
+    'p2p_dandelion_stempool_reorg.py',
+    'p2p_dandelion_stempool_race.py',
+    'wallet_dandelion_fallback_lock.py',
     'rpc_getblockreward.py',
     # DigiDollar tests
     'digidollar_stress.py',
@@ -306,6 +310,8 @@ BASE_SCRIPTS = [
     'digidollar_pending_position_status.py',
     'digidollar_rpc_addresses.py',
     'digidollar_rpc_amount_filters.py',
+    'digidollar_rpc_amount_cap.py',
+    'digidollar_isstandardtx_no_log.py',
     'digidollar_rpc_collateral.py',
     'digidollar_rpc_dca.py',
     'digidollar_rpc_deployment.py',

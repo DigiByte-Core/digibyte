@@ -711,6 +711,9 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_init, SnapshotTestSetup)
     BlockValidationState unused_state;
     {
         LOCK2(::cs_main, bg_chainstate.MempoolMutex());
+        // DisconnectTip also touches the Dandelion stempool and now
+        // asserts its lock, the same way ActivateBestChain takes it.
+        LOCK(bg_chainstate.StempoolMutex());
         BOOST_CHECK(bg_chainstate.DisconnectTip(unused_state, &unused_pool));
         unused_pool.clear();  // to avoid queuedTx assertion errors on teardown
     }

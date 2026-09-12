@@ -1639,117 +1639,177 @@ void PeerManagerImpl::RelayDandelionTransaction(const CTransaction& tx, CNode* p
 void PeerManagerImpl::CheckDandelionEmbargoes()
 {
     // =========================================================================
-    // Bug #29 fix: ABBA deadlock between m_nodes_mutex and m_dandelion_embargo_mutex
+    // Lock-order rule for this function: m_dandelion_embargo_mutex is a leaf
+    // lock. It is NEVER held while acquiring any other lock: not cs_main, not
+    // m_nodes_mutex, and not the mempool or stempool locks that the pool
+    // accessors (exists, get, size) take internally.
     //
-    // The established lock ordering throughout the Dandelion++ code is:
-    //   m_nodes_mutex FIRST, then m_dandelion_embargo_mutex SECOND
+    // Two orders are established elsewhere and must not be inverted here:
+    //   cs_main -> m_dandelion_embargo_mutex
+    //     The DANDELIONTX handler in ProcessMessage() holds cs_main while
+    //     CConnman::insertDandelionEmbargo() takes the embargo mutex.
+    //   m_nodes_mutex -> m_dandelion_embargo_mutex
+    //     DandelionShuffle() and CloseDandelionConnections() (dandelion.cpp),
+    //     the latter under DisconnectNodes() in net.cpp.
     //
-    // This ordering is used by:
-    //   - DandelionShuffle()            (dandelion.cpp:344 → 357)
-    //   - CloseDandelionConnections()   (dandelion.cpp:211 → 292)
-    //   - DisconnectNodes()             (net.cpp:1952 → CloseDandelionConnections)
+    // Why this matters: this function has frozen whole nodes twice, both
+    // times because it held the embargo mutex while calling something that
+    // takes another lock. First against the shuffle timer, which takes
+    // m_nodes_mutex. Then against the network thread, which holds cs_main
+    // when it receives a stem transaction and then takes the embargo mutex.
+    // When two threads take the same two locks in opposite order and overlap,
+    // each waits for the other forever: logging stops and every RPC times
+    // out. So nothing that needs cs_main or m_nodes_mutex may run while the
+    // embargo mutex is held.
     //
-    // Before this fix, CheckDandelionEmbargoes() violated that ordering:
-    //   it held m_dandelion_embargo_mutex, then called usingDandelion() and
-    //   localDandelionDestinationPushInventory(), both of which acquire
-    //   m_nodes_mutex internally. This created a classic ABBA deadlock:
+    // Structure: nothing that needs cs_main or m_nodes_mutex runs while the
+    // embargo mutex is held.
+    //   Phase 0 — usingDandelion() (m_nodes_mutex) before any embargo lock.
+    //   Phase 1 — under the embargo mutex only: copy the map (txid, expiry,
+    //             stem-routed flag). No other lock of any kind is taken while
+    //             the embargo mutex is held; it is a leaf lock.
+    //   Phase 2 — without the embargo mutex: classify each copy. Entries
+    //             already in the mempool are done. Expired entries are moved
+    //             from the stempool to the mempool: take cs_main per entry,
+    //             AcceptToMemoryPool, relay on success, then remove it from
+    //             the stempool under m_stempool.cs. Unexpired entries that
+    //             still sit in the stempool are collected for stem routing.
+    //   Phase 3 — re-take the embargo mutex and erase the finished entries,
+    //             but only where the stored expiry still matches what Phase 1
+    //             saw: a peer or the wallet may have re-inserted the txid with
+    //             a new embargo while the mutex was released.
+    //   Phase 4 — stem routing (m_nodes_mutex) without the embargo mutex, then
+    //             a brief re-lock to mark each routed txid.
     //
-    //   Thread A (shuffle timer):  LOCK(m_nodes_mutex) → LOCK(m_dandelion_embargo_mutex)
-    //   Thread B (embargo timer):  LOCK(m_dandelion_embargo_mutex) → LOCK(m_nodes_mutex)
-    //
-    //   When both fire concurrently, each thread holds the lock the other needs.
-    //   Result: sendtoaddress hangs forever at "Processing Dandelion relay",
-    //   shutdown hangs on threadDandelionShuffle.join(), RPC times out.
-    //   (Reported by DanGB on Windows 11, RC26, reproducible after ~1 week uptime.)
-    //
-    // Fix: restructure this function into two phases:
-    //   Phase 1 — under m_dandelion_embargo_mutex: scan the embargo map, handle
-    //             expired/mempool entries, collect txids that need stem routing.
-    //   Phase 2 — after releasing m_dandelion_embargo_mutex: perform the stem
-    //             routing (which needs m_nodes_mutex), then briefly re-acquire
-    //             m_dandelion_embargo_mutex to mark them as routed.
-    //
-    // usingDandelion() is also moved before the embargo lock for the same reason.
-    // The bool may be momentarily stale, but that only means we skip one routing
-    // cycle (~1 second) — no correctness impact.
+    // usingDandelion() is read before the embargo lock. The bool may be
+    // momentarily stale, but that only means we skip one routing cycle
+    // (~1 second) — no correctness impact.
     // =========================================================================
 
     // Phase 0: query Dandelion destination availability WITHOUT holding the
     // embargo lock.  usingDandelion() acquires m_nodes_mutex internally.
     bool hasDandelionDestinations = m_connman.usingDandelion();
 
-    // Transactions collected during Phase 1 that need stem routing in Phase 2.
-    std::vector<uint256> txidsNeedingStemRoute;
+    // A snapshot of one embargo-map entry, copied out in Phase 1. Every
+    // decision about it is made later, with no lock held, from this copy:
+    // the expiry lets Phase 3 notice if someone re-embargoed the same
+    // transaction while we were unlocked.
+    struct EmbargoSnapshot {
+        uint256 txid;
+        std::chrono::microseconds expiry;
+        bool already_stem_routed;
+    };
+    std::vector<EmbargoSnapshot> snapshots;
+    std::chrono::milliseconds current_time;
 
-    // Phase 1: scan embargo map under m_dandelion_embargo_mutex.
-    // Everything in this block touches only embargo-protected state (plus
-    // cs_main for AcceptToMemoryPool, which has no ordering conflict here).
+    // Phase 1: copy the embargo map under m_dandelion_embargo_mutex and do
+    // nothing else. The mutex is a leaf lock: no mempool or stempool call is
+    // made while it is held (those take their own pool lock inside), nothing
+    // is logged (the logger has a lock too), and cs_main and m_nodes_mutex
+    // are never taken here. All lookups happen in Phase 2 on the copy.
     {
         LOCK(m_connman.m_dandelion_embargo_mutex);
-        auto current_time = GetTime<std::chrono::milliseconds>();
+        current_time = GetTime<std::chrono::milliseconds>();
+        snapshots.reserve(m_connman.mDandelionEmbargo.size());
+        for (const auto& [txid, expiry] : m_connman.mDandelionEmbargo) {
+            snapshots.push_back({txid, expiry, m_connman.m_dandelion_stem_routed.count(txid) != 0});
+        }
+    } // m_dandelion_embargo_mutex released here.
 
-        // Log embargo checks (debug level only — this fires every second)
-        if (!m_connman.mDandelionEmbargo.empty()) {
-            LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: Checking %d embargoed transactions (stempool=%d, mempool=%d)\n",
-                     m_connman.mDandelionEmbargo.size(), m_stempool.size(), m_mempool.size());
+    if (snapshots.empty()) return;
+    // Log embargo checks (debug level only — this fires every second)
+    LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: Checking %d embargoed transactions (stempool=%d, mempool=%d)\n",
+             snapshots.size(), m_stempool.size(), m_mempool.size());
+
+    // Entries to erase from the embargo map in Phase 3: those already in the
+    // mempool, and those whose embargo expired and was processed here.
+    std::vector<EmbargoSnapshot> finished;
+    // Transactions that still need stem routing in Phase 4.
+    std::vector<uint256> txidsNeedingStemRoute;
+
+    // Phase 2: classify each snapshot and move expired transactions from the
+    // stempool to the mempool, all WITHOUT holding m_dandelion_embargo_mutex.
+    // cs_main is taken here, per transaction, exactly as AcceptToMemoryPool
+    // requires.
+    for (const EmbargoSnapshot& snap : snapshots) {
+        if (m_mempool.exists(snap.txid)) {
+            LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", snap.txid.ToString());
+            finished.push_back(snap);
+            continue;
+        }
+        if (snap.expiry >= current_time) {
+            // Embargo not yet expired — check if this TX needs stem routing:
+            // 1. We have Dandelion destinations available
+            // 2. This TX has NOT already been successfully routed
+            //    (prevents the spam bug where we re-send every second)
+            // 3. OR the previous Dandelion destination disconnected (destination changed)
+            //
+            // We only COLLECT the txid here.  The actual push happens in Phase 4,
+            // because localDandelionDestinationPushInventory() acquires m_nodes_mutex.
+            if (hasDandelionDestinations && !snap.already_stem_routed && m_stempool.exists(snap.txid)) {
+                txidsNeedingStemRoute.push_back(snap.txid);
+            }
+            // Log remaining time
+            auto remaining = std::chrono::duration_cast<std::chrono::seconds>(snap.expiry - current_time).count();
+            LogPrint(BCLog::DANDELION, "Transaction %s embargo expires in %d seconds\n", snap.txid.ToString(), remaining);
+            continue;
         }
 
-        for (auto iter = m_connman.mDandelionEmbargo.begin(); iter != m_connman.mDandelionEmbargo.end();) {
-            if (m_mempool.exists(iter->first)) {
-                LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", iter->first.ToString());
-                m_connman.m_dandelion_stem_routed.erase(iter->first);
-                iter = m_connman.mDandelionEmbargo.erase(iter);
-            } else if (iter->second < current_time) {
-                LogPrintf("CheckDandelionEmbargoes: dandeliontx %s embargo expired\n", iter->first.ToString());
-                CTransactionRef ptx = m_stempool.get(iter->first);
-                if (ptx) {
-                    LogPrintf("CheckDandelionEmbargoes: Moving transaction %s from stempool to mempool for broadcast\n", iter->first.ToString());
-                    bool accepted_to_mempool{false};
-                    {
-                        LOCK(cs_main);
-                        const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
-                        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                            accepted_to_mempool = true;
-                            LogPrintf("CheckDandelionEmbargoes: Successfully moved tx %s to mempool\n", iter->first.ToString());
-                            LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: accepted %s (poolsz %u txn, %u kB)\n",
-                                                     iter->first.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
-                            RelayTransaction(ptx->GetHash(), ptx->GetWitnessHash());
-                        } else {
-                            LogPrintf("CheckDandelionEmbargoes: Failed to move tx %s to mempool: %s\n",
-                                     iter->first.ToString(), result.m_state.ToString());
-                        }
-                    }
-                    WITH_LOCK(m_stempool.cs, m_stempool.removeRecursive(*ptx, accepted_to_mempool ? MemPoolRemovalReason::REORG : MemPoolRemovalReason::EXPIRY));
-                } else {
-                    LogPrintf("CheckDandelionEmbargoes: Transaction %s not found in stempool!\n", iter->first.ToString());
-                }
-                m_connman.m_dandelion_stem_routed.erase(iter->first);
-                iter = m_connman.mDandelionEmbargo.erase(iter);
+        LogPrintf("CheckDandelionEmbargoes: dandeliontx %s embargo expired\n", snap.txid.ToString());
+        finished.push_back(snap);
+        // The CTransactionRef keeps the transaction alive across the
+        // unlocked interval below.
+        const CTransactionRef ptx = m_stempool.get(snap.txid);
+        if (!ptx) {
+            LogPrintf("CheckDandelionEmbargoes: Transaction %s not found in stempool!\n", snap.txid.ToString());
+            continue;
+        }
+        LogPrintf("CheckDandelionEmbargoes: Moving transaction %s from stempool to mempool for broadcast\n", snap.txid.ToString());
+        bool accepted_to_mempool{false};
+        {
+            LOCK(cs_main);
+            const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
+            if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                accepted_to_mempool = true;
+                LogPrintf("CheckDandelionEmbargoes: Successfully moved tx %s to mempool\n", snap.txid.ToString());
+                LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: accepted %s (poolsz %u txn, %u kB)\n",
+                                         snap.txid.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
+                RelayTransaction(ptx->GetHash(), ptx->GetWitnessHash());
             } else {
-                // Embargo not yet expired — check if this TX needs stem routing:
-                // 1. We have Dandelion destinations available
-                // 2. This TX has NOT already been successfully routed
-                //    (prevents the spam bug where we re-send every second)
-                // 3. OR the previous Dandelion destination disconnected (destination changed)
-                //
-                // We only COLLECT the txid here.  The actual push happens in Phase 2,
-                // after we release m_dandelion_embargo_mutex, because
-                // localDandelionDestinationPushInventory() acquires m_nodes_mutex.
-                if (hasDandelionDestinations && m_connman.m_dandelion_stem_routed.count(iter->first) == 0) {
-                    if (m_stempool.exists(iter->first)) {
-                        txidsNeedingStemRoute.push_back(iter->first);
-                    }
-                }
-
-                // Log remaining time
-                auto remaining = std::chrono::duration_cast<std::chrono::seconds>(iter->second - current_time).count();
-                LogPrint(BCLog::DANDELION, "Transaction %s embargo expires in %d seconds\n", iter->first.ToString(), remaining);
-                iter++;
+                LogPrintf("CheckDandelionEmbargoes: Failed to move tx %s to mempool: %s\n",
+                         snap.txid.ToString(), result.m_state.ToString());
             }
         }
-    } // m_dandelion_embargo_mutex released here — safe to touch m_nodes_mutex now.
+        WITH_LOCK(m_stempool.cs, m_stempool.removeRecursive(*ptx, accepted_to_mempool ? MemPoolRemovalReason::REORG : MemPoolRemovalReason::EXPIRY));
+    }
 
-    // Phase 2: perform stem routing WITHOUT holding m_dandelion_embargo_mutex.
+    // Phase 3: erase the finished entries under the embargo mutex. Re-check
+    // each one first: while the mutex was released the txid may have been
+    // erased, or re-inserted with a new expiry by insertDandelionEmbargo()
+    // (a peer re-sent the transaction, or the wallet re-broadcast it). A new
+    // embargo is left in place so it can run its course. The old stem-routed
+    // mark is cleared either way because the stem phase it belonged to is over.
+    // Even the logger takes a lock of its own, so nothing is logged while the
+    // embargo mutex is held; re-embargoed entries are noted and logged after.
+    std::vector<uint256> re_embargoed;
+    if (!finished.empty()) {
+        LOCK(m_connman.m_dandelion_embargo_mutex);
+        for (const EmbargoSnapshot& snap : finished) {
+            m_connman.m_dandelion_stem_routed.erase(snap.txid);
+            auto entry = m_connman.mDandelionEmbargo.find(snap.txid);
+            if (entry == m_connman.mDandelionEmbargo.end()) continue;
+            if (entry->second != snap.expiry) {
+                re_embargoed.push_back(snap.txid);
+                continue;
+            }
+            m_connman.mDandelionEmbargo.erase(entry);
+        }
+    }
+    for (const uint256& txid : re_embargoed) {
+        LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: dandeliontx %s was re-embargoed while unlocked; keeping the new embargo\n", txid.ToString());
+    }
+
+    // Phase 4: perform stem routing WITHOUT holding m_dandelion_embargo_mutex.
     // localDandelionDestinationPushInventory() acquires m_nodes_mutex, which is
     // now safe because we no longer hold the embargo lock.
     for (const auto& txid : txidsNeedingStemRoute) {
@@ -1889,16 +1949,29 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         // Dandelion: Handle any pending Dandelion transactions
         auto tx_relay = peer->GetTxRelay();
         if (tx_relay) {
-            LOCK(tx_relay->m_tx_inventory_mutex);
-            if (!tx_relay->vInventoryDandelionTxToSend.empty()) {
-                LogPrintf("FinalizeNode: Peer %d disconnecting with %d pending Dandelion transactions\n", 
-                         nodeid, tx_relay->vInventoryDandelionTxToSend.size());
-                
+            // Copy the pending hashes out and release this peer's inventory
+            // lock BEFORE calling getLocalDandelionDestination() (which takes
+            // m_nodes_mutex) or PushDandelionInventory() (which takes
+            // m_peer_mutex and then the destination's inventory lock). The
+            // stem push path takes those same locks in the opposite order, so
+            // holding this peer's inventory lock across these calls could
+            // deadlock the node. The copy is a plain vector owned by this
+            // function; the peer is being finalized, so its own queue is
+            // never sent again and nothing below needs it after the unlock.
+            std::vector<uint256> pending_dandelion_txs;
+            {
+                LOCK(tx_relay->m_tx_inventory_mutex);
+                pending_dandelion_txs = tx_relay->vInventoryDandelionTxToSend;
+            }
+            if (!pending_dandelion_txs.empty()) {
+                LogPrintf("FinalizeNode: Peer %d disconnecting with %d pending Dandelion transactions\n",
+                         nodeid, pending_dandelion_txs.size());
+
                 // Get the current local Dandelion destination
                 CNode* newDestination = m_connman.getLocalDandelionDestination();
                 if (newDestination && newDestination != &node) {
                     // Re-queue the pending transactions to the new destination
-                    for (const uint256& txhash : tx_relay->vInventoryDandelionTxToSend) {
+                    for (const uint256& txhash : pending_dandelion_txs) {
                         CInv inv(MSG_DANDELION_TX, txhash);
                         if (PushDandelionInventory(newDestination, inv)) {
                             LogPrintf("FinalizeNode: Re-queued Dandelion transaction %s to peer %d\n", 
@@ -4336,16 +4409,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             } else if (inv.IsDandelionMsg()) {
                 if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
+                    // Ask connman whether this is a Dandelion inbound peer
+                    // BEFORE taking the inventory lock. isDandelionInbound()
+                    // takes m_nodes_mutex, and the stem push path holds
+                    // m_nodes_mutex while taking a peer's inventory lock, so
+                    // nesting them the other way round here could deadlock the
+                    // node. Every peer announces the discovery hash right
+                    // after its handshake, so this runs on every connection.
+                    const bool is_dandelion_inbound = m_connman.isDandelionInbound(&pfrom);
                     LOCK(tx_relay->m_tx_inventory_mutex);
                     auto result = tx_relay->setDandelionInventoryKnown.insert(inv.hash);
                     const bool fAlreadyHave = !result.second;
                     LogPrint(BCLog::DANDELION, "ProcessMessage INV: Got dandelion inv: %s  %s peer=%d\n", inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
                     if ((!fAlreadyHave && !m_chainman.IsInitialBlockDownload() &&
-                        m_connman.isDandelionInbound(&pfrom)) || (inv.hash == DANDELION_DISCOVERYHASH)) {
+                        is_dandelion_inbound) || (inv.hash == DANDELION_DISCOVERYHASH)) {
                         std::vector<CInv> vInv{inv};
-                        LogPrintf("ProcessMessage INV: Requesting dandelion inv %s from peer=%d (is_inbound=%d, is_discovery=%d)\n", 
-                                 inv.hash.ToString(), pfrom.GetId(), 
-                                 m_connman.isDandelionInbound(&pfrom), 
+                        LogPrintf("ProcessMessage INV: Requesting dandelion inv %s from peer=%d (is_inbound=%d, is_discovery=%d)\n",
+                                 inv.hash.ToString(), pfrom.GetId(),
+                                 is_dandelion_inbound,
                                  inv.hash == DANDELION_DISCOVERYHASH);
                         m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETDATA, vInv));
                     }
