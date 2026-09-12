@@ -133,55 +133,6 @@ bool BlockHasDigiDollarMint(const CBlock& block)
     return false;
 }
 
-bool ComputeAggregatePubkeyFromConsensusParams(const std::vector<uint8_t>& oracle_ids,
-                                               const Consensus::Params& params,
-                                               secp256k1_xonly_pubkey& agg_pk,
-                                               secp256k1_musig_keyagg_cache& cache)
-{
-    if (oracle_ids.empty()) return false;
-    if (params.nOraclePubkeyCount < 0) return false;
-    if (params.vOraclePublicKeys.size() < static_cast<size_t>(params.nOraclePubkeyCount)) return false;
-
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-    if (!ctx) return false;
-
-    std::vector<secp256k1_pubkey> pubkeys;
-    pubkeys.reserve(oracle_ids.size());
-    for (uint8_t id : oracle_ids) {
-        if (id >= static_cast<uint8_t>(params.nOraclePubkeyCount)) {
-            secp256k1_context_destroy(ctx);
-            return false;
-        }
-
-        const std::vector<unsigned char> xonly = ParseHex(params.vOraclePublicKeys[id]);
-        if (xonly.size() != 32) {
-            secp256k1_context_destroy(ctx);
-            return false;
-        }
-
-        std::vector<unsigned char> compressed;
-        compressed.reserve(CPubKey::COMPRESSED_SIZE);
-        compressed.push_back(0x02);
-        compressed.insert(compressed.end(), xonly.begin(), xonly.end());
-
-        secp256k1_pubkey pk;
-        if (!secp256k1_ec_pubkey_parse(ctx, &pk, compressed.data(), compressed.size())) {
-            secp256k1_context_destroy(ctx);
-            return false;
-        }
-        pubkeys.push_back(pk);
-    }
-
-    std::vector<const secp256k1_pubkey*> pubkey_ptrs(pubkeys.size());
-    for (size_t i = 0; i < pubkeys.size(); ++i) {
-        pubkey_ptrs[i] = &pubkeys[i];
-    }
-
-    const bool ok = secp256k1_musig_pubkey_agg(ctx, &agg_pk, &cache,
-                                               pubkey_ptrs.data(), pubkey_ptrs.size()) == 1;
-    secp256k1_context_destroy(ctx);
-    return ok;
-}
 } // namespace
 
 //! Global oracle bundle manager instance
@@ -2516,10 +2467,17 @@ bool OracleBundleManager::ValidateMuSig2Bundle(const COracleBundle& bundle,
     // The signer hashes H(epoch, price, timestamp); a bundle whose payload epoch
     // doesn't match the current epoch cannot verify (and could otherwise enable
     // cross-epoch replay of a previously-valid aggregate signature).
-    const int32_t expected_epoch = GetCurrentEpoch(block_height);
+    const int32_t epoch_length = params.nDDOracleEpochBlocks > 0 ? params.nDDOracleEpochBlocks : 1440;
+    const int32_t expected_epoch = block_height / epoch_length;
     if (bundle.epoch != expected_epoch) {
         error = "v0x03 bundle epoch mismatch (payload=" + std::to_string(bundle.epoch) +
                 ", expected=" + std::to_string(expected_epoch) + ")";
+        return false;
+    }
+
+    // Validate before narrowing the configured slot count to the bitmap API.
+    if (params.nOracleTotalOracles <= 0 || params.nOracleTotalOracles > 256) {
+        error = "v0x03 bitmap decoding failed (invalid oracle slot count)";
         return false;
     }
 
@@ -2541,7 +2499,7 @@ bool OracleBundleManager::ValidateMuSig2Bundle(const COracleBundle& bundle,
     }
 
     for (uint8_t oracle_id : oracle_ids) {
-        if (oracle_id >= static_cast<uint8_t>(params.nOraclePubkeyCount)) {
+        if (oracle_id >= params.nOraclePubkeyCount) {
             error = "v0x03 signer outside active oracle roster (id=" + std::to_string(oracle_id) + ")";
             return false;
         }
@@ -2564,12 +2522,7 @@ bool OracleBundleManager::ValidateMuSig2Bundle(const COracleBundle& bundle,
                  return s;
              }());
 
-    const bool using_active_chainparams = &params == &Params().GetConsensus();
-    const bool aggregate_ok = using_active_chainparams ?
-        aggregator.ComputeAggregatePubkeyFromBitmap(bundle.participation_bitmap,
-                                                    static_cast<uint16_t>(params.nOracleTotalOracles),
-                                                    agg_pk, cache) :
-        ComputeAggregatePubkeyFromConsensusParams(oracle_ids, params, agg_pk, cache);
+    const bool aggregate_ok = aggregator.ComputeAggregatePubkey(oracle_ids, params, agg_pk, cache);
     if (!aggregate_ok) {
         error = "Failed to compute aggregate pubkey from bitmap";
         return false;

@@ -141,6 +141,7 @@ public:
     //! V0x03 script format validation
     bool ValidateV03BundleFormat(const CScript& script, uint8_t& version);
 
+    /** Validate against the supplied epoch settings, genesis, quorum, and full compressed oracle keys. */
     static bool ValidateMuSig2Bundle(const COracleBundle& bundle, int32_t block_height, const Consensus::Params& params, std::string& error);
     static bool ValidateBundle(const COracleBundle& bundle, int block_height, const Consensus::Params& params);
     static int GetRequiredConsensus(int block_height, const Consensus::Params& params);

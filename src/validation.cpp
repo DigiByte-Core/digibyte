@@ -24,6 +24,7 @@
 #include <consensus/volatility.h>
 #include <digidollar/validation.h>
 #include <oracle/bundle_manager.h>
+#include <oracle/signing_orchestrator.h>
 #include <oracle/mock_oracle.h>
 #include <primitives/oracle.h>
 #include <cuckoocache.h>
@@ -122,24 +123,30 @@ static constexpr size_t DD_BLOCK_TX_LOOKUP_CACHE_MAX_BLOCKS{64};
 class DDBlockTxLookupCache
 {
 public:
-    bool Lookup(const CBlockIndex& block_index, BlockManager& blockman, const uint256& txid, CTransactionRef& tx_out)
+    bool Lookup(const CBlockIndex& block_index, BlockManager& blockman, const uint256& txid, CTransactionRef& tx_out,
+                bool verify_block_data)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
 
         const uint256 block_hash = block_index.GetBlockHash();
         auto block_it = m_blocks.find(block_hash);
-        if (block_it == m_blocks.end()) {
+        const bool cached = block_it != m_blocks.end();
+        if (!cached || (verify_block_data && !block_it->second.verified)) {
             CBlock block;
             if (!blockman.ReadBlockFromDisk(block, block_index)) return false;
+            if (verify_block_data) {
+                bool mutated{false};
+                if (block.GetHash() != block_hash || BlockMerkleRoot(block, &mutated) != block.hashMerkleRoot || mutated) return false;
+            }
 
             std::map<uint256, CTransactionRef> block_txs;
             for (const auto& btx : block.vtx) {
                 block_txs.emplace(btx->GetHash(), btx);
             }
 
-            block_it = m_blocks.emplace(block_hash, std::move(block_txs)).first;
-            m_order.push_back(block_hash);
+            block_it = m_blocks.insert_or_assign(block_hash, CachedBlock{std::move(block_txs), verify_block_data}).first;
+            if (!cached) m_order.push_back(block_hash);
 
             while (m_blocks.size() > DD_BLOCK_TX_LOOKUP_CACHE_MAX_BLOCKS && !m_order.empty()) {
                 m_blocks.erase(m_order.front());
@@ -150,8 +157,8 @@ public:
             if (block_it == m_blocks.end()) return false;
         }
 
-        const auto tx_it = block_it->second.find(txid);
-        if (tx_it != block_it->second.end()) {
+        const auto tx_it = block_it->second.transactions.find(txid);
+        if (tx_it != block_it->second.transactions.end()) {
             tx_out = tx_it->second;
             return true;
         }
@@ -160,7 +167,12 @@ public:
     }
 
 private:
-    std::map<uint256, std::map<uint256, CTransactionRef>> m_blocks;
+    struct CachedBlock {
+        std::map<uint256, CTransactionRef> transactions;
+        // Activated callers must not inherit unchecked entries from legacy lookups.
+        bool verified{false};
+    };
+    std::map<uint256, CachedBlock> m_blocks;
     std::deque<uint256> m_order;
 };
 
@@ -168,9 +180,9 @@ static DDBlockTxLookupCache g_dd_block_tx_lookup_cache;
 
 static DigiDollar::TxLookupFn MakeCachedBlockTxLookup(
     std::function<const CBlockIndex*(uint32_t)> locate_block,
-    BlockManager& blockman)
+    BlockManager& blockman, bool verify_block_data = false)
 {
-    return [locate_block = std::move(locate_block), &blockman]
+    return [locate_block = std::move(locate_block), &blockman, verify_block_data]
            (const uint256& txid, uint32_t coinHeight, CTransactionRef& tx_out) -> bool {
         AssertLockHeld(cs_main);
 
@@ -178,8 +190,79 @@ static DigiDollar::TxLookupFn MakeCachedBlockTxLookup(
         const CBlockIndex* pblockindex = locate_block(coinHeight);
         if (!pblockindex) return false;
 
-        return g_dd_block_tx_lookup_cache.Lookup(*pblockindex, blockman, txid, tx_out);
+        return g_dd_block_tx_lookup_cache.Lookup(*pblockindex, blockman, txid, tx_out, verify_block_data);
     };
+}
+
+static DigiDollar::TxLookupFn CandidateTransactionLookup(const CBlock& block, const CBlockIndex* index, BlockManager& blockman)
+{
+    auto ancestors = MakeCachedBlockTxLookup([index](uint32_t height) -> const CBlockIndex* {
+        return index->pprev && height <= static_cast<uint32_t>(index->pprev->nHeight) ? index->pprev->GetAncestor(height) : nullptr;
+    }, blockman, /*verify_block_data=*/true);
+    return [&block, index, ancestors = std::move(ancestors)](const uint256& hash, uint32_t height, CTransactionRef& out) {
+        if (height == static_cast<uint32_t>(index->nHeight)) {
+            for (const auto& tx : block.vtx) if (tx->GetHash() == hash) { out = tx; return true; }
+            return false;
+        }
+        return ancestors(hash, height, out);
+    };
+}
+
+static void PublishDisconnectedOracleState(const CBlock& block, const CBlockIndex* pindex,
+                                           const CChainParams& params)
+{
+    if (block.vtx.empty()) return;
+    OracleBundleManager& manager = OracleBundleManager::GetInstance();
+    COracleBundle disconnected_bundle;
+    if (manager.ExtractOracleBundle(*block.vtx[0], disconnected_bundle)) {
+        manager.RemovePriceCache(pindex->nHeight);
+
+        // In RegTest mode, also revert MockOracleManager by getting previous price
+        auto chain_type = params.GetChainType();
+        if (chain_type == ChainType::REGTEST && pindex->pprev) {
+            // Reset to previous height's price or default
+            uint64_t prevPrice = manager.GetOraclePriceForHeight(pindex->pprev->nHeight);
+            if (prevPrice > 0) {
+                MockOracleManager::GetInstance().SetMockPrice(prevPrice);
+            } else {
+                // No earlier on-chain price exists. Keep the operator's
+                // current regtest mock quote instead of reverting to the
+                // hardcoded default, otherwise mempool resurrection after
+                // a one-block reorg can reprice the same DD transaction
+                // under an unrelated test price.
+                MockOracleManager::GetInstance().SetMockPrice(disconnected_bundle.median_price_micro_usd);
+            }
+        }
+
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Reverted price cache at height %d during block disconnect\n", pindex->nHeight);
+    }
+}
+
+static bool PrepareDigiDollarParent(CCoinsViewCache& view, const CBlockIndex* parent,
+                                   const Consensus::Params& params, BlockManager& blockman,
+                                   std::string& error, const std::function<bool()>& interrupted = {})
+{
+    if (!parent || view.GetBestBlock() != parent->GetBlockHash()) {
+        error = "DigiDollar state not ready: candidate parent does not match UTXO state";
+        return false;
+    }
+    const auto saved = view.GetDigiDollarState();
+    if (saved && saved->Matches(params.hashGenesisBlock, parent->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight)) {
+        if (!DigiDollar::IsThawDayActive(params, parent->nHeight) || saved->history_checked) return true;
+    }
+    if (DigiDollar::IsThawDayActive(params, parent->nHeight) && parent->nHeight > 0) {
+        error = "DigiDollar state not ready: restart to verify previously unchecked Thaw Day history";
+        return false;
+    }
+    auto lookup = MakeCachedBlockTxLookup([parent](uint32_t height) -> const CBlockIndex* {
+        return height <= static_cast<uint32_t>(parent->nHeight) ? parent->GetAncestor(height) : nullptr;
+    }, blockman, /*verify_block_data=*/true);
+    DigiDollar::ChainstateHealth rebuilt;
+    if (!DigiDollar::ReconstructChainstateHealth(view, params, lookup, rebuilt, error, interrupted)) return false;
+    // Genesis has no spendable outputs and ConnectBlock never applies its coinbase.
+    rebuilt.history_checked = parent->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0);
+    view.SetDigiDollarState(rebuilt);
+    return true;
 }
 
 static bool CheckMuSig2OracleBundleVersion(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state)
@@ -221,6 +304,121 @@ static bool CheckMuSig2OracleBundleVersion(const CBlock& block, const CBlockInde
     return true;
 }
 
+namespace DigiDollar {
+
+Volatility::MintReference GetMintVolatilityReference(const CBlockIndex* parent,
+    const Consensus::Params& params, const node::BlockManager& blockman)
+{
+    AssertLockHeld(cs_main);
+    return Volatility::BuildMintReference(parent ? parent->nHeight + 1 : 0, parent, params,
+        [&](const CBlockIndex& ancestor, CAmount& price, std::string& error) {
+            CBlock block;
+            if (!blockman.ReadBlockFromDisk(block, ancestor) || block.GetHash() != ancestor.GetBlockHash()) {
+                error = strprintf("DigiDollar volatility state not ready: restore or download ancestor %s at height %d",
+                                  ancestor.GetBlockHash().ToString(), ancestor.nHeight);
+                return Volatility::AncestorPriceResult::UNAVAILABLE;
+            }
+            bool mutated{false};
+            const uint256 merkle_root = BlockMerkleRoot(block, &mutated);
+            BlockValidationState state;
+            if (mutated || merkle_root != block.hashMerkleRoot || block.vtx.empty() || !block.vtx[0] ||
+                !OracleDataValidator::ValidateBlockOracleData(block, ancestor.pprev, params, state)) {
+                error = strprintf("DigiDollar volatility state not ready: unreadable oracle data at height %d: %s",
+                                  ancestor.nHeight, state.ToString());
+                return Volatility::AncestorPriceResult::UNAVAILABLE;
+            }
+            COracleBundle bundle;
+            if (!OracleBundleManager::GetInstance().ExtractOracleBundle(*block.vtx[0], bundle)) {
+                return Volatility::AncestorPriceResult::NO_BUNDLE;
+            }
+            price = static_cast<CAmount>(bundle.median_price_micro_usd);
+            return Volatility::AncestorPriceResult::PRICE;
+        });
+}
+
+bool GetChainstateHealthForNextBlock(const CBlockIndex* parent, const Consensus::Params& params,
+    node::BlockManager& blockman, const CCoinsViewCache& coins, CAmount price_micro_usd,
+    int& health, ChainstateHealth& canonical, std::string& error,
+    const std::function<bool()>& interrupted)
+{
+    AssertLockHeld(cs_main);
+    if (!parent || !IsThawDayActive(params, parent->nHeight + 1) || coins.GetBestBlock() != parent->GetBlockHash()) {
+        error = "DigiDollar state not ready: candidate parent or rules do not match the coins view";
+        return false;
+    }
+    auto state = coins.GetDigiDollarState();
+    if (!state || !state->Matches(params.hashGenesisBlock, parent->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight) ||
+        (IsThawDayActive(params, parent->nHeight) && !state->history_checked)) {
+        if (IsThawDayActive(params, parent->nHeight) && parent->nHeight > 0) {
+            error = "DigiDollar state not ready: restart to verify previously unchecked Thaw Day history";
+            return false;
+        }
+        auto lookup = MakeCachedBlockTxLookup([parent](uint32_t height) -> const CBlockIndex* {
+            return height <= static_cast<uint32_t>(parent->nHeight) ? parent->GetAncestor(height) : nullptr;
+        }, blockman, /*verify_block_data=*/true);
+        ChainstateHealth rebuilt;
+        if (!ReconstructChainstateHealth(coins, params, lookup, rebuilt, error, interrupted)) return false;
+        rebuilt.history_checked = parent->nHeight == 0 && IsThawDayActive(params, 0);
+        state = rebuilt;
+    }
+    const auto calculated = CalculateChainstateHealth(*state, price_micro_usd);
+    if (!calculated) {
+        error = "DigiDollar state not ready: valid canonical health and oracle quote are required";
+        return false;
+    }
+    canonical = *state;
+    health = *calculated;
+    error.clear();
+    return true;
+}
+
+bool GetNextBlockOracleQuote(const CBlockIndex* parent, const Consensus::Params& params,
+    const node::BlockManager& blockman, CAmount& price, std::string& error)
+{
+    AssertLockHeld(cs_main);
+    price = 0;
+    if (!parent) {
+        error = "chain tip unavailable";
+        return false;
+    }
+    const int height = parent->nHeight + 1;
+    const int64_t now = GetTime();
+    auto check = [&](const COracleBundle& bundle) {
+        if (bundle.timestamp <= 0 || bundle.timestamp > now + 60 || now - bundle.timestamp > ORACLE_MAX_AGE_SECONDS) return false;
+        if (!OracleBundleManager::ValidateMuSig2Bundle(bundle, height, params, error)) return false;
+        price = static_cast<CAmount>(bundle.median_price_micro_usd);
+        error.clear();
+        return true;
+    };
+    auto& manager = OracleBundleManager::GetInstance();
+    const int epoch = height / (params.nDDOracleEpochBlocks > 0 ? params.nDDOracleEpochBlocks : 1440);
+    if (g_signing_orchestrator) {
+        COracleBundle bundle(epoch);
+        bundle.version = 3;
+        if (g_signing_orchestrator->GetCompletedSession(bundle.epoch, bundle.aggregate_sig,
+                bundle.participation_bitmap, bundle.median_price_micro_usd, bundle.timestamp) && check(bundle)) return true;
+    }
+    if (check(manager.GetCurrentBundle(epoch))) return true;
+    for (const CBlockIndex* ancestor = parent;
+         ancestor && now - ancestor->GetBlockTime() <= ORACLE_MAX_AGE_SECONDS;
+         ancestor = ancestor->pprev) {
+        if (ancestor->nHeight < params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR)) break;
+        CBlock block;
+        bool mutated{false};
+        if (!blockman.ReadBlockFromDisk(block, *ancestor) || block.GetHash() != ancestor->GetBlockHash() ||
+            BlockMerkleRoot(block, &mutated) != block.hashMerkleRoot || mutated) {
+            error = "DigiDollar state not ready: restore required oracle quote block " + ancestor->GetBlockHash().ToString();
+            return false;
+        }
+        COracleBundle bundle;
+        if (!block.vtx.empty() && block.vtx[0] && manager.ExtractOracleBundle(*block.vtx[0], bundle) && check(bundle)) return true;
+    }
+    if (error.empty()) error = "no valid oracle quote for the next block";
+    return false;
+}
+
+} // namespace DigiDollar
+
 static bool HasRecentValidMuSig2OracleQuote(const CChain& chain, BlockManager& blockman, const Consensus::Params& params, std::string& error)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
@@ -230,6 +428,11 @@ static bool HasRecentValidMuSig2OracleQuote(const CChain& chain, BlockManager& b
     if (!pindex) {
         error = "chain tip unavailable";
         return false;
+    }
+
+    if (DigiDollar::IsThawDayActive(params, pindex->nHeight + 1)) {
+        CAmount price{0};
+        return DigiDollar::GetNextBlockOracleQuote(pindex, params, blockman, price, error);
     }
 
     OracleBundleManager& manager = OracleBundleManager::GetInstance();
@@ -529,7 +732,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         [this](uint32_t coinHeight) -> const CBlockIndex* {
             return m_chain[coinHeight];
         },
-        m_blockman);
+        m_blockman, DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), m_chain.Height() + 1));
 
     // This predicate runs over the regular mempool and then over the
     // Dandelion stempool, so it is built once per pool and every write it
@@ -605,6 +808,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
             reorg_tx_lookup,
             m_mempool
         );
+        ddProbeContext.candidateParent = m_chain.Tip();
 
         if (DigiDollar::RequiresDigiDollarValidation(tx, ddProbeContext)) {
             std::string oracle_policy_error;
@@ -626,7 +830,19 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 reorg_tx_lookup,
                 m_mempool
             );
+            ddContext.candidateParent = m_chain.Tip();
+            if (DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), ddContext.nHeight)) {
+                if (DigiDollarMempoolTxRequiresOracleQuote(tx) &&
+                    !DigiDollar::GetNextBlockOracleQuote(m_chain.Tip(), m_chainman.GetConsensus(), m_blockman,
+                                                        ddContext.oraclePriceMicroUSD, oracle_policy_error)) return true;
+                if (DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT)
+                    ddContext.mintReference = DigiDollar::GetMintVolatilityReference(m_chain.Tip(), m_chainman.GetConsensus(), m_blockman);
+            }
             if (!DigiDollar::ValidateDigiDollarTransaction(tx, ddContext, dd_state)) {
+                if (dd_state.IsError()) {
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Revalidation deferred: %s\n", dd_state.ToString());
+                    return false;
+                }
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Removing reorg-resurrected tx %s after DD revalidation failed: %s\n",
                          tx.GetHash().ToString(), dd_state.GetRejectReason());
                 return true;
@@ -1114,6 +1330,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // This is const, but calls into the back end CoinsViews. The CCoinsViewDB at the bottom of the
     // hierarchy brings the best block into scope. See CCoinsViewDB::GetBestBlock().
     m_view.GetBestBlock();
+    m_view.SetDigiDollarState(coins_cache.GetDigiDollarState());
 
     // we have all inputs cached now, so switch back to dummy (to protect
     // against bugs where we pull more inputs from disk that miss being added
@@ -1144,7 +1361,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         [this](uint32_t coinHeight) -> const CBlockIndex* {
             return m_active_chainstate.m_chain[coinHeight];
         },
-        m_active_chainstate.m_blockman);
+        m_active_chainstate.m_blockman,
+        DigiDollar::IsThawDayActive(args.m_chainparams.GetConsensus(), m_active_chainstate.m_chain.Height() + 1));
 
     DigiDollar::ValidationContext ddProbeContext(
         m_active_chainstate.m_chain.Height() + 1,  // Height for next block
@@ -1156,6 +1374,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         txLookup,                                   // Block-db tx lookup for DD amounts
         &m_pool                                     // Mempool for unconfirmed DD input lookup
     );
+    ddProbeContext.candidateParent = m_active_chainstate.m_chain.Tip();
 
     if (DigiDollar::RequiresDigiDollarValidation(tx, ddProbeContext)) {
         DigiDollar::ValidationContext ddContext(
@@ -1168,6 +1387,19 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             txLookup,                                   // Block-db tx lookup for DD amounts
             &m_pool                                     // Mempool for unconfirmed DD input lookup
         );
+        ddContext.candidateParent = m_active_chainstate.m_chain.Tip();
+
+        if (DigiDollar::IsThawDayActive(args.m_chainparams.GetConsensus(), ddContext.nHeight)) {
+            std::string quote_error;
+            if (DigiDollarMempoolTxRequiresOracleQuote(tx) &&
+                !DigiDollar::GetNextBlockOracleQuote(ddContext.candidateParent, args.m_chainparams.GetConsensus(),
+                    m_active_chainstate.m_blockman, ddContext.oraclePriceMicroUSD, quote_error)) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "digidollar-missing-oracle-quote", quote_error);
+            }
+            if (DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT)
+                ddContext.mintReference = DigiDollar::GetMintVolatilityReference(ddContext.candidateParent,
+                    args.m_chainparams.GetConsensus(), m_active_chainstate.m_blockman);
+        }
 
         if (!DigiDollar::ValidateDigiDollarTransaction(tx, ddContext, state)) {
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transaction validation failed (txid: %s): %s\n",
@@ -2609,8 +2841,25 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
 DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
                                              bool fJustCheck)
 {
+    return DisconnectBlockInternal(block, pindex, view, fJustCheck, false);
+}
+
+DisconnectResult Chainstate::DisconnectBlockInternal(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
+                                                     bool fJustCheck, bool recovery)
+{
     AssertLockHeld(::cs_main);
     bool fClean = true;
+    const auto& params = m_chainman.GetConsensus();
+    const bool canonical = DigiDollar::IsThawDayActive(params, pindex->nHeight);
+    auto health = view.GetDigiDollarState();
+    if (recovery) view.SetDigiDollarState(std::nullopt);
+    if (canonical && !recovery && (!health || !health->Matches(params.hashGenesisBlock, pindex->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight) || !health->history_checked)) {
+        error("DisconnectBlock(): DigiDollar state not ready for exact undo");
+        return DISCONNECT_FAILED;
+    }
+    const auto canonical_lookup = canonical && !recovery ?
+        CandidateTransactionLookup(block, pindex, m_blockman) : DigiDollar::TxLookupFn{};
+
 
     CBlockUndo blockUndo;
     if (!m_blockman.UndoReadFromDisk(blockUndo, *pindex)) {
@@ -2662,9 +2911,17 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 return DISCONNECT_FAILED;
             }
 
+            if (canonical && !recovery) {
+                std::string reason;
+                if (!DigiDollar::UpdateChainstateHealth(tx, txundo.vprevout, params, canonical_lookup, *health, true, reason, pindex->nHeight)) {
+                    error("DisconnectBlock(): %s", reason);
+                    return DISCONNECT_FAILED;
+                }
+            }
+
             // ===== Reverse incremental DD metrics tracking (T5-06) =====
             // Must run BEFORE ApplyTxInUndo moves the undo coin data.
-            if (DigiDollar::HasDigiDollarMarker(tx)) {
+            if (!canonical && !recovery && DigiDollar::HasDigiDollarMarker(tx)) {
                 auto ddTxType = DigiDollar::GetDigiDollarTxType(tx);
                 if (ddTxType == DigiDollar::DD_TX_MINT) {
                     // Undo a MINT: subtract its DD supply and collateral from metrics
@@ -2716,36 +2973,17 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
 
     // move best block pointer to prevout block
     view.SetBestBlock(pindex->pprev->GetBlockHash());
+    if (canonical && !recovery) {
+        health->best_block = pindex->pprev->GetBlockHash();
+        health->history_checked = DigiDollar::IsThawDayActive(params, pindex->pprev->nHeight);
+        view.SetDigiDollarState(health);
+    } else {
+        view.SetDigiDollarState(std::nullopt);
+    }
 
-    // T8-03: Revert oracle price cache for ALL networks (not just testnet/regtest)
-    // Mainnet needs deterministic oracle pricing too. The oracle output is
-    // appended to coinbase by the miner, but valid coinbases may contain extra
-    // outputs before it, so disconnect must mirror ConnectBlock's all-output scan.
-    if (!fJustCheck && !block.vtx.empty()) {
-        OracleBundleManager& manager = OracleBundleManager::GetInstance();
-        COracleBundle disconnected_bundle;
-        if (manager.ExtractOracleBundle(*block.vtx[0], disconnected_bundle)) {
-            manager.RemovePriceCache(pindex->nHeight);
 
-            // In RegTest mode, also revert MockOracleManager by getting previous price
-            auto chain_type = Params().GetChainType();
-            if (chain_type == ChainType::REGTEST && pindex->pprev) {
-                // Reset to previous height's price or default
-                uint64_t prevPrice = manager.GetOraclePriceForHeight(pindex->pprev->nHeight);
-                if (prevPrice > 0) {
-                    MockOracleManager::GetInstance().SetMockPrice(prevPrice);
-                } else {
-                    // No earlier on-chain price exists. Keep the operator's
-                    // current regtest mock quote instead of reverting to the
-                    // hardcoded default, otherwise mempool resurrection after
-                    // a one-block reorg can reprice the same DD transaction
-                    // under an unrelated test price.
-                    MockOracleManager::GetInstance().SetMockPrice(disconnected_bundle.median_price_micro_usd);
-                }
-            }
-
-            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Reverted price cache at height %d during block disconnect\n", pindex->nHeight);
-        }
+    if (!canonical && !fJustCheck && !recovery) {
+        PublishDisconnectedOracleState(block, pindex, m_chainman.GetParams());
     }
 
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
@@ -2921,10 +3159,26 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // Special case for the genesis block, skipping connection of its transactions
     // (its coinbase is unspendable)
     if (block_hash == params.GetConsensus().hashGenesisBlock) {
-        if (!fJustCheck)
-            view.SetBestBlock(pindex->GetBlockHash());
+        view.SetBestBlock(pindex->GetBlockHash());
+        if (DigiDollar::IsThawDayActive(params.GetConsensus(), 1)) {
+            DigiDollar::ChainstateHealth empty;
+            empty.genesis_hash = params.GetConsensus().hashGenesisBlock;
+            empty.activation_height = params.GetConsensus().nDDThawDayHeight;
+            empty.digidollar_height = params.GetConsensus().DigiDollarHeight;
+            empty.best_block = pindex->GetBlockHash();
+            empty.history_checked = DigiDollar::IsThawDayActive(params.GetConsensus(), 0);
+            view.SetDigiDollarState(empty);
+        }
         return true;
     }
+
+    const bool canonical = DigiDollar::IsThawDayActive(params.GetConsensus(), pindex->nHeight);
+    if (canonical) {
+        std::string reason;
+        if (!PrepareDigiDollarParent(view, pindex->pprev, params.GetConsensus(), m_blockman, reason,
+                [this] { return static_cast<bool>(m_chainman.m_interrupt); })) return state.Error(reason);
+    }
+    auto canonical_health = view.GetDigiDollarState();
 
     bool fScriptChecks = true;
     if (!m_chainman.AssumedValidBlock().IsNull()) {
@@ -3082,6 +3336,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int64_t nSigOpsCost = 0;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
+    // Legacy rollback uses inverse updates, including their original clamping.
     struct DigiDollarHealthUpdateGuard {
         enum class Type { Mint, Redeem };
         struct Update {
@@ -3148,6 +3403,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     COracleBundle blockOracleBundle;
     bool hasBlockOracleBundle = false;
     bool shouldRecordMintVolatility = false;
+    std::optional<DigiDollar::Volatility::MintReference> mintReference;
     const bool dd_bip9_active =
         (pindex->pprev != nullptr) &&
         DigiDollar::IsDigiDollarEnabled(pindex->pprev, m_chainman.GetParams().GetConsensus());
@@ -3162,11 +3418,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
     }
 
-    auto block_tx_lookup = MakeCachedBlockTxLookup(
-        [pindex](uint32_t coinHeight) -> const CBlockIndex* {
+    // Legacy validation resolves sources from disk/cache before consulting its registry.
+    // Only activated candidates may resolve transactions from the unsaved block body.
+    const auto block_tx_lookup = canonical ? CandidateTransactionLookup(block, pindex, m_blockman) :
+        MakeCachedBlockTxLookup([pindex](uint32_t coinHeight) -> const CBlockIndex* {
             return pindex->GetAncestor(coinHeight);
-        },
-        m_blockman);
+        }, m_blockman);
 
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
@@ -3225,6 +3482,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 true,
                 block_tx_lookup
             );
+            ddProbeContext.candidateParent = pindex->pprev;
 
             // Pre-activation DD-looking version bits must not change base-chain
             // block validity. Once BIP9 is ACTIVE, every DD-touching body
@@ -3271,9 +3529,16 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                     nullptr,                                             // No mempool during block connect
                     pindex->nTime                                        // Deterministic volatility timestamp
                 );
+                ddContext.candidateParent = pindex->pprev;
+
+                if (DigiDollar::IsThawDayActive(params.GetConsensus(), pindex->nHeight) && ddTxType == DigiDollar::DD_TX_MINT) {
+                    if (!mintReference) mintReference = DigiDollar::GetMintVolatilityReference(pindex->pprev, params.GetConsensus(), m_blockman);
+                    ddContext.mintReference = *mintReference;
+                }
 
                 TxValidationState dd_state;
                 if (!DigiDollar::ValidateDigiDollarTransaction(tx, ddContext, dd_state)) {
+                    if (dd_state.IsError()) return state.Error(dd_state.ToString());
                     // DigiDollar validation failure is a consensus failure
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                 dd_state.GetRejectReason(), dd_state.GetDebugMessage());
@@ -3284,7 +3549,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 // ===== Incremental DD metrics tracking (T5-06) =====
                 // Update cached system metrics so ShouldBlockMinting() always
                 // works off current data instead of stale ScanUTXOSet results.
-                if (ddTxType == DigiDollar::DD_TX_MINT) {
+                if (!canonical && ddTxType == DigiDollar::DD_TX_MINT) {
                     // MINT: extract DD amount and collateral without assuming output order.
                     CAmount mintDDAmount = 0;
                     CAmount mintCollateral = 0;
@@ -3292,7 +3557,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                         dd_health_updates.RecordMint(mintDDAmount, mintCollateral);
                     }
                     shouldRecordMintVolatility = hasBlockOracleBundle && blockOraclePrice > 0;
-                } else if (ddTxType == DigiDollar::DD_TX_REDEEM && !tx.vin.empty()) {
+                } else if (!canonical && ddTxType == DigiDollar::DD_TX_REDEEM && !tx.vin.empty()) {
                     std::vector<Coin> spentCoins;
                     spentCoins.reserve(tx.vin.size());
                     for (const CTxIn& txin : tx.vin) {
@@ -3345,6 +3610,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             blockundo.vtxundo.emplace_back();
         }
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
+        if (canonical && i > 0) {
+            std::string reason;
+            if (!DigiDollar::UpdateChainstateHealth(tx, blockundo.vtxundo.back().vprevout,
+                    params.GetConsensus(), block_tx_lookup, *canonical_health, false, reason, pindex->nHeight)) return state.Error(reason);
+            view.SetDigiDollarState(canonical_health);
+        }
+
     }
     const auto time_3{SteadyClock::now()};
     time_connect += time_3 - time_2;
@@ -3373,8 +3645,28 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<SecondsDouble>(time_verify),
              Ticks<MillisecondsDouble>(time_verify) / num_blocks_total);
 
-    if (fJustCheck)
+    auto finish_health = [&] {
+        view.SetBestBlock(pindex->GetBlockHash());
+        if (canonical) {
+            canonical_health->best_block = pindex->GetBlockHash();
+            canonical_health->history_checked = true;
+            view.SetDigiDollarState(canonical_health);
+        } else {
+            view.SetDigiDollarState(std::nullopt);
+            if (pindex->nHeight < std::numeric_limits<int>::max() &&
+                DigiDollar::IsThawDayActive(params.GetConsensus(), pindex->nHeight + 1)) {
+                std::string reason;
+                // Preparation cannot add an invalidity rule to the legacy block.
+                if (!PrepareDigiDollarParent(view, pindex, params.GetConsensus(), m_blockman, reason,
+                        [this] { return static_cast<bool>(m_chainman.m_interrupt); }))
+                    LogPrintf("%s\n", reason);
+            }
+        }
+    };
+    if (fJustCheck) {
+        finish_health();
         return true;
+    }
 
     if (!m_blockman.WriteUndoDataForBlock(blockundo, state, *pindex)) {
         return false;
@@ -3390,7 +3682,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             false,
             nullptr,
             nullptr,
-            pindex->nTime);
+            pindex->nTime, pindex->pprev);
         DigiDollar::RecordAcceptedMintVolatility(volatilityContext);
     }
 
@@ -3407,7 +3699,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
 
     // add this block to the view's block chain
-    view.SetBestBlock(pindex->GetBlockHash());
+    finish_health();
 
     const auto time_6{SteadyClock::now()};
     time_index += time_6 - time_5;
@@ -3425,7 +3717,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         time_5 - time_start // in microseconds (µs)
     );
 
-    if (hasBlockOracleBundle) {
+    if (hasBlockOracleBundle && (!canonical || this == &m_chainman.ActiveChainstate())) {
         OracleBundleManager& oracleManager = OracleBundleManager::GetInstance();
         // Update oracle price cache for this height (ALL networks, not just testnet/regtest).
         // This is deliberately after every block validity check above; rejected
@@ -3762,6 +4054,17 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
         if (DisconnectBlock(block, pindexDelete, view) != DISCONNECT_OK)
             return error("DisconnectTip(): DisconnectBlock %s failed", pindexDelete->GetBlockHash().ToString());
+        if (m_dd_legacy_restore_needed && this == &m_chainman.ActiveChainstate() &&
+            !DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), pindexDelete->pprev->nHeight)) {
+            CChain legacy_chain;
+            legacy_chain.SetTip(*pindexDelete->pprev);
+            const auto before = DigiDollar::SystemHealthMonitor::GetCachedMetrics();
+            if (!DigiDollar::SystemHealthMonitor::ScanUTXOSet(&view, &view, &m_blockman, nullptr,
+                                                             &legacy_chain, &m_chainman.GetConsensus())) {
+                DigiDollar::SystemHealthMonitor::RestoreLegacyMetrics(before);
+                return state.Error("DigiDollar state not ready: restore retained history to recover legacy health before the activation boundary");
+            }
+        }
         bool flushed = view.Flush();
         assert(flushed);
     }
@@ -3794,6 +4097,18 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
 
     m_chain.SetTip(*pindexDelete->pprev);
+    if (DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), pindexDelete->nHeight) &&
+        this == &m_chainman.ActiveChainstate()) {
+        PublishDisconnectedOracleState(block, pindexDelete, m_chainman.GetParams());
+    }
+    if (m_dd_legacy_restore_needed && this == &m_chainman.ActiveChainstate() &&
+        !DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), pindexDelete->pprev->nHeight)) {
+        if (!OracleBundleManager::LoadPricesFromChain(m_chainman)) {
+            FlushStateToDisk(state, FlushStateMode::ALWAYS);
+            return state.Error("DigiDollar state not ready: restore retained history to recover legacy oracle prices before the activation boundary");
+        }
+        m_dd_legacy_restore_needed = false;
+    }
 
     UpdateTip(pindexDelete->pprev);
     // Let wallets know transactions went from 1-confirmed to
@@ -3956,6 +4271,120 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 
     connectTrace.BlockConnected(pindexNew, std::move(pthisBlock));
     return true;
+}
+
+bool Chainstate::InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& reason)
+{
+    AssertLockHeld(cs_main);
+    LOCK(MempoolMutex());
+    LOCK(StempoolMutex());
+    const auto& params = m_chainman.GetConsensus();
+    const CBlockIndex* tip = m_chain.Tip();
+    if (!tip || !DigiDollar::IsThawDayActive(params, tip->nHeight + 1)) return true;
+    if (CoinsTip().GetBestBlock() != tip->GetBlockHash()) {
+        reason = "DigiDollar state not ready: UTXO best block does not match the chain tip";
+        return false;
+    }
+    if (this == &m_chainman.ActiveChainstate() && DigiDollar::IsThawDayActive(params, tip->nHeight))
+        m_dd_legacy_restore_needed = true;
+    auto cancelled = [&] {
+        if (interrupted && interrupted()) {
+            reason = "DigiDollar initialization interrupted";
+            return true;
+        }
+        return false;
+    };
+    if (cancelled()) return false;
+    auto persist = [&] {
+        BlockValidationState state;
+        if (FlushStateToDisk(state, FlushStateMode::ALWAYS)) return true;
+        reason = "DigiDollar state not ready: failed to persist recovered chainstate: " + state.ToString();
+        return false;
+    };
+    auto lookup_for = [&](const CBlockIndex* at) {
+        return MakeCachedBlockTxLookup([at](uint32_t height) -> const CBlockIndex* {
+            return height <= static_cast<uint32_t>(at->nHeight) ? at->GetAncestor(height) : nullptr;
+        }, m_blockman, /*verify_block_data=*/true);
+    };
+    const auto saved = CoinsTip().GetDigiDollarState();
+    const bool checked = saved && saved->Matches(params.hashGenesisBlock, tip->GetBlockHash(), params.nDDThawDayHeight, params.DigiDollarHeight) && saved->history_checked;
+    if (checked || !DigiDollar::IsThawDayActive(params, tip->nHeight) || tip->nHeight == 0) {
+        DigiDollar::ChainstateHealth rebuilt;
+        if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(tip), rebuilt, reason, interrupted)) return false;
+        if (cancelled()) return false;
+        rebuilt.history_checked = checked || (tip->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0));
+        CoinsTip().SetDigiDollarState(rebuilt);
+        return persist();
+    }
+
+    // Availability checks are read-only. Keep only one block and undo at a time;
+    // an unchecked segment may be much larger than the configured UTXO cache.
+    CBlockIndex* original_tip = m_chain.Tip();
+    CBlockIndex* anchor_index = original_tip;
+    while (anchor_index->pprev && DigiDollar::IsThawDayActive(params, anchor_index->nHeight)) {
+        if (cancelled()) return false;
+        CBlock block;
+        if (!(anchor_index->nStatus & BLOCK_HAVE_DATA) || !m_blockman.ReadBlockFromDisk(block, *anchor_index)) {
+            reason = strprintf("DigiDollar state not ready: missing block at height %d; restore retained block files or download the required history", anchor_index->nHeight);
+            return false;
+        }
+        CBlockUndo undo;
+        if (!(anchor_index->nStatus & BLOCK_HAVE_UNDO) || !m_blockman.UndoReadFromDisk(undo, *anchor_index)) {
+            reason = strprintf("DigiDollar state not ready: missing undo at height %d; restore retained undo files for the required history", anchor_index->nHeight);
+            return false;
+        }
+        anchor_index = anchor_index->pprev;
+    }
+    while (m_chain.Tip() != anchor_index) {
+        if (cancelled()) { persist(); return false; }
+        CBlockIndex* cursor = m_chain.Tip();
+        CBlock block;
+        if (!m_blockman.ReadBlockFromDisk(block, *cursor)) {
+            if (!persist()) return false;
+            reason = strprintf("DigiDollar state not ready: restore block at height %d to resume unchecked history recovery", cursor->nHeight);
+            return false;
+        }
+        CCoinsViewCache rewind(&CoinsTip());
+        if (DisconnectBlockInternal(block, cursor, rewind, true, true) != DISCONNECT_OK) {
+            if (!persist()) return false;
+            reason = strprintf("DigiDollar state not ready: inconsistent block or undo at height %d; restore retained chainstate history", cursor->nHeight);
+            return false;
+        }
+        if (!rewind.Flush()) {
+            reason = "DigiDollar state not ready: unable to stage unchecked recovery progress";
+            return false;
+        }
+        m_chain.SetTip(*cursor->pprev);
+        BlockValidationState state;
+        if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
+            reason = "DigiDollar state not ready: unable to persist unchecked recovery progress: " + state.ToString();
+            return false;
+        }
+    }
+    // Persist the UTXO anchor with no history proof before checking new rules.
+    // An interruption during rewind therefore resumes from an unchecked prefix.
+    CoinsTip().SetDigiDollarState(std::nullopt);
+    if (!persist()) return false;
+    DigiDollar::ChainstateHealth anchor;
+    if (!DigiDollar::ReconstructChainstateHealth(CoinsTip(), params, lookup_for(anchor_index), anchor, reason, interrupted)) return false;
+    if (cancelled()) return false;
+    anchor.history_checked = anchor_index->nHeight == 0 && DigiDollar::IsThawDayActive(params, 0);
+    CoinsTip().SetDigiDollarState(anchor);
+
+    DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
+    for (int height = anchor_index->nHeight + 1; height <= original_tip->nHeight; ++height) {
+        if (cancelled()) { persist(); return false; }
+        CBlockIndex* next = original_tip->GetAncestor(height);
+        ConnectTrace trace;
+        BlockValidationState state;
+        if (!ConnectTip(state, next, {}, trace, disconnectpool)) {
+            const std::string failure = "DigiDollar history verification failed at height " + std::to_string(height) + ": " + state.ToString();
+            if (!persist()) return false;
+            reason = failure;
+            return false;
+        }
+    }
+    return persist();
 }
 
 /**
@@ -5580,7 +6009,8 @@ bool Chainstate::ReplayBlocks()
                 return error("RollbackBlock(): ReadBlockFromDisk() failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }
             LogPrintf("Rolling back %s (%i)\n", pindexOld->GetBlockHash().ToString(), pindexOld->nHeight);
-            DisconnectResult res = DisconnectBlock(block, pindexOld, cache);
+            const bool canonical = DigiDollar::IsThawDayActive(m_chainman.GetConsensus(), pindexOld->nHeight);
+            DisconnectResult res = DisconnectBlockInternal(block, pindexOld, cache, canonical, canonical);
             if (res == DISCONNECT_FAILED) {
                 return error("RollbackBlock(): DisconnectBlock failed at %d, hash=%s", pindexOld->nHeight, pindexOld->GetBlockHash().ToString());
             }

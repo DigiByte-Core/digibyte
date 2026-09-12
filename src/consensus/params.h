@@ -220,6 +220,8 @@ struct Params {
     int nOracleRequiredMessages{1};             // Off-chain signed price messages required before MuSig2 aggregation
     int nOracleTotalOracles{1};                 // Total active oracle operators
     std::vector<std::string> vOraclePublicKeys; // Hardcoded oracle public keys (hex encoded XOnlyPubKey, sorted)
+    // Full compressed keys in oracle slot order, retaining point parity in parameter copies.
+    std::vector<std::vector<unsigned char>> vOracleCompressedPublicKeys;
     int nDigiDollarMuSig2Height{std::numeric_limits<int>::max()};  // Height when MuSig2 aggregate signatures are valid
 
     /** MuSig2 oracle configuration */

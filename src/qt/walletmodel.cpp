@@ -7,6 +7,7 @@
 #endif
 
 #include <qt/walletmodel.h>
+#include <digidollar/digidollar.h>
 
 #include <qt/addresstablemodel.h>
 #include <qt/clientmodel.h>
@@ -823,6 +824,36 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
             }
         }
 
+        std::optional<int> candidateHealth;
+        UniValue candidateHealthSnapshot;
+        if (DigiDollar::IsThawDayActive(Params().GetConsensus(), mintHeight)) {
+            try {
+                UniValue rpc_params(UniValue::VARR);
+                const UniValue response = m_node.executeRpc("getoracleprice", rpc_params, "");
+                const UniValue& status = response.find_value("mint_volatility");
+                if (!status.find_value("quote_available").get_bool())
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "No valid oracle quote for the next block.");
+                if (!status.find_value("ready").get_bool())
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", QString::fromStdString(status.find_value("data_error").get_str()));
+                if (status.find_value("minting_restricted").get_bool())
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "minting-volatility-pause");
+                oraclePriceMicroUSD = status.find_value("candidate_price_micro_usd").getInt<int64_t>();
+                const UniValue protection = m_node.executeRpc("getprotectionstatus", rpc_params, "");
+                candidateHealthSnapshot = protection.find_value("next_block_health");
+                if (!candidateHealthSnapshot.find_value("ready").get_bool() ||
+                    candidateHealthSnapshot.find_value("candidate_height").getInt<int>() != mintHeight)
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "Candidate health is unavailable; wait for synchronization and retry.");
+                if (candidateHealthSnapshot.find_value("oracle_price_micro_usd").getInt<int64_t>() != oraclePriceMicroUSD)
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "Oracle quote changed; retry mint construction.");
+                candidateHealth = candidateHealthSnapshot.find_value("health_percentage").getInt<int>();
+                if (*candidateHealth < 100)
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "Minting is blocked by candidate emergency health.");
+                oraclePriceMicroUSD = candidateHealthSnapshot.find_value("oracle_price_micro_usd").getInt<int64_t>();
+            } catch (...) {
+                return DigiDollarMintResult(TransactionCreationFailed, "", "", "Mint eligibility is unavailable. Wait for synchronization and try again.");
+            }
+        }
+
         if (oraclePriceMicroUSD <= 0) {
             LogPrintf("DigiDollar Qt: ERROR - Oracle price not available\n");
             return DigiDollarMintResult(TransactionCreationFailed, "", "", "Oracle price not available. Cannot mint DigiDollar.");
@@ -923,6 +954,7 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         };
 
         QtMintTxBuilder builder(Params(), mintHeight, oraclePrice, utxoValues);
+        if (candidateHealth) builder.SetCandidateHealth(*candidateHealth);
 
         DigiDollar::TxBuilderMintParams params;
         params.ddAmount = ddAmount;
@@ -1066,6 +1098,7 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
 
             // Retry mint with consolidated UTXOs
             QtMintTxBuilder retryBuilder(Params(), mintHeight, oraclePrice, utxoValues);
+            if (candidateHealth) retryBuilder.SetCandidateHealth(*candidateHealth);
             params.utxos = availableUtxos;
             result = retryBuilder.BuildMintTransaction(params);
         }
@@ -1129,6 +1162,14 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         bool commit_success = false;
         {
             LOCK(pWallet->cs_wallet);
+            // The RPC copies chain state and releases its lock before the wallet commit.
+            if (candidateHealth) {
+                UniValue rpc_params(UniValue::VARR);
+                const UniValue protection = m_node.executeRpc("getprotectionstatus", rpc_params, "");
+                const UniValue& current = protection.find_value("next_block_health");
+                if (current.write() != candidateHealthSnapshot.write())
+                    return DigiDollarMintResult(TransactionCreationFailed, "", "", "Candidate health or oracle quote changed; retry mint construction.");
+            }
             commit_success = pWallet->CommitTransaction(txRef, {}, {}, &commit_error);
         }
         if (!commit_success) {
@@ -1226,7 +1267,7 @@ WalletModel::DigiDollarRedeemResult WalletModel::redeemDigiDollar(const QString&
             return DigiDollarRedeemResult(InvalidAmount, "", "Invalid position ID hex format");
         }
 
-        // Call redeemdigidollar RPC
+        // The RPC captures its candidate before taking wallet locks; do not hold one here.
         LogPrintf("DigiDollar Qt: Calling redeemdigidollar RPC - Position: %s, Amount: %d cents\n",
                   positionId.toStdString(), amount);
 
@@ -1377,13 +1418,31 @@ CAmount WalletModel::calculateRequiredCollateral(CAmount ddAmount, int lockTier)
         }
     }
 
+    const int currentHeight = m_client_model ? m_client_model->getNumBlocks() : 0;
+    const bool thaw_active = DigiDollar::IsThawDayActive(Params().GetConsensus(), currentHeight + 1);
+    std::optional<int> candidateHealth;
+    if (thaw_active) {
+        try {
+            UniValue rpc_params(UniValue::VARR);
+            const UniValue response = m_node.executeRpc("getoracleprice", rpc_params, "");
+            const UniValue& status = response.find_value("mint_volatility");
+            if (!status.find_value("quote_available").get_bool()) return 0;
+            oraclePriceMicroUSD = status.find_value("candidate_price_micro_usd").getInt<int64_t>();
+            const UniValue protection = m_node.executeRpc("getprotectionstatus", rpc_params, "");
+            const UniValue& health = protection.find_value("next_block_health");
+            if (!health.find_value("ready").get_bool()) return 0;
+            candidateHealth = health.find_value("health_percentage").getInt<int>();
+            oraclePriceMicroUSD = health.find_value("oracle_price_micro_usd").getInt<int64_t>();
+        } catch (...) { return 0; }
+    }
+
     if (oraclePriceMicroUSD <= 0) {
         return 0;
     }
 
     static constexpr int LOCK_DAYS_FOR_TIER[10] = {0, 30, 90, 180, 365, 730, 1095, 1825, 2555, 3650};
-    const int currentHeight = m_client_model ? m_client_model->getNumBlocks() : 0;
-    DigiDollar::MintTxBuilder builder(Params(), currentHeight, oraclePriceMicroUSD);
+    DigiDollar::MintTxBuilder builder(Params(), thaw_active ? currentHeight + 1 : currentHeight, oraclePriceMicroUSD);
+    if (candidateHealth) builder.SetCandidateHealth(*candidateHealth);
     return builder.CalculateRequiredCollateral(ddAmount, LOCK_DAYS_FOR_TIER[lockTier]);
 }
 

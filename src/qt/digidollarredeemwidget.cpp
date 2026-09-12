@@ -14,11 +14,14 @@
 #include <wallet/digidollarwallet.h>
 #include <consensus/amount.h>
 #include <consensus/err.h>
+#include <chainparams.h>
+#include <digidollar/digidollar.h>
 #include <univalue.h>
 #include <logging.h>
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -538,14 +541,27 @@ void DigiDollarRedeemWidget::onRedeemClicked()
     // Calculate required DD burn based on system health (ERR check)
     // Need to query system health to determine if ERR is active
     double requiredDDBurn = m_positionDDMinted; // Start with original minted amount
+    const bool candidateHealth = m_clientModel && DigiDollar::IsThawDayActive(
+        Params().GetConsensus(), m_clientModel->getNumBlocks() + 1);
 
     try {
-        // Query system health status via RPC (using getdigidollarstats)
+        // Activated redemption needs canonical health independently of circulating supply.
         UniValue params(UniValue::VARR);
-        UniValue healthResult = m_walletModel->executeRpc("getdigidollarstats", params);
+        UniValue healthResult = m_walletModel->executeRpc(
+            candidateHealth ? "getprotectionstatus" : "getdigidollarstats", params);
+        if (candidateHealth && !healthResult.isObject())
+            throw std::runtime_error("Candidate health is unavailable");
 
         if (healthResult.isObject()) {
-            int systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            int systemHealth;
+            if (candidateHealth) {
+                const UniValue& next = healthResult.find_value("next_block_health");
+                if (!next.isObject() || !next.find_value("ready").get_bool())
+                    throw std::runtime_error("Candidate health is unavailable");
+                systemHealth = next.find_value("health_percentage").getInt<int>();
+            } else {
+                systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            }
 
             // If system health < 100%, ERR is active and we need MORE DD to redeem
             if (systemHealth < 100) {
@@ -556,9 +572,17 @@ void DigiDollarRedeemWidget::onRedeemClicked()
             }
         }
     } catch (const UniValue& objError) {
+        if (candidateHealth) {
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), QMessageBox::Warning);
+            return;
+        }
         LogPrintf("DigiDollar Qt: Failed to query system health (RPC error) - assuming normal redemption\n");
         // On error, proceed with normal redemption calculation
     } catch (const std::exception& e) {
+        if (candidateHealth) {
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), QMessageBox::Warning);
+            return;
+        }
         LogPrintf("DigiDollar Qt: Failed to query system health - %s (assuming normal redemption)\n", e.what());
         // On error, proceed with normal redemption calculation
     }
@@ -983,14 +1007,27 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
 
     // Calculate required DD burn based on system health
     double requiredDDBurn = m_positionDDMinted; // Default: normal redemption
+    const bool candidateHealth = m_clientModel && DigiDollar::IsThawDayActive(
+        Params().GetConsensus(), m_clientModel->getNumBlocks() + 1);
 
     try {
-        // Query system health status via RPC (using getdigidollarstats)
+        // Activated redemption needs canonical health independently of circulating supply.
         UniValue params(UniValue::VARR);
-        UniValue healthResult = m_walletModel->executeRpc("getdigidollarstats", params);
+        UniValue healthResult = m_walletModel->executeRpc(
+            candidateHealth ? "getprotectionstatus" : "getdigidollarstats", params);
+        if (candidateHealth && !healthResult.isObject())
+            throw std::runtime_error("Candidate health is unavailable");
 
         if (healthResult.isObject()) {
-            int systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            int systemHealth;
+            if (candidateHealth) {
+                const UniValue& next = healthResult.find_value("next_block_health");
+                if (!next.isObject() || !next.find_value("ready").get_bool())
+                    throw std::runtime_error("Candidate health is unavailable");
+                systemHealth = next.find_value("health_percentage").getInt<int>();
+            } else {
+                systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            }
 
             // If system health < 100%, ERR is active and we need MORE DD to redeem
             if (systemHealth < 100) {
@@ -998,9 +1035,11 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
             }
         }
     } catch (const UniValue& objError) {
+        if (candidateHealth) return false;
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance (RPC error)\n");
     } catch (const std::exception& e) {
+        if (candidateHealth) return false;
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance - %s\n", e.what());
     }

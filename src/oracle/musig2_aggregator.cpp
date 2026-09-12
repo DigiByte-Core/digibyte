@@ -16,16 +16,14 @@
 
 namespace {
 
-int ConfiguredMuSig2Threshold()
+int ConfiguredMuSig2Threshold(const Consensus::Params& consensus)
 {
-    const Consensus::Params& consensus = Params().GetConsensus();
     if (consensus.nOracleConsensusRequired > 0) return consensus.nOracleConsensusRequired;
     return ORACLE_CONSENSUS_REQUIRED;
 }
 
-uint16_t ConfiguredMuSig2BitmapSlots()
+uint16_t ConfiguredMuSig2BitmapSlots(const Consensus::Params& consensus)
 {
-    const Consensus::Params& consensus = Params().GetConsensus();
     const int configured_total = std::max(consensus.nOracleTotalOracles, consensus.nOraclePubkeyCount);
     if (configured_total <= 0 || configured_total > 256) return 0;
     return static_cast<uint16_t>(configured_total);
@@ -83,7 +81,7 @@ std::vector<unsigned char> MuSig2OracleAggregator::EncodeBitmap(
     const std::vector<uint8_t>& oracle_ids, uint16_t total_oracles)
 {
     if (oracle_ids.empty()) return {};
-    if (static_cast<int>(oracle_ids.size()) < ConfiguredMuSig2Threshold()) return {};
+    if (static_cast<int>(oracle_ids.size()) < ConfiguredMuSig2Threshold(Params().GetConsensus())) return {};
     if (total_oracles == 0 || total_oracles > 256) return {};
 
     size_t num_bytes = (total_oracles + 7) / 8;
@@ -134,19 +132,26 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkey(
     secp256k1_xonly_pubkey& agg_pk,
     secp256k1_musig_keyagg_cache& cache)
 {
+    return ComputeAggregatePubkey(oracle_ids, Params().GetConsensus(), agg_pk, cache);
+}
+
+bool MuSig2OracleAggregator::ComputeAggregatePubkey(
+    const std::vector<uint8_t>& oracle_ids,
+    const Consensus::Params& consensus,
+    secp256k1_xonly_pubkey& agg_pk,
+    secp256k1_musig_keyagg_cache& cache)
+{
     // Sort and deduplicate oracle IDs for deterministic aggregation
     std::vector<uint8_t> sorted_ids = oracle_ids;
     std::sort(sorted_ids.begin(), sorted_ids.end());
     sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
 
-    const Consensus::Params& consensus = Params().GetConsensus();
-    const auto& nodes = Params().GetOracleNodes();
-    int required = std::max(1, ConfiguredMuSig2Threshold());
+    int required = std::max(1, ConfiguredMuSig2Threshold(consensus));
     if (static_cast<int>(sorted_ids.size()) < required) return false;
 
-    uint16_t total = ConfiguredMuSig2BitmapSlots();
+    uint16_t total = ConfiguredMuSig2BitmapSlots(consensus);
     if (total == 0) return false;
-    if (nodes.size() < static_cast<size_t>(total)) return false;
+    if (consensus.vOracleCompressedPublicKeys.size() < static_cast<size_t>(total)) return false;
     if (consensus.nOraclePubkeyCount <= 0 ||
         consensus.vOraclePublicKeys.size() < static_cast<size_t>(consensus.nOraclePubkeyCount)) {
         return false;
@@ -157,7 +162,7 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkey(
     if (bitmap.empty()) return false;
 
     // Check cache first
-    uint256 hash = ComputeBitmapHash(bitmap);
+    uint256 hash = ComputeCacheHash(bitmap, consensus);
     {
         LOCK(m_cache_mutex);
         auto it = m_cache.find(hash);
@@ -168,7 +173,7 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkey(
         }
     }
 
-    // Look up and parse compressed pubkeys from chainparams
+    // Full points, including parity, belong to the supplied parameter snapshot.
     std::vector<secp256k1_pubkey> pubkeys;
     pubkeys.reserve(sorted_ids.size());
     for (uint8_t id : sorted_ids) {
@@ -177,16 +182,22 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkey(
                      id, consensus.nOraclePubkeyCount);
             return false;
         }
-        const CPubKey& cpk = nodes[id].pubkey;
-        if (!cpk.IsValid()) {
-            LogPrintf("Oracle: ComputeAggregatePubkey: oracle %d pubkey invalid, size=%u\n", id, cpk.size());
+        const auto& compressed = consensus.vOracleCompressedPublicKeys[id];
+        if (compressed.size() != CPubKey::COMPRESSED_SIZE ||
+            (compressed[0] != 0x02 && compressed[0] != 0x03)) {
+            LogPrintf("Oracle: ComputeAggregatePubkey: oracle %d compressed pubkey invalid\n", id);
+            return false;
+        }
+        const auto xonly = ParseHex(consensus.vOraclePublicKeys[id]);
+        if (xonly.size() != 32 || !std::equal(xonly.begin(), xonly.end(), compressed.begin() + 1)) {
+            LogPrintf("Oracle: ComputeAggregatePubkey: oracle %d compressed and x-only keys differ\n", id);
             return false;
         }
 
         secp256k1_pubkey pk;
-        if (!secp256k1_ec_pubkey_parse(m_ctx, &pk, cpk.data(), cpk.size())) {
+        if (!secp256k1_ec_pubkey_parse(m_ctx, &pk, compressed.data(), compressed.size())) {
             LogPrintf("Oracle: ComputeAggregatePubkey: secp256k1_ec_pubkey_parse failed for oracle %d, key=%s\n",
-                     id, HexStr(Span<const unsigned char>(cpk.data(), cpk.size())));
+                     id, HexStr(compressed));
             return false;
         }
         pubkeys.push_back(pk);
@@ -242,6 +253,18 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkeyFromBitmap(
     return ComputeAggregatePubkey(oracle_ids, agg_pk, cache);
 }
 
+bool MuSig2OracleAggregator::ComputeAggregatePubkeyFromBitmap(
+    const std::vector<unsigned char>& bitmap,
+    const Consensus::Params& params,
+    secp256k1_xonly_pubkey& agg_pk,
+    secp256k1_musig_keyagg_cache& cache)
+{
+    if (params.nOracleTotalOracles <= 0 || params.nOracleTotalOracles > 256) return false;
+    const auto oracle_ids = DecodeBitmap(bitmap, static_cast<uint16_t>(params.nOracleTotalOracles));
+    if (oracle_ids.empty()) return false;
+    return ComputeAggregatePubkey(oracle_ids, params, agg_pk, cache);
+}
+
 bool MuSig2OracleAggregator::AggregatePubkeys(
     const secp256k1_pubkey* const* pubkeys,
     size_t n_pubkeys,
@@ -256,7 +279,15 @@ bool MuSig2OracleAggregator::GetCachedAggregatePubkey(
     const std::vector<unsigned char>& bitmap,
     secp256k1_xonly_pubkey& agg_pk)
 {
-    uint256 hash = ComputeBitmapHash(bitmap);
+    return GetCachedAggregatePubkey(bitmap, Params().GetConsensus(), agg_pk);
+}
+
+bool MuSig2OracleAggregator::GetCachedAggregatePubkey(
+    const std::vector<unsigned char>& bitmap,
+    const Consensus::Params& params,
+    secp256k1_xonly_pubkey& agg_pk)
+{
+    uint256 hash = ComputeCacheHash(bitmap, params);
     LOCK(m_cache_mutex);
     auto it = m_cache.find(hash);
     if (it == m_cache.end()) return false;
@@ -270,7 +301,13 @@ void MuSig2OracleAggregator::ClearCache()
     m_cache.clear();
 }
 
-uint256 MuSig2OracleAggregator::ComputeBitmapHash(const std::vector<unsigned char>& bitmap)
+uint256 MuSig2OracleAggregator::ComputeCacheHash(const std::vector<unsigned char>& bitmap,
+                                               const Consensus::Params& params)
 {
-    return Hash(bitmap);
+    CHashWriter hash(0);
+    hash << params.hashGenesisBlock;
+    hash << params.nOracleTotalOracles << params.nOraclePubkeyCount << params.nOracleConsensusRequired;
+    hash << params.vOraclePublicKeys << params.vOracleCompressedPublicKeys;
+    hash << bitmap;
+    return hash.GetHash();
 }

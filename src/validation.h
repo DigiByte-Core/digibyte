@@ -494,6 +494,10 @@ enum class CoinsCacheSizeState
  */
 class Chainstate
 {
+private:
+    DisconnectResult DisconnectBlockInternal(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
+                                             bool fJustCheck, bool recovery) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 protected:
     /**
      * The ChainState Mutex
@@ -525,6 +529,9 @@ protected:
     //! In the unlikely case that the snapshot chainstate is found to be invalid, this
     //! is set to true on the snapshot chainstate.
     bool m_disabled GUARDED_BY(::cs_main) {false};
+
+    //! A cold activated chain has no live legacy baseline until it crosses back.
+    bool m_dd_legacy_restore_needed GUARDED_BY(::cs_main) {false};
 
     //! Cached result of LookupBlockIndex(*m_from_snapshot_blockhash)
     const CBlockIndex* m_cached_snapshot_base GUARDED_BY(::cs_main) {nullptr};
@@ -730,6 +737,9 @@ public:
 
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Verify canonical DD state, replaying previously unchecked activated history. */
+    bool InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();

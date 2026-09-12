@@ -7,6 +7,7 @@
 #define DIGIBYTE_COINS_H
 
 #include <compressor.h>
+#include <consensus/digidollar_state.h>
 #include <core_memusage.h>
 #include <memusage.h>
 #include <primitives/transaction.h>
@@ -19,6 +20,7 @@
 #include <stdint.h>
 
 #include <functional>
+#include <optional>
 #include <unordered_map>
 
 /**
@@ -161,6 +163,8 @@ public:
 
     virtual bool Valid() const = 0;
     virtual void Next() = 0;
+    //! Distinguish a complete scan from an iterator or key decoding failure.
+    virtual void CheckStatus() const {}
 
     //! Get best block at the time this cursor was created
     const uint256 &GetBestBlock() const { return hashBlock; }
@@ -184,6 +188,9 @@ public:
     //! Retrieve the block hash whose state this CCoinsView currently represents
     virtual uint256 GetBestBlock() const;
 
+    //! Derived health record for this exact view, or not ready.
+    virtual std::optional<DigiDollar::ChainstateHealth> GetDigiDollarState() const;
+
     //! Retrieve the range of blocks that may have been only partially written.
     //! If the database is in a consistent state, the result is the empty vector.
     //! Otherwise, a two-element vector is returned consisting of the new and
@@ -192,7 +199,7 @@ public:
 
     //! Do a bulk modification (multiple Coin changes + BestBlock change).
     //! The passed mapCoins can be modified.
-    virtual bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true);
+    virtual bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true, const std::optional<DigiDollar::ChainstateHealth>& dd_state = std::nullopt);
 
     //! Get a cursor to iterate over the whole state
     virtual std::unique_ptr<CCoinsViewCursor> Cursor() const;
@@ -216,9 +223,10 @@ public:
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
+    std::optional<DigiDollar::ChainstateHealth> GetDigiDollarState() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     void SetBackend(CCoinsView &viewIn);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true) override;
+    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true, const std::optional<DigiDollar::ChainstateHealth>& dd_state = std::nullopt) override;
     std::unique_ptr<CCoinsViewCursor> Cursor() const override;
     size_t EstimateSize() const override;
 };
@@ -236,6 +244,8 @@ protected:
      * declared as "const".
      */
     mutable uint256 hashBlock;
+    mutable bool m_dd_state_loaded{false};
+    mutable std::optional<DigiDollar::ChainstateHealth> m_dd_state;
     mutable CCoinsMapMemoryResource m_cache_coins_memory_resource{};
     mutable CCoinsMap cacheCoins;
 
@@ -255,10 +265,11 @@ public:
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     void SetBestBlock(const uint256 &hashBlock);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true) override;
-    std::unique_ptr<CCoinsViewCursor> Cursor() const override {
-        throw std::logic_error("CCoinsViewCache cursor iteration not supported.");
-    }
+    std::optional<DigiDollar::ChainstateHealth> GetDigiDollarState() const override;
+    void SetDigiDollarState(std::optional<DigiDollar::ChainstateHealth> state);
+    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true, const std::optional<DigiDollar::ChainstateHealth>& dd_state = std::nullopt) override;
+    //! Snapshot the cache overlay as well as its backing cursor. Order is unspecified.
+    std::unique_ptr<CCoinsViewCursor> Cursor() const override;
 
     /**
      * Check if we have the given utxo already loaded in this cache.

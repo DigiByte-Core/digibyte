@@ -104,6 +104,7 @@ private Q_SLOTS:
     void redeemWidgetButtonStateLockedWallet();
     void redeemWidgetRefreshesWhenWalletUnlocks();
     void redeemWidgetButtonStateReady();
+    void redeemWidgetCanonicalHealthDoesNotRequireCirculatingSupply();
     void positionsWidgetLockedTooltipShowsRemainingBlocksAndTime();
     void positionsWidgetPendingMintButtonNotRedeemed();
     void positionsWidgetPendingRedeemButtonNotRedeemed();

@@ -79,7 +79,8 @@ struct TxBuilderRedeemParams {
     CAmount ddToRedeem;             // Amount of DD to burn
     RedemptionPath path;            // Which redemption path to use
     CKey ownerKey;                  // Owner's private key (for signing collateral input)
-    CAmount feeRate;                // Fee rate in sat/vB
+    CAmount feeRate;                // Fee rate in sat/kB
+    CAmount minimumFee{0};          // Fee measured after signing a prior construction attempt
     std::vector<COutPoint> ddUtxos; // DD UTXOs to burn
     std::vector<CAmount> ddAmounts;  // DD amounts for each UTXO (parallel to ddUtxos)
     std::vector<COutPoint> feeUtxos; // DGB UTXOs for fees
@@ -122,6 +123,7 @@ protected:
     const CChainParams& chainParams;
     int currentHeight;
     CAmount oraclePrice;
+    std::optional<int> candidateHealth;
 
     // Helper functions
     CAmount CalculateFee(const CMutableTransaction& tx, CAmount feeRate) const;
@@ -138,6 +140,9 @@ protected:
 public:
     TxBuilder(const CChainParams& params, int height, CAmount price);
     virtual ~TxBuilder() = default;
+
+    /** Supply health verified for this builder's candidate height and quote. */
+    void SetCandidateHealth(int health) { candidateHealth = health; }
 
     // Validation helpers
     bool ValidateAmount(CAmount amount) const;

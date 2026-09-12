@@ -6,6 +6,7 @@
 #define DIGIBYTE_DIGIDOLLAR_HEALTH_H
 
 #include <consensus/amount.h>
+#include <consensus/digidollar_state.h>
 #include <primitives/block.h>
 #include <univalue/include/univalue.h>
 #include <uint256.h>
@@ -15,9 +16,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <functional>
+#include <optional>
 
 // Forward declarations
 class CCoinsView;
+class Coin;
 class CTxMemPool;
 class ChainstateManager;
 class CChain;
@@ -35,6 +39,57 @@ namespace wallet {
 }
 
 namespace DigiDollar {
+
+using CanonicalTxLookup = std::function<bool(const uint256&, uint32_t, CTransactionRef&)>;
+
+struct CanonicalVault {
+    COutPoint outpoint;
+    CAmount principal{0};
+    CAmount collateral{0};
+};
+
+enum class VaultLookupResult { NOT_VAULT, VAULT, NOT_READY };
+
+/** Resolve identity from the creating transaction on the supplied ancestry.
+ * A missing eligible creating transaction is a local readiness failure.
+ */
+VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& coin,
+                                      const Consensus::Params& params,
+                                      const CanonicalTxLookup& lookup,
+                                      CanonicalVault& vault, std::string& error);
+
+/** Reconstruct from a consistent UTXO view. This never establishes history proof
+ * and never mutates either the view or the legacy health monitor.
+ */
+bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params& params,
+                                const CanonicalTxLookup& lookup,
+                                ChainstateHealth& health, std::string& error,
+                                const std::function<bool()>& interrupted = {},
+                                CAmount* circulating_supply = nullptr);
+
+/** Apply or undo a transaction using the original amounts of its creating vaults. */
+bool UpdateChainstateHealth(const CTransaction& tx, const std::vector<Coin>& inputs,
+                           const Consensus::Params& params, const CanonicalTxLookup& lookup,
+                           ChainstateHealth& health, bool undo, std::string& error,
+                           uint32_t creating_height = std::numeric_limits<uint32_t>::max());
+
+enum class SupplyChangeResult { KNOWN, UNKNOWN_METADATA, FAILURE };
+
+/** Reporting only: inspect all token sources, distinguishing unavailable amounts
+ * in retained metadata from missing or inconsistent physical source data.
+ * Only KNOWN assigns change. An unknown amount never becomes a numeric delta.
+ */
+SupplyChangeResult GetCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                             uint32_t height, const Consensus::Params& params,
+                                             const CanonicalTxLookup& lookup, CAmount& change, std::string& error);
+
+/** Strict reporting wrapper: succeeds only when the complete delta is known. */
+bool CalculateCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                     uint32_t height, const Consensus::Params& params,
+                                     const CanonicalTxLookup& lookup, CAmount& change, std::string& error);
+
+/** The common post-activation health formula, without global ERR or price state. */
+std::optional<int> CalculateChainstateHealth(const ChainstateHealth& state, CAmount price_micro_usd);
 
 /**
  * System-wide health metrics structure
@@ -224,6 +279,12 @@ public:
     static void ResetMetrics() {
         std::lock_guard<std::mutex> lock(s_metricsMutex); // RH-44
         s_currentMetrics = SystemMetrics();
+    }
+
+    /** Restore metrics when legacy baseline reconstruction fails before publication. */
+    static void RestoreLegacyMetrics(const SystemMetrics& metrics) {
+        std::lock_guard<std::mutex> lock(s_metricsMutex);
+        s_currentMetrics = metrics;
     }
 
     /** Set metrics directly for unit tests that need deterministic cached totals */

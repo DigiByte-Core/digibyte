@@ -12,6 +12,7 @@
 #include <qt/digibyteunits.h>
 #include <consensus/amount.h>
 #include <consensus/digidollar.h>
+#include <digidollar/digidollar.h>
 #include <digidollar/txbuilder.h>
 #include <logging.h>
 #include <node/interface_ui.h>
@@ -363,6 +364,12 @@ void DigiDollarMintWidget::setupCollateralSection()
     m_collateralLayout->addWidget(m_availableDGBLabel, 5, 0);
     m_collateralLayout->addWidget(m_availableDGBValue, 5, 1);
 
+    m_mintStatusLabel = new QLabel(this);
+    m_mintStatusLabel->setObjectName("mintVolatilityStatus");
+    m_mintStatusLabel->setWordWrap(true);
+    m_mintStatusLabel->hide();
+    m_collateralLayout->addWidget(m_mintStatusLabel, 6, 0, 1, 2);
+
     m_mainLayout->addWidget(m_collateralFrame);
 }
 
@@ -486,7 +493,43 @@ void DigiDollarMintWidget::updateOraclePrice()
     LogPrintf("DigiDollar Mint: ChainType = %d (REGTEST=%d, TESTNET=%d, MAIN=%d)\n",
               (int)chainType, (int)ChainType::REGTEST, (int)ChainType::TESTNET, (int)ChainType::MAIN);
 
-    if (chainType == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
+    m_mintVolatilityAllowed = true;
+    m_mintStatusLabel->hide();
+    if (m_clientModel && DigiDollar::IsThawDayActive(Params().GetConsensus(), m_clientModel->getNumBlocks() + 1)) {
+        m_mintVolatilityAllowed = false;
+        m_oraclePrice = 0;
+        m_mintStatusLabel->show();
+        try {
+            UniValue rpc_params(UniValue::VARR);
+            const UniValue result = m_clientModel->node().executeRpc("getoracleprice", rpc_params, "");
+            const UniValue& status = result.find_value("mint_volatility");
+            const bool ready = status.find_value("ready").get_bool();
+            const bool quoted = status.find_value("quote_available").get_bool();
+            const bool restricted = status.find_value("minting_restricted").get_bool();
+            m_oraclePrice = status.find_value("candidate_price_micro_usd").getInt<int64_t>() / 1000000.0;
+            const UniValue protection = m_clientModel->node().executeRpc("getprotectionstatus", rpc_params, "");
+            const UniValue& health = protection.find_value("next_block_health");
+            const bool healthReady = health.find_value("ready").get_bool();
+            const bool emergency = healthReady && health.find_value("health_percentage").getInt<int>() < 100;
+            m_mintVolatilityAllowed = ready && quoted && !restricted && healthReady && !emergency;
+            const QString reason = !quoted ? tr("No valid oracle quote; minting is paused.") :
+                (!ready ? tr("Required price history is unavailable; restore or download the missing blocks.") :
+                (restricted ? tr("Minting is paused: the quote differs by at least 20% from the ancestor reference.") :
+                 tr("Quote is within the mint volatility limit. Health, collateral and fees must also pass.")));
+            m_mintStatusLabel->setText(!healthReady ? tr("Canonical health is unavailable; wait for synchronization and retry.") :
+                (emergency ? tr("Minting is paused by emergency health calculated from open vaults.") : reason));
+            m_mintStatusLabel->setToolTip(tr("Candidate height: %1\nRule version: %2\nReference: %3 micro-USD\nSamples: %4\nWindow: %5 through %6\nDeviation: %7 basis points\nConfirmation conditions may change.")
+                .arg(status.find_value("candidate_height").getInt<int>())
+                .arg(status.find_value("rule_version").getInt<int>())
+                .arg(status.find_value("reference_price_micro_usd").getInt<int64_t>())
+                .arg(status.find_value("sample_count").getInt<int>())
+                .arg(status.find_value("window_start_height").getInt<int>())
+                .arg(status.find_value("window_end_height").getInt<int>())
+                .arg(status.find_value("deviation_bps").getInt<int64_t>()));
+        } catch (...) {
+            m_mintStatusLabel->setText(tr("Mint eligibility is unavailable. Wait for synchronization and try again."));
+        }
+    } else if (chainType == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
         // BUG #6 FIX: GetCurrentPrice() returns micro-USD, not cents
         CAmount priceMicroUsd = MockOracleManager::GetInstance().GetCurrentPrice();
         m_oraclePrice = priceMicroUsd / 1000000.0;
@@ -921,7 +964,7 @@ void DigiDollarMintWidget::updateMintButton()
     LogPrintf("DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
               amountValid, collateralValid, m_requiredCollateral, m_availableDGBBalance, m_oraclePrice);
 
-    m_mintButton->setEnabled(amountValid && collateralValid);
+    m_mintButton->setEnabled(amountValid && collateralValid && m_mintVolatilityAllowed);
 }
 
 void DigiDollarMintWidget::updateCollateralCalculation()
@@ -958,6 +1001,18 @@ void DigiDollarMintWidget::calculateRequiredCollateral()
         const CAmount ddAmountCents = static_cast<CAmount>(std::llround(m_mintAmount * 100));
         const CAmount oraclePriceMicroUSD = static_cast<CAmount>(std::llround(m_oraclePrice * 1000000.0));
         const int currentHeight = m_clientModel ? m_clientModel->getNumBlocks() : 0;
+        if (DigiDollar::IsThawDayActive(Params().GetConsensus(), currentHeight + 1)) {
+            m_requiredCollateral = 0;
+            try {
+                UniValue params(UniValue::VARR);
+                params.push_back(ddAmountCents);
+                params.push_back(LOCK_DAYS_FOR_TIER[m_selectedTier]);
+                const UniValue quote = m_clientModel->node().executeRpc("calculatecollateralrequirement", params, "");
+                m_requiredCollateral = quote.find_value("wallet_collateral_dgb").get_real();
+                m_collateralRatio = quote.find_value("effective_ratio").getInt<int>();
+            } catch (...) { m_mintVolatilityAllowed = false; }
+            return;
+        }
         DigiDollar::MintTxBuilder builder(Params(), currentHeight, oraclePriceMicroUSD);
         const CAmount requiredCollateralSats = builder.CalculateRequiredCollateral(ddAmountCents, LOCK_DAYS_FOR_TIER[m_selectedTier]);
         m_requiredCollateral = requiredCollateralSats > 0 ? requiredCollateralSats / static_cast<double>(COIN) : 0.0;

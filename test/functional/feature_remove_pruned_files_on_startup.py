@@ -10,7 +10,8 @@ from test_framework.test_framework import DigiByteTestFramework
 class FeatureRemovePrunedFilesOnStartupTest(DigiByteTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [["-fastprune", "-prune=1"]]
+        # Exercise file removal without the DigiDollar history retention lock.
+        self.extra_args = [["-fastprune", "-prune=1", "-digidollaractivationheight=2147483646"]]
 
     def mine_batches(self, blocks):
         n = blocks // 250

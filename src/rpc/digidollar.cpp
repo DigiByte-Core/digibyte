@@ -20,6 +20,7 @@
 #include <oracle/musig2_aggregator.h>
 #include <consensus/digidollar.h>
 #include <consensus/dca.h>
+#include <consensus/merkle.h>
 #include <consensus/err.h>
 #include <consensus/volatility.h>
 #include <digidollar/digidollar.h>
@@ -31,6 +32,7 @@
 #include <logging.h>
 #include <node/context.h>
 #include <core_io.h>
+#include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <validation.h>
 #include <versionbits.h>
@@ -400,6 +402,115 @@ namespace {
     }
 #endif
 
+    struct CandidateHealthQuote {
+        bool active{false};
+        bool ready{false};
+        int height{0};
+        int health{-1};
+        CAmount price{0};
+        ChainstateHealth canonical;
+        std::string error;
+    };
+
+    CandidateHealthQuote GetCandidateHealthQuote(ChainstateManager& chainman)
+    {
+        LOCK(cs_main);
+        CandidateHealthQuote result;
+        const CBlockIndex* parent = chainman.ActiveChain().Tip();
+        result.height = parent ? parent->nHeight + 1 : 0;
+        result.active = IsThawDayActive(chainman.GetConsensus(), result.height);
+        if (!result.active) return result;
+        result.ready = GetNextBlockOracleQuote(parent, chainman.GetConsensus(), chainman.m_blockman,
+                                               result.price, result.error) &&
+            GetChainstateHealthForNextBlock(parent, chainman.GetConsensus(), chainman.m_blockman,
+                                            chainman.ActiveChainstate().CoinsTip(), result.price,
+                                            result.health, result.canonical, result.error,
+                                            [&chainman] { return bool(chainman.m_interrupt); });
+        return result;
+    }
+
+    void RequireCandidateHealth(const CandidateHealthQuote& candidate)
+    {
+        if (candidate.active && !candidate.ready) throw JSONRPCError(RPC_MISC_ERROR,
+            candidate.error.empty() ? "DigiDollar candidate health state not ready" : candidate.error);
+    }
+
+    void RecheckCandidateHealth(ChainstateManager& chainman, const CandidateHealthQuote& previous)
+    {
+        if (!previous.active) return;
+        const auto current = GetCandidateHealthQuote(chainman);
+        RequireCandidateHealth(current);
+        if (current.height != previous.height || current.price != previous.price ||
+            current.canonical != previous.canonical) {
+            throw JSONRPCError(RPC_MISC_ERROR,
+                "Candidate chain state or oracle quote changed; retry transaction construction with the current collateral and burn requirements");
+        }
+    }
+
+    UniValue CanonicalHealthJSON(const std::optional<ChainstateHealth>& state, bool ready)
+    {
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("ready", ready);
+        if (state) {
+            result.pushKV("format_version", state->format_version);
+            result.pushKV("rules_version", state->rules_version);
+            result.pushKV("activation_height", state->activation_height);
+            result.pushKV("digidollar_height", state->digidollar_height);
+            result.pushKV("genesis_hash", state->genesis_hash.GetHex());
+            result.pushKV("block_hash", state->best_block.GetHex());
+            result.pushKV("open_vault_principal", int64_t{state->open_vault_principal});
+            result.pushKV("collateral", int64_t{state->collateral});
+            result.pushKV("active_vaults", state->active_vaults);
+            result.pushKV("history_checked", state->history_checked);
+        }
+        return result;
+    }
+
+    UniValue NextBlockHealthJSON(ChainstateManager& chainman, int legacy_health,
+                                 CAmount legacy_supply, CAmount legacy_price,
+                                 const CandidateHealthQuote* snapshot = nullptr)
+    {
+        const auto candidate = snapshot ? *snapshot : GetCandidateHealthQuote(chainman);
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("candidate_height", candidate.height);
+        result.pushKV("rule_version", candidate.active ? 1 : 0);
+        result.pushKV("ready", candidate.active ? candidate.ready : legacy_price > 0);
+        result.pushKV("selected_health_denominator", candidate.active ? "open_vault_principal" : "legacy_supply");
+        result.pushKV("health_denominator_cents", candidate.active ?
+            (candidate.ready ? UniValue(candidate.canonical.open_vault_principal) : UniValue()) : (legacy_supply < 0 ? UniValue() : UniValue(legacy_supply)));
+        result.pushKV("health_percentage", candidate.active ? candidate.health : legacy_health);
+        result.pushKV("oracle_price_micro_usd", int64_t{candidate.active ? candidate.price : legacy_price});
+        result.pushKV("oracle_price_source", candidate.active ? "next_block_signed_bundle" : "legacy_display_quote");
+        result.pushKV("minting_restricted", candidate.active ? (!candidate.ready || candidate.health < 100) :
+            (legacy_price <= 0 || legacy_health < 100));
+        result.pushKV("rejection_reason", candidate.active && !candidate.ready ? "health_state_not_ready" :
+            (candidate.active && candidate.health < 100 ? "err_active" : "none"));
+        result.pushKV("data_error", candidate.error);
+        result.pushKV("canonical_health", CanonicalHealthJSON(candidate.ready ?
+            std::optional<ChainstateHealth>{candidate.canonical} : std::nullopt, candidate.ready));
+        return result;
+    }
+
+    void AddHealthReporting(UniValue& result, ChainstateManager& chainman,
+                            int legacy_health, CAmount legacy_supply, CAmount legacy_price,
+                            const CandidateHealthQuote* snapshot = nullptr)
+    {
+        LOCK(cs_main);
+        const auto* tip = chainman.ActiveChain().Tip();
+        const bool active = tip && IsThawDayActive(chainman.GetConsensus(), tip->nHeight);
+        const auto state = chainman.ActiveChainstate().CoinsTip().GetDigiDollarState();
+        const bool ready = tip && state && state->Matches(chainman.GetConsensus().hashGenesisBlock, tip->GetBlockHash(),
+                    chainman.GetConsensus().nDDThawDayHeight, chainman.GetConsensus().DigiDollarHeight) &&
+            (!active || state->history_checked);
+        result.pushKV("canonical_health", CanonicalHealthJSON(state, ready));
+        result.pushKV("selected_health_denominator", active ? "open_vault_principal" : "legacy_supply");
+        result.pushKV("health_denominator_cents", active ?
+            (ready ? UniValue(state->open_vault_principal) : UniValue()) : UniValue(legacy_supply));
+        result.pushKV("health_rule_height", tip ? tip->nHeight : 0);
+        result.pushKV("health_oracle_price_source", "latest_display_quote");
+        result.pushKV("next_block_health", NextBlockHealthJSON(chainman, legacy_health, legacy_supply, legacy_price, snapshot));
+    }
+
     struct DigiDollarRpcTotals {
         CAmount total_collateral{0};
         CAmount total_dd{0};
@@ -411,6 +522,74 @@ namespace {
 
         const node::NodeContext& node = EnsureAnyNodeContext(request.context);
         ChainstateManager& chainman = EnsureChainman(node);
+        {
+            LOCK(cs_main);
+            struct CompletedSupply {
+                const Chainstate* chainstate;
+                const CCoinsViewCache* coins;
+                fs::path datadir;
+                ChainstateHealth canonical;
+                CAmount supply;
+            };
+            // Retain only a completed snapshot; every request rechecks its chain
+            // identity and canonical readiness while holding the chain lock.
+            static std::optional<CompletedSupply> cached_supply GUARDED_BY(cs_main);
+            const CBlockIndex* tip = chainman.ActiveChain().Tip();
+            if (tip && IsThawDayActive(chainman.GetConsensus(), tip->nHeight)) {
+                auto& chainstate = chainman.ActiveChainstate();
+                const auto& coins = chainstate.CoinsTip();
+                const auto state = coins.GetDigiDollarState();
+                if (!state || !state->Matches(chainman.GetConsensus().hashGenesisBlock, tip->GetBlockHash(),
+                    chainman.GetConsensus().nDDThawDayHeight, chainman.GetConsensus().DigiDollarHeight) ||
+                    !state->history_checked || coins.GetBestBlock() != tip->GetBlockHash()) {
+                    cached_supply.reset();
+                    throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar canonical health state not ready");
+                }
+                if (cached_supply && (cached_supply->chainstate != &chainstate || cached_supply->coins != &coins ||
+                    cached_supply->datadir != chainman.m_options.datadir || cached_supply->canonical != *state)) {
+                    cached_supply.reset();
+                }
+                totals.total_collateral = state->collateral;
+                if (g_digidollar_stats_index) {
+                    const auto stats = g_digidollar_stats_index->LookUpStats(*tip);
+                    if (stats) { totals.total_dd = stats->total_dd_supply; return totals; }
+                }
+                if (cached_supply) {
+                    totals.total_dd = cached_supply->supply;
+                    return totals;
+                }
+                std::map<uint32_t, CBlock> blocks;
+                const auto lookup = [&](const uint256& txid, uint32_t height, CTransactionRef& tx) {
+                    auto found = blocks.find(height);
+                    if (found == blocks.end()) {
+                        const auto* ancestor = tip->GetAncestor(height);
+                        CBlock block;
+                        if (!ancestor || !chainman.m_blockman.ReadBlockFromDisk(block, *ancestor) ||
+                            block.GetHash() != ancestor->GetBlockHash()) return false;
+                        bool mutated{false};
+                        if (BlockMerkleRoot(block, &mutated) != block.hashMerkleRoot || mutated) return false;
+                        // Limit retained block bodies while visiting UTXOs from arbitrary heights.
+                        static constexpr size_t MAX_LOOKUP_BLOCKS{8};
+                        if (blocks.size() >= MAX_LOOKUP_BLOCKS) blocks.erase(blocks.begin());
+                        found = blocks.emplace(height, std::move(block)).first;
+                    }
+                    for (const auto& candidate : found->second.vtx) {
+                        if (candidate->GetHash() == txid) { tx = candidate; return true; }
+                    }
+                    return false;
+                };
+                ChainstateHealth rebuilt;
+                std::string error;
+                if (!ReconstructChainstateHealth(coins, chainman.GetConsensus(), lookup, rebuilt, error,
+                                                 [&chainman] { return bool(chainman.m_interrupt); }, &totals.total_dd)) {
+                    throw JSONRPCError(RPC_MISC_ERROR, error);
+                }
+                cached_supply = CompletedSupply{&chainstate, &coins, chainman.m_options.datadir, *state, totals.total_dd};
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar stats: reconstructed circulating supply at %s\n", tip->GetBlockHash().ToString());
+                return totals;
+            }
+            cached_supply.reset();
+        }
         if (g_digidollar_stats_index) {
             if (!g_digidollar_stats_index->BlockUntilSyncedToCurrentChain()) {
                 const IndexSummary summary{g_digidollar_stats_index->GetSummary()};
@@ -421,6 +600,7 @@ namespace {
             const CBlockIndex* pindex = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
             if (pindex) {
                 auto stats = g_digidollar_stats_index->LookUpStats(*pindex);
+                if (!stats) throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar circulating supply is unavailable from retained metadata");
                 if (stats) {
                     totals.total_dd = stats->total_dd_supply;
                     totals.total_collateral = stats->total_collateral;
@@ -488,9 +668,16 @@ namespace {
 #endif
 
     int GetDigiDollarRpcSystemHealth(const JSONRPCRequest& request,
-                                     CAmount oracle_price_micro_usd,
+                                     CAmount& oracle_price_micro_usd,
                                      int empty_supply_health)
     {
+        auto& chainman = EnsureAnyChainman(request.context);
+        const auto candidate = GetCandidateHealthQuote(chainman);
+        if (candidate.active) {
+            RequireCandidateHealth(candidate);
+            oracle_price_micro_usd = candidate.price;
+            return candidate.health;
+        }
         DigiDollarRpcTotals totals = GetDigiDollarRpcTotals(request);
         if (totals.total_dd == 0) {
             return empty_supply_health;
@@ -602,6 +789,130 @@ namespace {
     }
 }
 
+static RPCResult CanonicalHealthResult()
+{
+    return {RPCResult::Type::OBJ, "canonical_health", "State tied to the current chain; amounts are available only when ready", {
+        {RPCResult::Type::BOOL, "ready", "Whether the state identity and history proof are usable"},
+        {RPCResult::Type::NUM, "format_version", true, "Storage format version"},
+        {RPCResult::Type::NUM, "rules_version", true, "Accounting rules version"},
+        {RPCResult::Type::NUM, "activation_height", true, "Thaw Day height bound into the record"},
+        {RPCResult::Type::NUM, "digidollar_height", true, "DigiDollar height bound into the record"},
+        {RPCResult::Type::STR_HEX, "genesis_hash", true, "Network identity"},
+        {RPCResult::Type::STR_HEX, "block_hash", true, "Matching UTXO block"},
+        {RPCResult::Type::NUM, "open_vault_principal", true, "Original cents attached to open vaults"},
+        {RPCResult::Type::NUM, "collateral", true, "Satoshis locked in those vaults"},
+        {RPCResult::Type::NUM, "active_vaults", true, "Number of open vaults"},
+        {RPCResult::Type::BOOL, "history_checked", true, "Whether activated history has been checked"},
+    }};
+}
+
+static RPCResult NextBlockHealthResult()
+{
+    return {RPCResult::Type::OBJ, "next_block_health", "Health for next-block construction, separate from tip display health", {
+        {RPCResult::Type::NUM, "candidate_height", "Candidate height"},
+        {RPCResult::Type::NUM, "rule_version", "0 legacy or 1 canonical accounting"},
+        {RPCResult::Type::BOOL, "ready", "Whether state and a quote are available"},
+        {RPCResult::Type::STR, "selected_health_denominator", "open_vault_principal or legacy_supply"},
+        {RPCResult::Type::NUM, "health_denominator_cents", "Selected liability amount, or null if unavailable", {}, true},
+        {RPCResult::Type::NUM, "health_percentage", "Candidate health, or -1 if unavailable"},
+        {RPCResult::Type::NUM, "oracle_price_micro_usd", "Quote used for this candidate"},
+        {RPCResult::Type::STR, "oracle_price_source", "next_block_signed_bundle or legacy_display_quote"},
+        {RPCResult::Type::BOOL, "minting_restricted", "Whether oracle readiness or emergency health blocks minting"},
+        {RPCResult::Type::STR, "rejection_reason", "Health restriction reason"},
+        {RPCResult::Type::STR, "data_error", "Readiness or recovery detail"},
+        CanonicalHealthResult(),
+    }};
+}
+
+static RPCResult MintVolatilityResult(const std::string& name)
+{
+    return {RPCResult::Type::OBJ, name, "Next-block mint volatility eligibility; other mint requirements still apply", {
+        {RPCResult::Type::NUM, "tip_height", "Current tip height"},
+        {RPCResult::Type::NUM, "candidate_height", "Next-block candidate height"},
+        {RPCResult::Type::NUM, "activation_height", "Thaw Day height, or null when disabled", {}, true},
+        {RPCResult::Type::BOOL, "tip_active", "Whether Thaw Day rules apply to the tip"},
+        {RPCResult::Type::BOOL, "next_block_active", "Whether Thaw Day rules apply to the next block"},
+        {RPCResult::Type::NUM, "rule_version", "0 legacy, 1 ancestor-derived mint-only rule"},
+        {RPCResult::Type::BOOL, "quote_available", "Whether a checked quote is available for the candidate"},
+        {RPCResult::Type::NUM, "candidate_price_micro_usd", "Price used for this evaluation"},
+        {RPCResult::Type::BOOL, "ready", "Whether required reference data is available"},
+        {RPCResult::Type::NUM, "reference_price_micro_usd", "Lower median reference, zero for an empty window"},
+        {RPCResult::Type::NUM, "sample_count", "Qualifying ancestor blocks selected"},
+        {RPCResult::Type::NUM, "window_start_height", "Oldest height in the reference window"},
+        {RPCResult::Type::NUM, "window_end_height", "Newest height in the reference window"},
+        {RPCResult::Type::NUM, "deviation_bps", "Absolute deviation in basis points, rounded down for display"},
+        {RPCResult::Type::BOOL, "minting_restricted", "Whether volatility restricts this candidate mint"},
+        {RPCResult::Type::BOOL, "all_operations_restricted", "Always false under the mint-only rule"},
+        {RPCResult::Type::STR, "rejection_reason", "none, oracle_unavailable, volatility_state_not_ready, volatility_pause, or legacy_volatility_freeze"},
+        {RPCResult::Type::STR, "data_error", "Local data or quote availability detail"},
+        {RPCResult::Type::BOOL, "protection_active", "Whether volatility restricts an operation"},
+        {RPCResult::Type::NUM, "current_volatility", "Candidate deviation percent, or legacy monitor volatility"},
+        {RPCResult::Type::NUM, "protection_threshold", "Mint volatility threshold percent"},
+    }};
+}
+
+static UniValue GetMintVolatilityRPC(const ChainstateManager& chainman, CAmount legacy_price = 0,
+                                      const CandidateHealthQuote* snapshot = nullptr)
+{
+    LOCK(cs_main);
+    const CBlockIndex* parent = chainman.ActiveChain().Tip();
+    const auto& params = chainman.GetConsensus();
+    const int tip_height = parent ? parent->nHeight : -1;
+    const int height = tip_height + 1;
+    const bool active = DigiDollar::IsThawDayActive(params, height);
+    Volatility::MintReference reference;
+    Volatility::MintPriceStatus status;
+    CAmount price = legacy_price;
+    std::string data_error;
+    bool all_restricted{false};
+    double current_volatility{0};
+    if (active) {
+        if (snapshot) {
+            price = snapshot->price;
+            if (price <= 0) data_error = snapshot->error;
+        } else {
+            DigiDollar::GetNextBlockOracleQuote(parent, params, chainman.m_blockman, price, data_error);
+        }
+        reference = DigiDollar::GetMintVolatilityReference(parent, params, chainman.m_blockman);
+        status = Volatility::EvaluateMintPrice(price, reference);
+        if (!reference.ready) data_error = reference.error;
+        current_volatility = status.deviation_bps / 100.0;
+    } else {
+        const auto legacy = Volatility::VolatilityMonitor::GetCurrentState();
+        status.ready = true;
+        status.quote_available = price > 0;
+        all_restricted = Volatility::VolatilityMonitor::ShouldFreezeAll();
+        status.restricted = all_restricted || Volatility::VolatilityMonitor::ShouldFreezeMinting() ||
+            Volatility::VolatilityMonitor::WouldCandidateFreezeMinting(price);
+        status.reason = !status.quote_available ? "oracle_unavailable" :
+            (status.restricted ? "legacy_volatility_freeze" : "none");
+        current_volatility = std::max({legacy.hourlyVolatility, legacy.dailyVolatility, legacy.weeklyVolatility});
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("tip_height", tip_height);
+    result.pushKV("candidate_height", height);
+    result.pushKV("activation_height", DigiDollar::IsThawDayScheduled(params) ? UniValue(params.nDDThawDayHeight) : UniValue());
+    result.pushKV("tip_active", DigiDollar::IsThawDayActive(params, tip_height));
+    result.pushKV("next_block_active", active);
+    result.pushKV("rule_version", active ? Volatility::MINT_REFERENCE_RULE_VERSION : 0);
+    result.pushKV("quote_available", status.quote_available);
+    result.pushKV("candidate_price_micro_usd", int64_t{price});
+    result.pushKV("ready", status.ready);
+    result.pushKV("reference_price_micro_usd", int64_t{reference.price_micro_usd});
+    result.pushKV("sample_count", static_cast<int>(reference.sample_count));
+    result.pushKV("window_start_height", active ? reference.window_start_height : 0);
+    result.pushKV("window_end_height", active ? reference.window_end_height : -1);
+    result.pushKV("deviation_bps", status.deviation_bps);
+    result.pushKV("minting_restricted", status.restricted);
+    result.pushKV("all_operations_restricted", all_restricted);
+    result.pushKV("rejection_reason", status.reason);
+    result.pushKV("data_error", data_error);
+    result.pushKV("protection_active", status.restricted || all_restricted);
+    result.pushKV("current_volatility", current_volatility);
+    result.pushKV("protection_threshold", 20);
+    return result;
+}
+
 RPCHelpMan getdigidollarstats()
 {
     return RPCHelpMan{"getdigidollarstats",
@@ -620,7 +931,14 @@ RPCHelpMan getdigidollarstats()
                         {RPCResult::Type::NUM, "oracle_price_micro_usd", "Current DGB/USD price from oracle in micro-USD (1,000,000 = $1.00)"},
                         {RPCResult::Type::BOOL, "oracle_available", "True when a live oracle price is available"},
                         {RPCResult::Type::STR, "oracle_status", "Oracle availability status: available or unavailable"},
-                        {RPCResult::Type::STR, "minting_restricted_reason", "Why minting is restricted: none, oracle_unavailable, or err_active"},
+                        {RPCResult::Type::STR, "minting_restricted_reason", "Mint restriction: oracle availability, reference readiness, volatility, or emergency health"},
+                        MintVolatilityResult("mint_volatility"),
+                        CanonicalHealthResult(),
+                        NextBlockHealthResult(),
+                        {RPCResult::Type::STR, "selected_health_denominator", "Tip rule denominator: legacy_supply or open_vault_principal"},
+                        {RPCResult::Type::NUM, "health_denominator_cents", "Tip health liability amount, or null if unavailable", {}, true},
+                        {RPCResult::Type::NUM, "health_rule_height", "Height selecting top-level displayed health rules"},
+                        {RPCResult::Type::STR, "health_oracle_price_source", "latest_display_quote; next_block_health uses its separately checked quote"},
                         {RPCResult::Type::BOOL, "is_emergency", "True if system is in emergency state (<100% collateralized)"},
                         {RPCResult::Type::NUM, "system_collateral_ratio", "Alias for health_percentage (for backward compatibility)"},
                         {RPCResult::Type::NUM, "total_collateral_locked", "Alias for total_collateral_dgb (in satoshis)"},
@@ -667,6 +985,18 @@ RPCHelpMan getdigidollarstats()
             const node::NodeContext& node = EnsureAnyNodeContext(request.context);
             ChainstateManager& chainman = EnsureChainman(node);
 
+            WAIT_LOCK(cs_main, canonical_lock);
+            const CBlockIndex* healthTip = chainman.ActiveChain().Tip();
+            const bool tipThawActive = healthTip && IsThawDayActive(chainman.GetConsensus(), healthTip->nHeight);
+            if (!tipThawActive) {
+                canonical_lock.unlock();
+                LeaveCritical();
+            }
+            if (tipThawActive) {
+                const auto totals = GetDigiDollarRpcTotals(request);
+                totalCollateral = totals.total_collateral;
+                totalDD = totals.total_dd;
+            } else {
             // Use the DigiDollar stats index for efficient network-wide tracking
             if (g_digidollar_stats_index) {
                 if (!g_digidollar_stats_index->BlockUntilSyncedToCurrentChain()) {
@@ -683,6 +1013,7 @@ RPCHelpMan getdigidollarstats()
 
                 if (pindex) {
                     auto stats = g_digidollar_stats_index->LookUpStats(*pindex);
+                    if (!stats) throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar circulating supply is unavailable from retained metadata");
                     if (stats) {
                         totalDD = stats->total_dd_supply;
                         totalCollateral = stats->total_collateral;
@@ -728,6 +1059,8 @@ RPCHelpMan getdigidollarstats()
                 totalDD = metrics.totalDDSupply;
             }
 
+            }
+
             // Get current oracle price in micro-USD from the real oracle system
             // micro-USD format: 1,000,000 = $1.00, so 6310 = $0.00631
             OracleBundleManager& oracle_manager = OracleBundleManager::GetInstance();
@@ -739,6 +1072,10 @@ RPCHelpMan getdigidollarstats()
                 // MockOracleManager already returns micro-USD (see mock_oracle.cpp)
                 oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
             }
+            const auto nextHealth = GetCandidateHealthQuote(chainman);
+            const UniValue mintVolatility = GetMintVolatilityRPC(chainman, oraclePriceMicroUSD, &nextHealth);
+            const CAmount healthDenominator = tipThawActive ?
+                chainman.ActiveChainstate().CoinsTip().GetDigiDollarState()->open_vault_principal : totalDD;
             const bool oracleAvailable = oraclePriceMicroUSD > 0;
 
             // Convert micro-USD to millicents for CalculateSystemHealth
@@ -752,7 +1089,10 @@ RPCHelpMan getdigidollarstats()
             // Calculate system health
             // IMPORTANT: Return 0% if no DD minted network-wide (instead of default 30000%)
             int systemHealth;
-            if (totalDD == 0) {
+            if (tipThawActive) {
+                const auto canonical = chainman.ActiveChainstate().CoinsTip().GetDigiDollarState();
+                systemHealth = canonical ? CalculateChainstateHealth(*canonical, oraclePriceMicroUSD).value_or(-1) : -1;
+            } else if (healthDenominator == 0) {
                 systemHealth = 0;  // No DD minted = 0% health, not 30000%
             } else {
                 systemHealth = DynamicCollateralAdjustment::CalculateSystemHealth(
@@ -763,9 +1103,12 @@ RPCHelpMan getdigidollarstats()
             auto tier = DynamicCollateralAdjustment::GetCurrentTier(systemHealth);
 
             // Check emergency status
-            bool isEmergency = oracleAvailable && totalDD > 0 && DynamicCollateralAdjustment::IsSystemEmergency(systemHealth);
-            const std::string mintingRestrictedReason = !oracleAvailable ? "oracle_unavailable" :
-                (isEmergency ? "err_active" : "none");
+            bool isEmergency = oracleAvailable && healthDenominator > 0 && DynamicCollateralAdjustment::IsSystemEmergency(systemHealth);
+            const std::string mintingRestrictedReason = nextHealth.active ?
+                (!nextHealth.ready ? "health_state_not_ready" : (nextHealth.health < 100 ? "err_active" :
+                    mintVolatility.find_value("rejection_reason").get_str())) :
+                (!oracleAvailable ? "oracle_unavailable" :
+                    (isEmergency ? "err_active" : mintVolatility.find_value("rejection_reason").get_str()));
 
             UniValue result(UniValue::VOBJ);
             result.pushKV("health_percentage", systemHealth);
@@ -777,6 +1120,7 @@ RPCHelpMan getdigidollarstats()
             result.pushKV("oracle_available", oracleAvailable);
             result.pushKV("oracle_status", oracleAvailable ? "available" : "unavailable");
             result.pushKV("minting_restricted_reason", mintingRestrictedReason);
+            result.pushKV("mint_volatility", mintVolatility);
             result.pushKV("is_emergency", isEmergency);
 
             // Add fields expected by tests
@@ -788,12 +1132,15 @@ RPCHelpMan getdigidollarstats()
             // Without the index (e.g. pruned nodes, where it is off), the
             // UTXO scan performed above in this call counted the live vaults.
             uint64_t activePositions = 0;
-            if (g_digidollar_stats_index) {
+            if (tipThawActive) {
+                activePositions = chainman.ActiveChainstate().CoinsTip().GetDigiDollarState()->active_vaults;
+            } else if (g_digidollar_stats_index) {
                 ChainstateManager& chainman = EnsureAnyChainman(request.context);
                 LOCK(cs_main);
                 const CBlockIndex* pindex = chainman.ActiveChain().Tip();
                 if (pindex) {
                     auto ddstats = g_digidollar_stats_index->LookUpStats(*pindex);
+                    if (!ddstats) throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar circulating supply is unavailable from retained metadata");
                     if (ddstats) {
                         activePositions = ddstats->vault_count;
                     }
@@ -864,6 +1211,7 @@ RPCHelpMan getdigidollarstats()
             errTier.pushKV("description", errDescription);
             result.pushKV("err_tier", errTier);
 
+            AddHealthReporting(result, chainman, systemHealth, totalDD, oraclePriceMicroUSD, &nextHealth);
             return result;
         },
     };
@@ -880,6 +1228,8 @@ static RPCHelpMan getdcamultiplier()
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        NextBlockHealthResult(),
+                        {RPCResult::Type::STR, "health_source", "provided or next_block_rules"},
                         {RPCResult::Type::NUM, "multiplier", "Current DCA multiplier (e.g., 1.0 = no adjustment, 2.0 = double collateral)"},
                         {RPCResult::Type::NUM, "system_health", "System health percentage used for calculation"},
                         {RPCResult::Type::STR, "tier_status", "Health tier: healthy, warning, critical, or emergency"},
@@ -904,6 +1254,7 @@ static RPCHelpMan getdcamultiplier()
                 }
             }
             int systemHealth;
+            CAmount oraclePriceMicroUSD{0};
 
             // Use provided health or calculate current
             if (OptionalParamIsSet(request, 0)) {
@@ -912,7 +1263,7 @@ static RPCHelpMan getdcamultiplier()
                     throw JSONRPCError(RPC_INVALID_PARAMETER, "System health must be between 0 and 30000");
                 }
             } else {
-                CAmount oraclePriceMicroUSD = OracleBundleManager::GetInstance().GetLatestPrice();
+                oraclePriceMicroUSD = OracleBundleManager::GetInstance().GetLatestPrice();
                 if (oraclePriceMicroUSD <= 0 && Params().GetChainType() == ChainType::REGTEST &&
                     MockOracleManager::GetInstance().IsEnabled()) {
                     oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
@@ -938,6 +1289,8 @@ static RPCHelpMan getdcamultiplier()
             result.pushKV("system_health", systemHealth);
             result.pushKV("tier_status", tier.status);
             result.pushKV("description", description);
+            result.pushKV("health_source", OptionalParamIsSet(request, 0) ? "provided" : "next_block_rules");
+            result.pushKV("next_block_health", NextBlockHealthJSON(EnsureAnyChainman(request.context), systemHealth, -1, oraclePriceMicroUSD));
 
             return result;
         },
@@ -954,11 +1307,12 @@ static RPCHelpMan calculatecollateralrequirement()
                 {
                     {"dd_amount_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "DigiDollar amount to mint in cents (e.g., 10000 = $100)"},
                     {"lock_days", RPCArg::Type::NUM, RPCArg::Optional::NO, "Lock period in days. Canonical tiers only: 0 (1 hour testing tier), 30, 90, 180, 365, 730, 1095, 1825, 2555, 3650"},
-                    {"oracle_price", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "DGB price in micro-USD per DGB (1,000,000 = $1.00; uses current price if omitted)"}
+                    {"oracle_price", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "DGB price in micro-USD per DGB (1,000,000 = $1.00; uses current price if omitted; after Thaw Day a supplied value must match the checked next-block quote)"}
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        NextBlockHealthResult(),
                         {RPCResult::Type::STR_AMOUNT, "required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "minimum_required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "wallet_collateral_dgb", "DGB collateral the wallet mint builder will lock, including safety margin"},
@@ -998,6 +1352,8 @@ static RPCHelpMan calculatecollateralrequirement()
             int lockDays = request.params[1].getInt<int>();
 
             // Get oracle price in micro-USD: use provided value or fetch from real oracle system
+            const auto candidate = GetCandidateHealthQuote(EnsureAnyChainman(request.context));
+            RequireCandidateHealth(candidate);
             CAmount oraclePriceMicroUSD;
             if (OptionalParamIsSet(request, 2)) {
                 // User-provided value is in micro-USD (1,000,000 = $1.00)
@@ -1010,7 +1366,7 @@ static RPCHelpMan calculatecollateralrequirement()
                     // Fall back to mock oracle ONLY in regtest
                     oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
                 }
-                if (oraclePriceMicroUSD <= 0) {
+                if (oraclePriceMicroUSD <= 0 && !candidate.active) {
                     throw JSONRPCError(RPC_MISC_ERROR, "No oracle price available. Start the oracle first with startoracle command.");
                 }
             }
@@ -1025,7 +1381,7 @@ static RPCHelpMan calculatecollateralrequirement()
             if (lockDays < 0) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Lock days must be non-negative");
             }
-            if (oraclePriceMicroUSD <= 0) {
+            if (oraclePriceMicroUSD <= 0 && !candidate.active) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Oracle price must be positive");
             }
 
@@ -1062,9 +1418,16 @@ static RPCHelpMan calculatecollateralrequirement()
             // Use the same chain-derived health source as getdcamultiplier().
             // Empty supply is treated as healthy here so the first quote does
             // not inherit an emergency multiplier from the display-only 0% stat.
-            int systemHealth = GetDigiDollarRpcSystemHealth(request, oraclePriceMicroUSD, 30000);
+            if (candidate.active) {
+                if (OptionalParamIsSet(request, 2) && oraclePriceMicroUSD != candidate.price)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Provided price must match the checked next-block quote under activated rules");
+                oraclePriceMicroUSD = candidate.price;
+            }
+            int systemHealth = candidate.active ? candidate.health :
+                GetDigiDollarRpcSystemHealth(request, oraclePriceMicroUSD, 30000);
             double dcaMultiplier = DynamicCollateralAdjustment::GetDCAMultiplier(systemHealth);
-            int effectiveRatio = DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
+            int effectiveRatio = candidate.active ? DynamicCollateralAdjustment::ApplyDCAForHealth(baseRatio, systemHealth) :
+                DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
             auto tier = DynamicCollateralAdjustment::GetCurrentTier(systemHealth);
 
             // Calculate required DGB using micro-USD precision
@@ -1104,6 +1467,8 @@ static RPCHelpMan calculatecollateralrequirement()
             result.pushKV("oracle_price_usd", oraclePriceMicroUSD / 1000000.0);
             result.pushKV("system_health", systemHealth);
             result.pushKV("dca_tier", tier.status);
+            result.pushKV("next_block_health", NextBlockHealthJSON(EnsureAnyChainman(request.context),
+                systemHealth, -1, oraclePriceMicroUSD, &candidate));
 
             return result;
         },
@@ -1392,6 +1757,26 @@ RPCHelpMan mintdigidollar()
                 MockOracleManager::GetInstance().IsEnabled()) {
                 oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
             }
+            // Copy all candidate inputs while the parent is locked, then release it
+            // before wallet construction. Rebroadcast already uses wallet -> chain.
+            const auto candidateHealth = [&] {
+                LOCK(cs_main);
+                auto candidate = GetCandidateHealthQuote(*node_ctx->chainman);
+                RequireCandidateHealth(candidate);
+                if (candidate.active) {
+                    if (candidate.height != mintHeight) throw JSONRPCError(RPC_MISC_ERROR, "Chain height changed; retry mint construction");
+                    const auto reference = GetMintVolatilityReference(node_ctx->chainman->ActiveChain().Tip(),
+                        Params().GetConsensus(), node_ctx->chainman->m_blockman);
+                    const auto status = Volatility::EvaluateMintPrice(candidate.price, reference);
+                    if (!status.ready) throw JSONRPCError(RPC_MISC_ERROR, reference.error);
+                    if (status.restricted) throw JSONRPCError(RPC_MISC_ERROR,
+                        "Minting volatility pause: candidate quote differs by at least 20% from its ancestor reference");
+                    if (candidate.health < 100) throw JSONRPCError(RPC_MISC_ERROR,
+                        strprintf("Minting blocked: candidate system health is %d%% (emergency state)", candidate.health));
+                }
+                return candidate;
+            }();
+            if (candidateHealth.active) oraclePriceMicroUSD = candidateHealth.price;
             if (oraclePriceMicroUSD <= 0) {
                 throw JSONRPCError(RPC_MISC_ERROR, "No oracle price available. Start the oracle first with startoracle command.");
             }
@@ -1404,7 +1789,7 @@ RPCHelpMan mintdigidollar()
             // The wallet RPC must use the same source so a user cannot pass a
             // local-only check while consensus refuses the broadcast — and so a
             // wallet with zero DD positions still respects network ERR.
-            if (DigiDollar::ERR::EmergencyRedemptionRatio::ShouldBlockMinting(oraclePriceMicroUSD)) {
+            if (!candidateHealth.active && DigiDollar::ERR::EmergencyRedemptionRatio::ShouldBlockMinting(oraclePriceMicroUSD)) {
                 const DigiDollar::SystemMetrics metrics =
                     DigiDollar::SystemHealthMonitor::GetCachedMetrics();
                 CAmount priceMillicents = oraclePriceMicroUSD / 10;
@@ -1492,6 +1877,7 @@ RPCHelpMan mintdigidollar()
             // Build mint transaction using custom RpcMintTxBuilder with UTXO value lookup
             // Note: MintTxBuilder now expects micro-USD price
             RpcMintTxBuilder builder(Params(), mintHeight, oraclePriceMicroUSD, utxoValues);
+            if (candidateHealth.active) builder.SetCandidateHealth(candidateHealth.health);
 
             DigiDollar::TxBuilderMintParams params;
             params.ddAmount = ddAmount;  // Amount in cents (e.g., 5000 = $50.00)
@@ -1632,6 +2018,7 @@ RPCHelpMan mintdigidollar()
                           availableUtxos.size(), pass);
 
                 RpcMintTxBuilder retryBuilder(Params(), mintHeight, oraclePriceMicroUSD, utxoValues);
+                if (candidateHealth.active) retryBuilder.SetCandidateHealth(candidateHealth.health);
                 params.utxos = availableUtxos;
                 result = retryBuilder.BuildMintTransaction(params);
             }
@@ -1659,6 +2046,7 @@ RPCHelpMan mintdigidollar()
             if (should_broadcast) {
                 RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
             }
+            RecheckCandidateHealth(*node_ctx->chainman, candidateHealth);
 
             // Commit through the wallet-owned relay path exactly once so the
             // wallet state transition and mempool submission stay in sync.
@@ -1735,7 +2123,9 @@ RPCHelpMan mintdigidollar()
             const DigiDollar::SystemMetrics ratioMetrics =
                 DigiDollar::SystemHealthMonitor::GetCachedMetrics();
             int systemHealth = 30000;
-            if (ratioMetrics.hasCanonicalHealth && ratioMetrics.systemHealth > 0) {
+            if (candidateHealth.active) {
+                systemHealth = candidateHealth.health;
+            } else if (ratioMetrics.hasCanonicalHealth && ratioMetrics.systemHealth > 0) {
                 systemHealth = ratioMetrics.systemHealth;
             } else if (ratioMetrics.totalDDSupply > 0 &&
                        ratioMetrics.totalCollateral > 0 &&
@@ -1745,7 +2135,9 @@ RPCHelpMan mintdigidollar()
                     ratioMetrics.totalDDSupply,
                     oraclePriceMicroUSD / 10);
             }
-            const int collateralRatio = DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
+            const int collateralRatio = candidateHealth.active ?
+                DynamicCollateralAdjustment::ApplyDCAForHealth(baseRatio, systemHealth) :
+                DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
             if (collateralRatio <= 0 || collateralRatio == std::numeric_limits<int>::max()) {
                 throw JSONRPCError(RPC_MISC_ERROR, "DCA collateral ratio calculation failed");
             }
@@ -2256,6 +2648,11 @@ RPCHelpMan redeemdigidollar()
             LogPrintf("DigiDollar: Resolving mint collateral and DD token outpoints from wallet metadata\n");
 
             // Get position from wallet
+            node::NodeContext* candidate_node = pwallet->chain().context();
+            if (!candidate_node || !candidate_node->chainman) throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context unavailable");
+            auto& healthChainman = *candidate_node->chainman;
+            const auto candidateHealth = GetCandidateHealthQuote(healthChainman);
+            RequireCandidateHealth(candidateHealth);
             LOCK(pwallet->cs_wallet);
             WalletCollateralPosition foundPosition;
             bool found = false;
@@ -2299,7 +2696,7 @@ RPCHelpMan redeemdigidollar()
                       collateralOutpoint.hash.ToString(), collateralOutpoint.n);
 
             // Check if redeemable
-            int currentHeight = pwallet->GetLastBlockHeight();
+            int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
             if (foundPosition.unlock_height > currentHeight) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                     strprintf("Position locked until block %d (current: %d, remaining: %d blocks)",
@@ -2315,10 +2712,13 @@ RPCHelpMan redeemdigidollar()
                               foundPosition.dd_minted, ddAmount));
             }
 
-            int redemptionSystemHealth = DynamicCollateralAdjustment::GetCurrentSystemHealth();
-            auto errState = DigiDollar::ERR::EmergencyRedemptionRatio::GetCurrentState();
-            if (errState.isActive && errState.systemHealth < 100) {
-                redemptionSystemHealth = errState.systemHealth;
+            int redemptionSystemHealth;
+            if (candidateHealth.active) {
+                redemptionSystemHealth = candidateHealth.health;
+            } else {
+                redemptionSystemHealth = DynamicCollateralAdjustment::GetCurrentSystemHealth();
+                const auto errState = DigiDollar::ERR::EmergencyRedemptionRatio::GetCurrentState();
+                if (errState.isActive && errState.systemHealth < 100) redemptionSystemHealth = errState.systemHealth;
             }
 
             const bool errRedemptionActive = redemptionSystemHealth >= 0 && redemptionSystemHealth < 100;
@@ -2349,12 +2749,14 @@ RPCHelpMan redeemdigidollar()
                 MockOracleManager::GetInstance().IsEnabled()) {
                 oraclePrice = MockOracleManager::GetInstance().GetCurrentPrice();
             }
+            if (candidateHealth.active) oraclePrice = candidateHealth.price;
             if (oraclePrice <= 0) {
                 throw JSONRPCError(RPC_MISC_ERROR, "No oracle price available for redemption");
             }
 
             // Build redemption transaction using RedeemTxBuilder
             DigiDollar::RedeemTxBuilder redeemBuilder(Params(), currentHeight, oraclePrice);
+            if (candidateHealth.active) redeemBuilder.SetCandidateHealth(candidateHealth.health);
 
             // Get the owner key for this position
             CKey ownerKey;
@@ -2465,7 +2867,21 @@ RPCHelpMan redeemdigidollar()
             LogPrintf("DigiDollar: Selected %d sats in fees from %d UTXOs for redemption\n",
                      selectedFeeTotal, redeemParams.feeUtxos.size());
 
-            DigiDollar::TxBuilderResult redeemResult = redeemBuilder.BuildRedemptionTransaction(redeemParams);
+            auto buildFundedRedemption = [&]() {
+                DigiDollar::TxBuilderResult attempt = redeemBuilder.BuildRedemptionTransaction(redeemParams);
+                while (candidateHealth.active && !attempt.success && attempt.totalFees > selectedFeeTotal) {
+                    const CAmount target = attempt.totalFees;
+                    redeemParams.feeUtxos.clear();
+                    feeAmounts.clear();
+                    if (!dd_wallet->SelectFeeCoins(target, redeemParams.feeUtxos, selectedFeeTotal, &feeAmounts, &exclude_utxos))
+                        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient DGB for the selected redemption inputs and fee");
+                    redeemParams.feeAmounts = feeAmounts;
+                    attempt = redeemBuilder.BuildRedemptionTransaction(redeemParams);
+                }
+
+                return attempt;
+            };
+            DigiDollar::TxBuilderResult redeemResult = buildFundedRedemption();
 
             if (!redeemResult.success) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to build redemption transaction: " + redeemResult.error);
@@ -2482,15 +2898,18 @@ RPCHelpMan redeemdigidollar()
             // - Collateral (input 0): script-path spending with MAST tree
             // - DD tokens (input 1+): key-path spending (no MAST)
             // - Fee inputs: standard wallet signing
-            bool signSuccess = dd_wallet->SignRedemptionTransaction(
-                redeemResult.tx,
-                redeemParams.collateralOutpoint,
-                redeemParams.ddUtxos,
-                redeemParams.feeUtxos,
-                ownerKey);
-
-            if (!signSuccess) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign redemption transaction with Schnorr signatures");
+            while (true) {
+                if (!dd_wallet->SignRedemptionTransaction(redeemResult.tx, redeemParams.collateralOutpoint,
+                        redeemParams.ddUtxos, redeemParams.feeUtxos, ownerKey)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign redemption transaction with Schnorr signatures");
+                }
+                if (!candidateHealth.active) break;
+                const CAmount signedFee = std::max<CAmount>(10000000,
+                    (GetVirtualTransactionSize(CTransaction(redeemResult.tx)) * redeemParams.feeRate + 999) / 1000);
+                if (redeemResult.totalFees >= signedFee) break;
+                redeemParams.minimumFee = signedFee;
+                redeemResult = buildFundedRedemption();
+                if (!redeemResult.success) throw JSONRPCError(RPC_WALLET_ERROR, redeemResult.error);
             }
 
             // Create transaction reference
@@ -2500,6 +2919,7 @@ RPCHelpMan redeemdigidollar()
             if (should_broadcast) {
                 RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
             }
+            RecheckCandidateHealth(healthChainman, candidateHealth);
 
             // Commit through the wallet-owned relay path exactly once so the
             // wallet state transition and mempool submission stay in sync.
@@ -3613,11 +4033,12 @@ static RPCHelpMan estimatecollateral()
                 {
                     {"dd_amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "DigiDollar amount to mint in cents (min 10000/$100, max 10000000/$100K)"},
                     {"lock_tier", RPCArg::Type::NUM, RPCArg::Optional::NO, "Lock tier 0-9 (0=1h testing, 1=30d, 2=90d, 3=180d, 4=1y, 5=2y, 6=3y, 7=5y, 8=7y, 9=10y)"},
-                    {"oracle_price_micro_usd", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Custom DGB price in micro-USD (1,000,000 = $1.00). Uses current oracle if omitted."}
+                    {"oracle_price_micro_usd", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Custom DGB price in micro-USD (1,000,000 = $1.00). Uses current oracle if omitted; after Thaw Day a supplied value must match the checked next-block quote."}
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        NextBlockHealthResult(),
                         {RPCResult::Type::STR_AMOUNT, "required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "minimum_required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "wallet_collateral_dgb", "DGB collateral the wallet mint builder will lock, including safety margin"},
@@ -3682,6 +4103,8 @@ static RPCHelpMan estimatecollateral()
             }
 
             // Get oracle price in micro-USD: use provided value or fetch from real oracle system
+            const auto candidate = GetCandidateHealthQuote(EnsureAnyChainman(request.context));
+            RequireCandidateHealth(candidate);
             CAmount oraclePriceMicroUSD;
             if (OptionalParamIsSet(request, 2)) {
                 // User-provided value is in micro-USD (1,000,000 = $1.00)
@@ -3693,12 +4116,12 @@ static RPCHelpMan estimatecollateral()
                     MockOracleManager::GetInstance().IsEnabled()) {
                     oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
                 }
-                if (oraclePriceMicroUSD <= 0) {
+                if (oraclePriceMicroUSD <= 0 && !candidate.active) {
                     throw JSONRPCError(RPC_MISC_ERROR, "Oracle price not available. Start oracle with 'startoracle' or provide price as third parameter.");
                 }
             }
 
-            if (oraclePriceMicroUSD <= 0) {
+            if (oraclePriceMicroUSD <= 0 && !candidate.active) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Oracle price must be positive");
             }
 
@@ -3708,10 +4131,17 @@ static RPCHelpMan estimatecollateral()
 
             // Use the same chain-derived health source and empty-supply behavior
             // as calculatecollateralrequirement().
-            int systemHealth = GetDigiDollarRpcSystemHealth(request, oraclePriceMicroUSD, 30000);
+            if (candidate.active) {
+                if (OptionalParamIsSet(request, 2) && oraclePriceMicroUSD != candidate.price)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Provided price must match the checked next-block quote under activated rules");
+                oraclePriceMicroUSD = candidate.price;
+            }
+            int systemHealth = candidate.active ? candidate.health :
+                GetDigiDollarRpcSystemHealth(request, oraclePriceMicroUSD, 30000);
             auto healthTier = DynamicCollateralAdjustment::GetCurrentTier(systemHealth);
             double dcaMultiplier = healthTier.multiplier;
-            int effectiveRatio = DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
+            int effectiveRatio = candidate.active ? DynamicCollateralAdjustment::ApplyDCAForHealth(baseRatio, systemHealth) :
+                DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemHealth);
             if (effectiveRatio <= 0 || effectiveRatio == std::numeric_limits<int>::max()) {
                 throw JSONRPCError(RPC_MISC_ERROR, "DCA collateral ratio calculation failed");
             }
@@ -3752,6 +4182,7 @@ static RPCHelpMan estimatecollateral()
             result.pushKV("oracle_price_usd", oraclePriceMicroUSD / 1000000.0);
             result.pushKV("system_health", systemHealth);
             result.pushKV("health_tier", healthTier.status);
+            result.pushKV("next_block_health", NextBlockHealthJSON(EnsureAnyChainman(request.context), systemHealth, -1, oraclePriceMicroUSD, &candidate));
             // Fix: ddAmount is in cents, so USD value = ddAmount / 100.0
             // Previously this path treated cents as satoshis, producing a
             // value ~100,000x too small (e.g., $0.001 instead of $100).
@@ -3834,6 +4265,11 @@ RPCHelpMan getredemptioninfo()
             pwallet->BlockUntilSyncedToCurrentChain();
             dd_wallet->ReconcilePositionStates();
 
+            node::NodeContext* candidate_node = pwallet->chain().context();
+            if (!candidate_node || !candidate_node->chainman) throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context unavailable");
+            auto& healthChainman = *candidate_node->chainman;
+            const auto candidateHealth = GetCandidateHealthQuote(healthChainman);
+            RequireCandidateHealth(candidateHealth);
             LOCK(pwallet->cs_wallet);
             WalletCollateralPosition foundPosition;
             bool found = false;
@@ -3851,7 +4287,7 @@ RPCHelpMan getredemptioninfo()
                     strprintf("Position %s not found in wallet", positionIdStr));
             }
 
-            int currentHeight = pwallet->GetLastBlockHeight();
+            int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
             int blocksRemaining = std::max(0, static_cast<int>(foundPosition.unlock_height - currentHeight));
             const int confirmations = dd_wallet->GetDDTransactionConfirmations(positionId);
             const bool walletPrivateKeysDisabled = pwallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS);
@@ -3875,10 +4311,11 @@ RPCHelpMan getredemptioninfo()
             // Determine redemption path based on system health
             std::string redemptionPath = "normal";
             CAmount penaltyAmount = 0;
-            int redemptionSystemHealth = DynamicCollateralAdjustment::GetCurrentSystemHealth();
-            auto errState = DigiDollar::ERR::EmergencyRedemptionRatio::GetCurrentState();
-            if (errState.isActive && errState.systemHealth < 100) {
-                redemptionSystemHealth = errState.systemHealth;
+            int redemptionSystemHealth = candidateHealth.active ? candidateHealth.health :
+                DynamicCollateralAdjustment::GetCurrentSystemHealth();
+            if (!candidateHealth.active) {
+                const auto errState = DigiDollar::ERR::EmergencyRedemptionRatio::GetCurrentState();
+                if (errState.isActive && errState.systemHealth < 100) redemptionSystemHealth = errState.systemHealth;
             }
             const bool errActive = redemptionSystemHealth >= 0 && redemptionSystemHealth < 100;
             CAmount requiredDDBurn = foundPosition.dd_minted;
@@ -4106,7 +4543,8 @@ static RPCHelpMan getoracleprice()
                         {RPCResult::Type::STR, "status", "Oracle system status (active/warning/error)"},
                         {RPCResult::Type::NUM, "24h_high", "24-hour high price in cents"},
                         {RPCResult::Type::NUM, "24h_low", "24-hour low price in cents"},
-                        {RPCResult::Type::NUM, "volatility", "Current price volatility percentage"}
+                        {RPCResult::Type::NUM, "volatility", "Current price volatility percentage"},
+                        MintVolatilityResult("mint_volatility")
                     }
                 },
                 RPCExamples{
@@ -4296,6 +4734,7 @@ static RPCHelpMan getoracleprice()
             result.pushKV("24h_high", high24h);
             result.pushKV("24h_low", low24h);
             result.pushKV("volatility", volatility);
+            result.pushKV("mint_volatility", GetMintVolatilityRPC(chainman, priceMicroUSD));
 
             return result;
         },
@@ -4322,10 +4761,12 @@ static RPCHelpMan getprotectionstatus()
                         {RPCResult::Type::OBJ, "dca", "Dynamic Collateral Adjustment status",
                             {
                                 {RPCResult::Type::BOOL, "active", "Whether DCA is currently active"},
-                                {RPCResult::Type::NUM, "current_multiplier", "Current DCA multiplier"},
+                                {RPCResult::Type::NUM, "current_multiplier", "Current DCA multiplier, or null when state unavailable", {}, true},
                                 {RPCResult::Type::STR, "tier", "Current DCA tier"},
                                 {RPCResult::Type::NUM, "system_health", "System health percentage"},
-                                {RPCResult::Type::STR, "trend", "Health trend (improving/stable/declining)"}
+                                {RPCResult::Type::STR, "trend", "Health trend (improving/stable/declining)"},
+                                {RPCResult::Type::NUM, "candidate_height", "Height selecting these protection rules"},
+                                {RPCResult::Type::STR, "selected_health_denominator", "Candidate liability definition"}
                             }
                         },
                         {RPCResult::Type::OBJ, "err", "Emergency Redemption Ratio status",
@@ -4333,20 +4774,14 @@ static RPCHelpMan getprotectionstatus()
                                 {RPCResult::Type::BOOL, "active", "Whether ERR is currently active"},
                                 {RPCResult::Type::NUM, "threshold", "ERR activation threshold (%)"},
                                 {RPCResult::Type::NUM, "current_ratio", "Current system ratio (%)"},
-                                {RPCResult::Type::NUM, "err_ratio_bps", "ERR ratio in basis points"},
-                                {RPCResult::Type::NUM, "required_burn_per_10000", "DD burn required for 10000 cents under current ERR state"},
+                                {RPCResult::Type::NUM, "err_ratio_bps", "ERR ratio in basis points, or null when unavailable", {}, true},
+                                {RPCResult::Type::NUM, "required_burn_per_10000", "DD burn required for 10000 cents, or null when unavailable", {}, true},
                                 {RPCResult::Type::STR, "status", "ERR status (normal/warning/active)"},
                                 {RPCResult::Type::STR, "evaluation_status", "priced or oracle_unavailable"}
                             }
                         },
-                        {RPCResult::Type::OBJ, "volatility", "Volatility protection status",
-                            {
-                                {RPCResult::Type::BOOL, "protection_active", "Whether volatility protection is active"},
-                                {RPCResult::Type::NUM, "current_volatility", "Current volatility percentage"},
-                                {RPCResult::Type::NUM, "protection_threshold", "Volatility protection threshold"},
-                                {RPCResult::Type::BOOL, "minting_restricted", "Whether minting is restricted due to volatility"}
-                            }
-                        },
+                        MintVolatilityResult("volatility"),
+                        NextBlockHealthResult(),
                         {RPCResult::Type::OBJ, "overall", "Overall protection status",
                             {
                                 {RPCResult::Type::STR, "status", "Overall system status (secure/warning/critical)"},
@@ -4386,6 +4821,20 @@ static RPCHelpMan getprotectionstatus()
             const node::NodeContext& node = EnsureAnyNodeContext(request.context);
             ChainstateManager& chainman = EnsureChainman(node);
 
+            WAIT_LOCK(cs_main, candidate_chain_lock);
+            const bool nextThawActive = IsThawDayActive(
+                chainman.GetConsensus(), chainman.ActiveChain().Height() + 1);
+            if (!nextThawActive) {
+                candidate_chain_lock.unlock();
+                LeaveCritical();
+            }
+            const auto candidate = GetCandidateHealthQuote(chainman);
+            if (nextThawActive) {
+                if (candidate.ready) {
+                    totalCollateral = candidate.canonical.collateral;
+                    totalDD = candidate.canonical.open_vault_principal;
+                }
+            } else {
             if (g_digidollar_stats_index) {
                 if (!g_digidollar_stats_index->BlockUntilSyncedToCurrentChain()) {
                     const IndexSummary summary{g_digidollar_stats_index->GetSummary()};
@@ -4399,6 +4848,7 @@ static RPCHelpMan getprotectionstatus()
                 }
                 if (pindex) {
                     auto stats = g_digidollar_stats_index->LookUpStats(*pindex);
+                    if (!stats) throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar circulating supply is unavailable from retained metadata");
                     if (stats) {
                         totalDD = stats->total_dd_supply;
                         totalCollateral = stats->total_collateral;
@@ -4425,6 +4875,8 @@ static RPCHelpMan getprotectionstatus()
                 totalDD = metrics.totalDDSupply;
             }
 
+            }
+
             // Oracle price
             OracleBundleManager& oracle_manager = OracleBundleManager::GetInstance();
             CAmount oraclePriceMicroUSD = oracle_manager.GetLatestPrice();
@@ -4432,12 +4884,18 @@ static RPCHelpMan getprotectionstatus()
                 MockOracleManager::GetInstance().IsEnabled()) {
                 oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
             }
+            const UniValue mintVolatility = GetMintVolatilityRPC(chainman, oraclePriceMicroUSD, &candidate);
+            if (mintVolatility.find_value("next_block_active").get_bool()) {
+                oraclePriceMicroUSD = mintVolatility.find_value("candidate_price_micro_usd").getInt<int64_t>();
+            }
             const bool oracleAvailable = oraclePriceMicroUSD > 0;
             CAmount oraclePriceMillicents = oraclePriceMicroUSD / 10;
 
-            // System health
+            // Protection decisions describe the next candidate, including the activation preview.
             int systemHealth;
-            if (totalDD == 0) {
+            if (candidate.active) {
+                systemHealth = candidate.ready ? candidate.health : -1;
+            } else if (totalDD == 0) {
                 systemHealth = 0;
             } else {
                 systemHealth = DynamicCollateralAdjustment::CalculateSystemHealth(
@@ -4452,17 +4910,20 @@ static RPCHelpMan getprotectionstatus()
             UniValue oracle(UniValue::VOBJ);
             oracle.pushKV("available", oracleAvailable);
             oracle.pushKV("status", oracleAvailable ? "available" : "unavailable");
-            oracle.pushKV("minting_restricted", !oracleAvailable);
-            oracle.pushKV("minting_restricted_reason", oracleAvailable ? "none" : "oracle_unavailable");
+            oracle.pushKV("minting_restricted", !oracleAvailable || (candidate.active && !candidate.ready));
+            oracle.pushKV("minting_restricted_reason", !oracleAvailable ? "oracle_unavailable" :
+                (candidate.active && !candidate.ready ? "health_state_not_ready" : "none"));
             result.pushKV("oracle", oracle);
 
             // DCA status
             UniValue dca(UniValue::VOBJ);
             dca.pushKV("active", true);
-            dca.pushKV("current_multiplier", tier.multiplier);
-            dca.pushKV("tier", tier.status);
+            dca.pushKV("current_multiplier", candidate.active && !candidate.ready ? UniValue() : UniValue(tier.multiplier));
+            dca.pushKV("tier", candidate.active && !candidate.ready ? "unavailable" : tier.status);
             dca.pushKV("system_health", systemHealth);
             dca.pushKV("trend", "stable");
+            dca.pushKV("candidate_height", candidate.height);
+            dca.pushKV("selected_health_denominator", candidate.active ? "open_vault_principal" : "legacy_supply");
             result.pushKV("dca", dca);
 
             // ERR status
@@ -4470,12 +4931,15 @@ static RPCHelpMan getprotectionstatus()
             err.pushKV("active", isEmergency);
             err.pushKV("threshold", 100);
             err.pushKV("current_ratio", systemHealth);
-            err.pushKV("err_ratio_bps", oracleAvailable ?
-                DigiDollar::ERR::EmergencyRedemptionRatio::CalculateERRRatioBps(systemHealth) : 10000);
-            err.pushKV("required_burn_per_10000", int64_t{oracleAvailable ?
-                DigiDollar::ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(10000, systemHealth) : 10000});
+            const bool errReady = oracleAvailable && (!candidate.active || candidate.ready);
+            err.pushKV("err_ratio_bps", candidate.active && !errReady ? UniValue() :
+                UniValue(oracleAvailable ? DigiDollar::ERR::EmergencyRedemptionRatio::CalculateERRRatioBps(systemHealth) : 10000));
+            err.pushKV("required_burn_per_10000", candidate.active && !errReady ? UniValue() :
+                UniValue(int64_t{oracleAvailable ? DigiDollar::ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(10000, systemHealth) : 10000}));
             std::string errStatus;
-            if (!oracleAvailable || totalDD == 0 || systemHealth >= 100) {
+            if (candidate.active && !candidate.ready) {
+                errStatus = "unavailable";
+            } else if (!oracleAvailable || totalDD == 0 || systemHealth >= 100) {
                 errStatus = "normal";
             } else if (systemHealth >= 95) {
                 errStatus = "warning";
@@ -4485,29 +4949,18 @@ static RPCHelpMan getprotectionstatus()
                 errStatus = "critical";
             }
             err.pushKV("status", errStatus);
-            err.pushKV("evaluation_status", oracleAvailable ? "priced" : "oracle_unavailable");
+            err.pushKV("evaluation_status", candidate.active && !candidate.ready ? "health_state_not_ready" :
+                (oracleAvailable ? "priced" : "oracle_unavailable"));
             result.pushKV("err", err);
 
-            // Volatility protection
-            auto volatilityState = Volatility::VolatilityMonitor::GetCurrentState();
-            double currentVolatility = std::max({
-                volatilityState.hourlyVolatility,
-                volatilityState.dailyVolatility,
-                volatilityState.weeklyVolatility});
-            bool mintingRestricted = Volatility::VolatilityMonitor::ShouldFreezeMinting();
-            bool allOperationsRestricted = Volatility::VolatilityMonitor::ShouldFreezeAll();
-
-            UniValue volatility(UniValue::VOBJ);
-            volatility.pushKV("protection_active", mintingRestricted || allOperationsRestricted);
-            volatility.pushKV("current_volatility", currentVolatility);
-            volatility.pushKV("protection_threshold", Volatility::VolatilityThresholds::FREEZE_MINT_1H);
-            volatility.pushKV("minting_restricted", mintingRestricted);
-            result.pushKV("volatility", volatility);
+            result.pushKV("volatility", mintVolatility);
 
             // Overall status
             UniValue overall(UniValue::VOBJ);
             std::string overallStatus;
-            if (!oracleAvailable) {
+            if (candidate.active && !candidate.ready) {
+                overallStatus = "critical";
+            } else if (!oracleAvailable) {
                 overallStatus = totalDD > 0 ? "critical" : "warning";
             } else if (totalDD == 0) {
                 overallStatus = "secure";
@@ -4535,6 +4988,8 @@ static RPCHelpMan getprotectionstatus()
             overall.pushKV("active_protections", activeProtections);
 
             UniValue warnings(UniValue::VARR);
+            if (candidate.active && !candidate.ready) warnings.push_back(candidate.error.empty() ?
+                "Canonical candidate health unavailable; dependent operations are paused" : candidate.error);
             if (!oracleAvailable) {
                 warnings.push_back("Oracle price unavailable; minting is paused");
             }
@@ -4547,6 +5002,7 @@ static RPCHelpMan getprotectionstatus()
             overall.pushKV("warnings", warnings);
 
             result.pushKV("overall", overall);
+            result.pushKV("next_block_health", NextBlockHealthJSON(chainman, systemHealth, totalDD, oraclePriceMicroUSD, &candidate));
 
             return result;
         },

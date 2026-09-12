@@ -8,6 +8,7 @@
 #include <coins.h>
 #include <consensus/digidollar.h>
 #include <consensus/params.h>
+#include <digidollar/digidollar.h>
 #include <logging.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
@@ -168,7 +169,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     {
         const int dd_floor = DigiDollar::EarliestActivationFloor(chainman.GetConsensus());
 
-        if (options.prune && dd_floor > 0) {
+        if (options.prune && dd_floor >= 0 && chainman.GetConsensus().DigiDollarHeight != std::numeric_limits<int>::max()) {
             PruneLockInfo dd_lock;
             dd_lock.height_first = dd_floor;
             chainman.m_blockman.UpdatePruneLock("digidollar", dd_lock);
@@ -179,12 +180,27 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 if (tip && tip->nHeight >= dd_floor) {
                     const CBlockIndex* floor_block = chainman.ActiveChain()[dd_floor];
                     if (!floor_block || !chainman.m_blockman.CheckBlockDataAvailability(*tip, *floor_block)) {
+                        if (DigiDollar::IsThawDayActive(chainman.GetConsensus(), tip->nHeight + 1)) {
+                            return {ChainstateLoadStatus::FAILURE_FATAL,
+                                    _("DigiDollar state not ready: retained block history is incomplete. Restore the required block and undo files or download the missing DigiDollar-era history.")};
+                        }
                         return {ChainstateLoadStatus::FAILURE,
                                 _("DigiDollar-era block data is incomplete on this pruned node. "
                                   "Restart with -reindex to rebuild it (the node will redownload and re-prune).")};
                     }
                 }
             }
+        }
+    }
+
+    for (Chainstate* chainstate : chainman.GetAll()) {
+        std::string reason;
+        if (!chainstate->InitializeDigiDollarState(options.check_interrupt, reason)) {
+            if (reason == "DigiDollar initialization interrupted" ||
+                (options.check_interrupt && options.check_interrupt())) {
+                return {ChainstateLoadStatus::INTERRUPTED, Untranslated(reason)};
+            }
+            return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated(reason)};
         }
     }
 

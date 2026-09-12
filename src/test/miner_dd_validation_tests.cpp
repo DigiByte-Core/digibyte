@@ -5,32 +5,52 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chainparams.h>
+#include <coins.h>
 #include <consensus/digidollar.h>
+#include <consensus/merkle.h>
+#include <consensus/volatility.h>
 #include <crypto/sha256.h>
 #include <digidollar/digidollar.h>
+#include <digidollar/health.h>
 #include <digidollar/scripts.h>
 #include <digidollar/txbuilder.h>
 #include <digidollar/validation.h>
 #include <hash.h>
+#include <index/digidollarstatsindex.h>
+#include <interfaces/chain.h>
 #include <key.h>
 #include <node/miner.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
 #include <oracle/musig2_aggregator.h>
 #include <policy/feerate.h>
+#include <pow.h>
 #include <primitives/transaction.h>
+#include <rpc/server.h>
 #include <random.h>
+#include <script/interpreter.h>
 #include <script/script.h>
+#include <script/standard.h>
+#include <shutdown.h>
 #include <test/util/setup_common.h>
+#include <test/util/logging.h>
+#include <test/util/index.h>
 #include <test/util/txmempool.h>
+#include <timedata.h>
 #include <validation.h>
+#include <validationinterface.h>
+#include <warnings.h>
 
 #include <secp256k1.h>
 #include <secp256k1_musig.h>
 #include <secp256k1_schnorrsig.h>
 
 #include <array>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -153,7 +173,8 @@ bool BlockHasTx(const CBlock& block, const uint256& txid)
 struct MinerDDValidationSetup : public TestChain100Setup {
     size_t m_coinbase_spend_index{0};
 
-    MinerDDValidationSetup()
+    explicit MinerDDValidationSetup(const std::vector<const char*>& extra_args = {})
+        : TestChain100Setup(ChainType::REGTEST, extra_args)
     {
         MockOracleManager::GetInstance().Reset();
         MockOracleManager::GetInstance().SetEnabled(false);
@@ -237,12 +258,14 @@ struct MinerDDValidationSetup : public TestChain100Setup {
     }
 
     CTransactionRef BuildDDMint(const COutPoint& prevout, CAmount input_value, CAmount collateral_value,
-                                CAmount dd_amount, int next_height, CAmount fee, int lock_days = 30)
+                                CAmount dd_amount, int next_height, CAmount fee, int lock_days = 30,
+                                const CKey* supplied_owner = nullptr)
     {
         BOOST_REQUIRE(input_value >= collateral_value + fee);
 
         CKey owner_key;
-        owner_key.MakeNewKey(true);
+        if (supplied_owner) owner_key = *supplied_owner;
+        else owner_key.MakeNewKey(true);
         XOnlyPubKey owner_xonly(owner_key.GetPubKey());
 
         const int64_t lock_blocks = DigiDollar::LockDaysToBlocks(lock_days);
@@ -331,6 +354,424 @@ struct MinerDDValidationSetup : public TestChain100Setup {
             .CreateNewBlock(CScript() << OP_TRUE, ALGO_SHA256D);
     }
 };
+
+struct ThawMinerValidationSetup : MinerDDValidationSetup {
+    static constexpr int THAW_HEIGHT{400};
+    static constexpr CAmount REFERENCE_PRICE{50000};
+    static constexpr CAmount MINT_FEE{1000};
+    static constexpr CAmount CHILD_FEE{2000};
+    static constexpr CAmount PLAIN_FEE{3000};
+
+    struct CandidateTransactions {
+        CTransactionRef mint;
+        CTransactionRef child;
+        CTransactionRef plain;
+    };
+
+    CKey redemption_owner;
+    DigiDollar::MintParams redemption_vault;
+    CTransactionRef redeemable_mint;
+    CTransactionRef other_mint;
+
+    explicit ThawMinerValidationSetup(bool seed_redemption = false)
+        : MinerDDValidationSetup({"-digidollaractivationheight=100", "-ddthawdayheight=400"})
+    {
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+        if (seed_redemption) {
+            DigiDollar::SystemHealthMonitor::ResetMetrics();
+            redemption_owner.MakeNewKey(true);
+            const auto strong_funding = ConfirmOpTrueFunding(30 * COIN + MINT_FEE);
+            const auto weak_funding = ConfirmOpTrueFunding(15 * COIN + MINT_FEE);
+            const int height = NextBlockHeight();
+            InstallMuSig2OraclePrice(1000000, height);
+            redeemable_mint = BuildDDMint(strong_funding, 30 * COIN + MINT_FEE,
+                30 * COIN, 100, height, MINT_FEE, 0, &redemption_owner);
+            other_mint = BuildDDMint(weak_funding, 15 * COIN + MINT_FEE,
+                15 * COIN, 100, height, MINT_FEE, 0, &redemption_owner);
+            redemption_vault.ddAmount = 100;
+            redemption_vault.lockHeight = height + DigiDollar::LockDaysToBlocks(0);
+            redemption_vault.ownerKey = XOnlyPubKey(redemption_owner.GetPubKey());
+            redemption_vault.internalKey = DigiDollar::GetCollateralNUMSKey();
+            const auto seeded = CreateAndProcessBlock(
+                {CMutableTransaction{*redeemable_mint}, CMutableTransaction{*other_mint}}, CScript() << OP_TRUE);
+            BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
+                                seeded.GetHash());
+            SetMockTime(GetTime() + 1);
+            OracleBundleManager::GetInstance().Clear();
+        }
+        InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+        BlockAssembler::Options options;
+        auto reference_template = BuildTemplate(options);
+        BOOST_REQUIRE(reference_template);
+        COracleBundle reference_bundle;
+        BOOST_REQUIRE(OracleBundleManager::GetInstance().ExtractOracleBundle(
+            *reference_template->block.vtx[0], reference_bundle));
+        CBlock reference_block{reference_template->block};
+        while (!CheckProofOfWork(GetPoWAlgoHash(reference_block), reference_block.nBits,
+                                Params().GetConsensus())) {
+            ++reference_block.nNonce;
+        }
+        BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+            std::make_shared<const CBlock>(reference_block), true, true, nullptr));
+        BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
+                            reference_block.GetHash());
+        SetMockTime(GetTime() + 1);
+        OracleBundleManager::GetInstance().Clear();
+        BOOST_REQUIRE_LT(NextBlockHeight(), THAW_HEIGHT);
+        mineBlocks(THAW_HEIGHT - NextBlockHeight());
+        BOOST_REQUIRE_EQUAL(NextBlockHeight(), THAW_HEIGHT);
+    }
+
+    ~ThawMinerValidationSetup()
+    {
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    }
+
+    CandidateTransactions PrepareCandidate(CAmount candidate_price)
+    {
+        constexpr CAmount collateral{200 * COIN};
+        constexpr CAmount dd_amount{100};
+        const COutPoint mint_funding = ConfirmOpTrueFunding(collateral + COIN + MINT_FEE);
+        const COutPoint plain_funding = ConfirmOpTrueFunding(2 * COIN);
+        const int height = NextBlockHeight();
+        InstallMuSig2OraclePrice(candidate_price, height);
+
+        CMutableTransaction mint{*BuildDDMint(mint_funding, collateral + COIN + MINT_FEE,
+                                             collateral, dd_amount, height, MINT_FEE)};
+        mint.vout.emplace_back(COIN, CScript() << OP_TRUE);
+        CandidateTransactions txs;
+        txs.mint = MakeTransactionRef(mint);
+        txs.child = BuildOpTrueSpend(COutPoint(txs.mint->GetHash(), 3), COIN, CHILD_FEE);
+        txs.plain = BuildOpTrueSpend(plain_funding, 2 * COIN, PLAIN_FEE);
+        AddToMempool(txs.mint, MINT_FEE);
+        AddToMempool(txs.child, CHILD_FEE);
+        AddToMempool(txs.plain, PLAIN_FEE);
+
+        const auto reference = WITH_LOCK(cs_main, return DigiDollar::GetMintVolatilityReference(
+            m_node.chainman->ActiveChain().Tip(), Params().GetConsensus(), m_node.chainman->m_blockman));
+        BOOST_REQUIRE_MESSAGE(reference.ready, reference.error);
+        BOOST_REQUIRE_GE(reference.sample_count, 1U);
+        BOOST_REQUIRE_EQUAL(reference.price_micro_usd, REFERENCE_PRICE);
+        return txs;
+    }
+
+    CBlockIndex* FirstRequiredAncestor() const
+    {
+        return WITH_LOCK(cs_main, return m_node.chainman->ActiveChain()[
+            NextBlockHeight() - DigiDollar::Volatility::MINT_REFERENCE_MIN_DEPTH]);
+    }
+
+    void ReplaceCommittedPrice(CBlock& block, CAmount price)
+    {
+        auto& manager = OracleBundleManager::GetInstance();
+        COracleBundle previous;
+        BOOST_REQUIRE(manager.ExtractOracleBundle(*block.vtx[0], previous));
+        const CScript old_script = manager.CreateOracleScript(previous);
+        InstallMuSig2OraclePrice(price, NextBlockHeight());
+        const CScript new_script = manager.CreateOracleScript(manager.GetCurrentBundle(GetCurrentEpoch(NextBlockHeight())));
+        BOOST_REQUIRE(!new_script.empty());
+        CMutableTransaction coinbase{*block.vtx[0]};
+        size_t replaced{0};
+        for (auto& output : coinbase.vout) {
+            if (output.scriptPubKey == old_script) {
+                output.scriptPubKey = new_script;
+                ++replaced;
+            }
+        }
+        BOOST_REQUIRE_EQUAL(replaced, 1U);
+        block.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+    }
+};
+
+struct ThawMinerERRValidationSetup : ThawMinerValidationSetup {
+    ThawMinerERRValidationSetup() : ThawMinerValidationSetup(true) {}
+
+    ~ThawMinerERRValidationSetup()
+    {
+        DigiDollar::SystemHealthMonitor::ResetMetrics();
+    }
+
+    CTransactionRef BuildMatureRedemption(const COutPoint& fee_input, CAmount fee_value, CAmount fee,
+                                         CAmount dd_change = 0, bool serialized_change = true,
+                                         bool duplicate_positive_metadata = false)
+    {
+        BOOST_REQUIRE(redeemable_mint);
+        BOOST_REQUIRE_LT(redemption_vault.lockHeight, NextBlockHeight());
+        const CScript normal = DigiDollar::CreateNormalRedemptionPath(redemption_vault);
+        TaprootBuilder tree;
+        tree.Add(1, normal, 0xc0);
+        tree.Add(1, DigiDollar::CreateERRPath(redemption_vault), 0xc0);
+        tree.Finalize(redemption_vault.internalKey);
+        BOOST_REQUIRE(tree.IsComplete());
+        const auto spend_data = tree.GetSpendData();
+        const auto paths = spend_data.scripts.find({normal, 0xc0});
+        BOOST_REQUIRE(paths != spend_data.scripts.end());
+        BOOST_REQUIRE(!paths->second.empty());
+
+        CMutableTransaction tx;
+        tx.SetDigiDollarType(DD_TX_REDEEM);
+        tx.nLockTime = redemption_vault.lockHeight;
+        tx.vin.emplace_back(COutPoint{redeemable_mint->GetHash(), 0}, CScript{}, 0xfffffffe);
+        tx.vin.emplace_back(COutPoint{redeemable_mint->GetHash(), 1});
+        std::vector<CTxOut> spent{redeemable_mint->vout[0], redeemable_mint->vout[1]};
+        if (dd_change > 0) {
+            BOOST_REQUIRE(other_mint);
+            tx.vin.emplace_back(COutPoint{other_mint->GetHash(), 1});
+            spent.push_back(other_mint->vout[1]);
+        }
+        tx.vin.emplace_back(fee_input);
+        spent.emplace_back(fee_value, CScript() << OP_TRUE);
+        tx.vout.emplace_back(redeemable_mint->vout[0].nValue, CScript() << OP_TRUE);
+        tx.vout.emplace_back(fee_value - fee, CScript() << OP_TRUE);
+        if (dd_change > 0) {
+            tx.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey(redemption_owner.GetPubKey()), dd_change));
+            const CScript metadata = CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                               << CScriptNum(3) << CScriptNum(dd_change);
+            if (serialized_change) tx.vout.emplace_back(0, metadata);
+            if (duplicate_positive_metadata) tx.vout.emplace_back(1, metadata);
+        }
+        PrecomputedTransactionData data;
+        data.Init(tx, std::move(spent), true);
+        ScriptExecutionData execution;
+        execution.m_annex_init = true;
+        execution.m_annex_present = false;
+        execution.m_tapleaf_hash_init = true;
+        execution.m_tapleaf_hash = ComputeTapleafHash(0xc0, normal);
+        execution.m_codeseparator_pos_init = true;
+        execution.m_codeseparator_pos = 0xffffffff;
+        uint256 hash;
+        BOOST_REQUIRE(SignatureHashSchnorr(hash, execution, tx, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT,
+                                          data, MissingDataBehavior::ASSERT_FAIL));
+        std::vector<unsigned char> signature(64);
+        BOOST_REQUIRE(redemption_owner.SignSchnorr(hash, signature, nullptr, uint256{}));
+        tx.vin[0].scriptWitness.stack = {signature, std::vector<unsigned char>(normal.begin(), normal.end()),
+                                       *paths->second.begin()};
+        const uint256 no_script_tree;
+        for (size_t i = 1; i + 1 < tx.vin.size(); ++i) {
+            BOOST_REQUIRE(SignatureHashSchnorr(hash, execution, tx, i, SIGHASH_DEFAULT, SigVersion::TAPROOT,
+                                              data, MissingDataBehavior::ASSERT_FAIL));
+            BOOST_REQUIRE(redemption_owner.SignSchnorr(hash, signature, &no_script_tree, uint256{}));
+            tx.vin[i].scriptWitness.stack = {signature};
+        }
+        return MakeTransactionRef(tx);
+    }
+};
+
+struct OpenRedemptionStatsIndex {
+    DigiDollarStatsIndex index;
+    explicit OpenRedemptionStatsIndex(node::NodeContext& node)
+        : index{interfaces::MakeChain(node), 1 << 20, false, false} {}
+    ~OpenRedemptionStatsIndex()
+    {
+        SyncWithValidationInterfaceQueue();
+        index.Interrupt();
+        index.Stop();
+    }
+};
+
+struct OpenGlobalRedemptionStatsIndex {
+    explicit OpenGlobalRedemptionStatsIndex(node::NodeContext& node)
+    {
+        BOOST_REQUIRE(!g_digidollar_stats_index);
+        g_digidollar_stats_index = std::make_unique<DigiDollarStatsIndex>(interfaces::MakeChain(node), 1 << 20, false, false);
+    }
+    ~OpenGlobalRedemptionStatsIndex()
+    {
+        SyncWithValidationInterfaceQueue();
+        g_digidollar_stats_index->Interrupt();
+        g_digidollar_stats_index->Stop();
+        g_digidollar_stats_index.reset();
+    }
+};
+
+void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool duplicate_metadata)
+{
+    struct RestoreHeight {
+        int saved;
+        RestoreHeight()
+        {
+            LOCK(cs_main);
+            auto& height = const_cast<Consensus::Params&>(Params().GetConsensus()).nDDThawDayHeight;
+            saved = height;
+            height += 100;
+        }
+        ~RestoreHeight()
+        {
+            LOCK(cs_main);
+            const_cast<Consensus::Params&>(Params().GetConsensus()).nDDThawDayHeight = saved;
+        }
+    } restore;
+    constexpr CAmount fee_value{2 * COIN};
+    constexpr CAmount fee{COIN};
+    const auto funding = fixture.ConfirmOpTrueFunding(fee_value);
+    fixture.InstallMuSig2OraclePrice(fixture.REFERENCE_PRICE, fixture.NextBlockHeight());
+    const auto redemption = fixture.BuildMatureRedemption(funding, fee_value, fee, 100,
+                                                         duplicate_metadata, duplicate_metadata);
+    const auto replacement = fixture.BuildMatureRedemption(funding, fee_value, fee, 100);
+    auto& chain = fixture.m_node.chainman->ActiveChainstate();
+    const auto* parent = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+    BOOST_REQUIRE(parent);
+    BOOST_REQUIRE_LT(fixture.NextBlockHeight(), Params().GetConsensus().nDDThawDayHeight);
+
+    const auto call = [&](const std::string& method, const std::string& argument = {}) {
+        JSONRPCRequest request;
+        request.context = &fixture.m_node;
+        request.strMethod = method;
+        request.params = UniValue(UniValue::VARR);
+        if (!argument.empty()) request.params.push_back(argument);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        return tableRPC.execute(request);
+    };
+    const auto unavailable = [](const UniValue& error) {
+        return error["message"].get_str().find("circulating supply is unavailable") != std::string::npos;
+    };
+    const DigiDollar::CanonicalTxLookup lookup = [&](const uint256& txid, uint32_t height, CTransactionRef& tx) {
+        LOCK(cs_main);
+        const auto* tip = chain.m_chain.Tip();
+        if (height > static_cast<uint32_t>(tip->nHeight)) return false;
+        const auto* source = tip->GetAncestor(height);
+        CBlock block;
+        if (!source || !chain.m_blockman.ReadBlockFromDisk(block, *source)) return false;
+        for (const auto& candidate : block.vtx) {
+            if (candidate->GetHash() == txid) { tx = candidate; return true; }
+        }
+        return false;
+    };
+    const auto check_unknown = [&] {
+        auto& index = *g_digidollar_stats_index;
+        BOOST_REQUIRE(index.BlockUntilSyncedToCurrentChain());
+        const auto* tip = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+        BOOST_CHECK(index.GetSummary().synced);
+        BOOST_CHECK(index.GetSummary().best_block_hash == tip->GetBlockHash());
+        BOOST_CHECK(!index.LookUpStats(*tip));
+        BOOST_CHECK_EXCEPTION(call("getdigidollarstats"), UniValue, unavailable);
+        const auto earlier = index.LookUpStats(*parent);
+        BOOST_REQUIRE(earlier);
+        BOOST_CHECK_EQUAL(earlier->total_dd_supply, 200);
+    };
+    const CBlockIndex* unknown_block{nullptr};
+    const CBlockIndex* unknown_descendant{nullptr};
+    {
+        OpenGlobalRedemptionStatsIndex opened{fixture.m_node};
+        auto& index = *g_digidollar_stats_index;
+        BOOST_REQUIRE(index.Init());
+        BOOST_REQUIRE(index.StartBackgroundSync());
+        IndexWaitSynced(index);
+        BOOST_CHECK_EQUAL(call("getdigidollarstats")["total_dd_supply"].getInt<int64_t>(), 200);
+        const auto accepted = fixture.CreateAndProcessBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE);
+        unknown_block = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+        BOOST_REQUIRE(unknown_block->GetBlockHash() == accepted.GetHash());
+        check_unknown();
+        {
+            LOCK(cs_main);
+            // Canonical vault health does not require the uncountable token amount.
+            DigiDollar::ChainstateHealth health;
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(chain.CoinsTip(), Params().GetConsensus(),
+                                                                         lookup, health, error), error);
+            BOOST_CHECK_EQUAL(health.open_vault_principal, 100);
+            BOOST_CHECK_EQUAL(health.collateral, 15 * COIN);
+            BOOST_CHECK_EQUAL(health.active_vaults, 1U);
+            const auto saved_health = health;
+            CAmount supply{12345};
+            BOOST_CHECK(!DigiDollar::ReconstructChainstateHealth(chain.CoinsTip(), Params().GetConsensus(),
+                                                               lookup, health, error, {}, &supply));
+            BOOST_CHECK_EQUAL(supply, 12345);
+            BOOST_CHECK(health == saved_health);
+
+            // Even after unknown metadata, a later unreadable source remains an error.
+            CMutableTransaction inspect;
+            inspect.vin.emplace_back(COutPoint{redemption->GetHash(), 2});
+            std::vector<Coin> inputs{Coin{redemption->vout[2], unknown_block->nHeight, false}};
+            CAmount delta{54321};
+            BOOST_CHECK(DigiDollar::GetCirculatingSupplyChange(CTransaction{inspect}, inputs, unknown_block->nHeight + 1,
+                Params().GetConsensus(), lookup, delta, error) == DigiDollar::SupplyChangeResult::UNKNOWN_METADATA);
+            BOOST_CHECK_EQUAL(delta, 54321);
+            BOOST_CHECK(!DigiDollar::CalculateCirculatingSupplyChange(CTransaction{inspect}, inputs, unknown_block->nHeight + 1,
+                Params().GetConsensus(), lookup, delta, error));
+            BOOST_CHECK_EQUAL(delta, 54321);
+            inspect.vin.emplace_back(COutPoint{fixture.other_mint->GetHash(), 1});
+            inputs.emplace_back(fixture.other_mint->vout[1], fixture.redemption_vault.lockHeight - DigiDollar::LockDaysToBlocks(0), false);
+            const DigiDollar::CanonicalTxLookup missing_source = [&](const uint256& hash, uint32_t height, CTransactionRef& tx) {
+                return hash != fixture.other_mint->GetHash() && lookup(hash, height, tx);
+            };
+            BOOST_CHECK(DigiDollar::GetCirculatingSupplyChange(CTransaction{inspect}, inputs, unknown_block->nHeight + 1,
+                Params().GetConsensus(), missing_source, delta, error) == DigiDollar::SupplyChangeResult::FAILURE);
+            BOOST_CHECK_EQUAL(delta, 54321);
+            BOOST_CHECK(error.find("restore the creating block") != std::string::npos);
+        }
+        const auto descendant = fixture.CreateAndProcessBlock({}, CScript() << OP_TRUE);
+        unknown_descendant = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+        BOOST_REQUIRE(unknown_descendant->GetBlockHash() == descendant.GetHash());
+        check_unknown();
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        index.Stop();
+    }
+    {
+        OpenGlobalRedemptionStatsIndex reopened{fixture.m_node};
+        auto& index = *g_digidollar_stats_index;
+        BOOST_REQUIRE(index.Init());
+        BOOST_CHECK(index.GetSummary().best_block_hash == unknown_descendant->GetBlockHash());
+        BOOST_REQUIRE(index.StartBackgroundSync());
+        IndexWaitSynced(index);
+        check_unknown();
+        call("invalidateblock", unknown_block->GetBlockHash().GetHex());
+        BOOST_REQUIRE(WITH_LOCK(cs_main, return chain.m_chain.Tip()) == parent);
+        fixture.InstallMuSig2OraclePrice(fixture.REFERENCE_PRICE, fixture.NextBlockHeight());
+        const auto known = fixture.CreateAndProcessBlock({CMutableTransaction{*replacement}}, CScript() << OP_TRUE);
+        BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return chain.m_chain.Tip()->GetBlockHash()), known.GetHash());
+        BOOST_REQUIRE(index.BlockUntilSyncedToCurrentChain());
+        const auto stats = index.LookUpStats(*WITH_LOCK(cs_main, return chain.m_chain.Tip()));
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, 100);
+        BOOST_CHECK_EQUAL(stats->total_collateral, 15 * COIN);
+        BOOST_CHECK_EQUAL(stats->vault_count, 1U);
+        BOOST_CHECK_EQUAL(call("getdigidollarstats")["total_dd_supply"].getInt<int64_t>(), 100);
+        BOOST_CHECK(!index.LookUpStats(*unknown_block));
+        fixture.CreateAndProcessBlock({}, CScript() << OP_TRUE);
+        BOOST_REQUIRE(index.BlockUntilSyncedToCurrentChain());
+        BOOST_CHECK(!index.LookUpStats(*unknown_descendant));
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        index.Stop();
+    }
+    {
+        OpenGlobalRedemptionStatsIndex reopened{fixture.m_node};
+        auto& index = *g_digidollar_stats_index;
+        BOOST_REQUIRE(index.Init());
+        BOOST_REQUIRE(index.StartBackgroundSync());
+        IndexWaitSynced(index);
+        BOOST_CHECK_EQUAL(call("getdigidollarstats")["total_dd_supply"].getInt<int64_t>(), 100);
+        BOOST_CHECK(!index.LookUpStats(*unknown_block));
+        BOOST_CHECK(!index.LookUpStats(*unknown_descendant));
+    }
+}
+
+// Simulate unavailable local block data without changing any block or data file.
+struct UnavailableAncestorData {
+    CBlockIndex& index;
+    unsigned int saved_position;
+
+    explicit UnavailableAncestorData(CBlockIndex& ancestor) : index(ancestor)
+    {
+        LOCK(cs_main);
+        saved_position = index.nDataPos;
+        index.nDataPos = std::numeric_limits<unsigned int>::max();
+    }
+
+    ~UnavailableAncestorData()
+    {
+        LOCK(cs_main);
+        index.nDataPos = saved_position;
+    }
+};
+
+bool IsReferenceReadinessError(const std::runtime_error& error)
+{
+    return std::string(error.what()).find("DigiDollar volatility state not ready: restore or download ancestor") != std::string::npos;
+}
 
 } // namespace
 
@@ -674,6 +1115,407 @@ BOOST_FIXTURE_TEST_CASE(oracle_bundle_stamped_in_non_dd_blocks, MinerDDValidatio
     BOOST_CHECK_MESSAGE(found_oracle_output,
         "Non-DD block must carry the oracle bundle when a completed MuSig2 "
         "session is available — required for price-cache bootstrapping");
+}
+
+
+
+BOOST_FIXTURE_TEST_CASE(next_block_quote_uses_supplied_epoch_parameters, MinerDDValidationSetup)
+{
+    const int height = NextBlockHeight();
+    auto params = Params().GetConsensus();
+    params.nDDOracleEpochBlocks = 1;
+    COracleBundle bundle(height);
+    bundle.version = 3;
+    bundle.median_price_micro_usd = 50000;
+    bundle.timestamp = GetTime();
+    std::vector<uint8_t> oracle_ids;
+    for (int id = 0; id < params.nOracleConsensusRequired; ++id) {
+        oracle_ids.push_back(static_cast<uint8_t>(id));
+    }
+    BOOST_REQUIRE(SignRegtestV03Bundle(bundle, oracle_ids));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(OracleBundleManager::ValidateMuSig2Bundle(bundle, height, params, error), error);
+    BOOST_REQUIRE(OracleBundleManager::GetInstance().UpdateBundle(bundle));
+    CAmount quote{0};
+    const bool ready = WITH_LOCK(cs_main, return DigiDollar::GetNextBlockOracleQuote(
+        m_node.chainman->ActiveChain().Tip(), params, m_node.chainman->m_blockman, quote, error));
+    BOOST_REQUIRE_MESSAGE(ready, error);
+    BOOST_CHECK_EQUAL(quote, 50000);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_omits_boundary_mint_and_change_descendant, ThawMinerValidationSetup)
+{
+    const auto txs = PrepareCandidate(60000);
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    const auto block_template = BuildTemplate(options);
+    BOOST_REQUIRE(block_template);
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.mint->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.child->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.plain->GetHash()));
+    BOOST_CHECK_EQUAL(block_template->vTxFees[0], -PLAIN_FEE);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_keeps_eligible_mint_despite_legacy_freeze, ThawMinerValidationSetup)
+{
+    const auto txs = PrepareCandidate(59999);
+    DigiDollar::Volatility::VolatilityMonitor::TriggerFreeze(true, NextBlockHeight() - 1);
+    BOOST_REQUIRE(DigiDollar::Volatility::VolatilityMonitor::ShouldFreezeAll());
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    const auto block_template = BuildTemplate(options);
+    BOOST_REQUIRE(block_template);
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.mint->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.child->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.plain->GetHash()));
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_retries_committed_quote_failure_from_parent, ThawMinerValidationSetup)
+{
+    const auto txs = PrepareCandidate(REFERENCE_PRICE);
+    const uint256 parent_hash = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    int hook_calls{0};
+    options.on_before_test_block_validity = [&](CBlock& block) {
+        ++hook_calls;
+        BOOST_REQUIRE(BlockHasTx(block, txs.mint->GetHash()));
+        BOOST_REQUIRE(BlockHasTx(block, txs.child->GetHash()));
+        BOOST_REQUIRE(BlockHasTx(block, txs.plain->GetHash()));
+        ReplaceCommittedPrice(block, 60000);
+    };
+    const auto block_template = BuildTemplate(options);
+    BOOST_REQUIRE(block_template);
+    BOOST_CHECK_EQUAL(hook_calls, 1);
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.mint->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.child->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.plain->GetHash()));
+    BOOST_CHECK_EQUAL(block_template->block.vtx.size(), 2U);
+    BOOST_CHECK_EQUAL(block_template->vTxFees.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxSigOpsCost.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxFees[0], -PLAIN_FEE);
+    BOOST_CHECK_EQUAL(block_template->block.vtx[0]->vout[0].nValue,
+                      GetBlockSubsidy(NextBlockHeight(), Params().GetConsensus()) + PLAIN_FEE);
+    BOOST_CHECK_EQUAL(block_template->block.hashMerkleRoot, BlockMerkleRoot(block_template->block));
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()), parent_hash);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_retries_ordered_redemption_then_mint, ThawMinerERRValidationSetup)
+{
+    constexpr CAmount redemption_fee{COIN};
+    const auto fee_input = ConfirmOpTrueFunding(2 * COIN);
+    const auto txs = PrepareCandidate(REFERENCE_PRICE);
+    const auto redemption = BuildMatureRedemption(fee_input, 2 * COIN, redemption_fee);
+    AddToMempool(redemption, redemption_fee);
+    const auto parent_state = WITH_LOCK(cs_main, return m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState());
+    BOOST_REQUIRE(parent_state);
+    const auto health = DigiDollar::CalculateChainstateHealth(*parent_state, REFERENCE_PRICE);
+    BOOST_REQUIRE(health);
+    BOOST_REQUIRE_EQUAL(*health, 112);
+    BOOST_REQUIRE_EQUAL(parent_state->open_vault_principal, 200);
+    BOOST_REQUIRE_EQUAL(parent_state->collateral, 45 * COIN);
+
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    int hook_calls{0};
+    options.on_before_test_block_validity = [&](CBlock& block) {
+        ++hook_calls;
+        // Both transactions pass selection against the same parent. The high-fee
+        // normal redemption runs first and leaves the remaining vault at 75%.
+        BOOST_REQUIRE_EQUAL(block.vtx.size(), 5U);
+        BOOST_REQUIRE_EQUAL(block.vtx[1]->GetHash(), redemption->GetHash());
+        BOOST_REQUIRE(BlockHasTx(block, txs.mint->GetHash()));
+        BOOST_REQUIRE(BlockHasTx(block, txs.child->GetHash()));
+        BOOST_REQUIRE(BlockHasTx(block, txs.plain->GetHash()));
+        BlockValidationState state;
+        BOOST_REQUIRE(!TestBlockValidity(state, Params(), m_node.chainman->ActiveChainstate(), block,
+            m_node.chainman->ActiveChain().Tip(), GetAdjustedTime, false, false));
+        BOOST_REQUIRE_EQUAL(state.GetRejectReason(), "minting-blocked-during-err");
+        BOOST_REQUIRE(!state.IsError());
+    };
+    const auto block_template = BuildTemplate(options);
+    BOOST_REQUIRE(block_template);
+    BOOST_CHECK_EQUAL(hook_calls, 1);
+    BOOST_CHECK(BlockHasTx(block_template->block, redemption->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.plain->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.mint->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.child->GetHash()));
+    BOOST_CHECK_EQUAL(block_template->block.vtx.size(), 3U);
+    BOOST_CHECK_EQUAL(block_template->vTxFees.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxSigOpsCost.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxFees[0], -(redemption_fee + PLAIN_FEE));
+    BOOST_CHECK_EQUAL(block_template->block.vtx[0]->vout[0].nValue,
+                      GetBlockSubsidy(NextBlockHeight(), Params().GetConsensus()) + redemption_fee + PLAIN_FEE);
+    BOOST_CHECK_EQUAL(block_template->block.hashMerkleRoot, BlockMerkleRoot(block_template->block));
+    LOCK(cs_main);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    BOOST_CHECK(chain.CoinsTip().GetDigiDollarState() == parent_state);
+    BOOST_CHECK_EQUAL(chain.m_chain.Tip()->GetBlockHash(), block_template->block.hashPrevBlock);
+    BOOST_CHECK(chain.CoinsTip().HaveCoin(COutPoint{redeemable_mint->GetHash(), 0}));
+    BlockValidationState remaining_state;
+    BOOST_CHECK_MESSAGE(TestBlockValidity(remaining_state, Params(), chain, block_template->block,
+        chain.m_chain.Tip(), GetAdjustedTime, false, false), remaining_state.ToString());
+    BOOST_CHECK(chain.CoinsTip().GetDigiDollarState() == parent_state);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_redemption_change_is_countable_through_index_reopen, ThawMinerERRValidationSetup)
+{
+    constexpr CAmount fee_value{2 * COIN};
+    constexpr CAmount fee{COIN};
+    const auto fee_input = ConfirmOpTrueFunding(fee_value);
+    InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+    const auto missing = BuildMatureRedemption(fee_input, fee_value, fee, 100, false);
+    const auto ambiguous = BuildMatureRedemption(fee_input, fee_value, fee, 100, true, true);
+    const auto valid = BuildMatureRedemption(fee_input, fee_value, fee, 100);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto parent_health = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    BOOST_REQUIRE(parent_health);
+    const auto parent_hash = WITH_LOCK(cs_main, return chain.m_chain.Tip()->GetBlockHash());
+
+    auto check_supply = [&](const DigiDollarStatsIndex& index, CAmount supply, CAmount collateral, uint64_t vaults) {
+        LOCK(cs_main);
+        const auto* tip = chain.m_chain.Tip();
+        const auto stats = index.LookUpStats(*tip);
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, supply);
+        BOOST_CHECK_EQUAL(stats->total_collateral, collateral);
+        BOOST_CHECK_EQUAL(stats->vault_count, vaults);
+        const DigiDollar::CanonicalTxLookup lookup = [&](const uint256& hash, uint32_t height, CTransactionRef& tx) {
+            if (height > static_cast<uint32_t>(tip->nHeight)) return false;
+            const auto* source = tip->GetAncestor(height);
+            CBlock block;
+            if (!source || !chain.m_blockman.ReadBlockFromDisk(block, *source)) return false;
+            for (const auto& candidate : block.vtx) {
+                if (candidate->GetHash() == hash) { tx = candidate; return true; }
+            }
+            return false;
+        };
+        DigiDollar::ChainstateHealth reconstructed;
+        CAmount reconstructed_supply{-1};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(chain.CoinsTip(), Params().GetConsensus(),
+            lookup, reconstructed, error, {}, &reconstructed_supply), error);
+        BOOST_CHECK_EQUAL(reconstructed_supply, supply);
+        BOOST_CHECK_EQUAL(reconstructed.collateral, collateral);
+        BOOST_CHECK_EQUAL(reconstructed.active_vaults, vaults);
+    };
+
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        check_supply(opened.index, 200, 45 * COIN, 2);
+        for (const auto& redemption : {missing, ambiguous}) {
+            const auto block = CreateBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE, chain);
+            LOCK(cs_main);
+            BlockValidationState rejected;
+            BOOST_REQUIRE(!TestBlockValidity(rejected, Params(), chain, block, chain.m_chain.Tip(),
+                                             GetAdjustedTime, false, false));
+            BOOST_CHECK_EQUAL(rejected.GetRejectReason(), "bad-redeem-dd-output-amount");
+            BOOST_CHECK(!rejected.IsError());
+            BOOST_CHECK(chain.CoinsTip().GetDigiDollarState() == parent_health);
+            BOOST_CHECK(chain.m_chain.Tip()->GetBlockHash() == parent_hash);
+            BOOST_CHECK(chain.CoinsTip().HaveCoin(COutPoint{redeemable_mint->GetHash(), 0}));
+            BOOST_CHECK(chain.CoinsTip().HaveCoin(COutPoint{other_mint->GetHash(), 1}));
+
+            struct RestoreHeight {
+                int& value;
+                const int saved;
+                ~RestoreHeight() { value = saved; }
+            } restore{const_cast<Consensus::Params&>(Params().GetConsensus()).nDDThawDayHeight, THAW_HEIGHT};
+            restore.value = NextBlockHeight() + 1;
+            const auto legacy_metrics = DigiDollar::SystemHealthMonitor::GetCachedMetrics();
+            BlockValidationState legacy;
+            BOOST_REQUIRE_MESSAGE(TestBlockValidity(legacy, Params(), chain, block, chain.m_chain.Tip(),
+                                                     GetAdjustedTime, false, false), legacy.ToString());
+            BOOST_CHECK_EQUAL(DigiDollar::SystemHealthMonitor::GetCachedMetrics().totalDDSupply, legacy_metrics.totalDDSupply);
+            BOOST_CHECK_EQUAL(DigiDollar::SystemHealthMonitor::GetCachedMetrics().totalCollateral, legacy_metrics.totalCollateral);
+        }
+        BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
+        check_supply(opened.index, 200, 45 * COIN, 2);
+
+        const auto accepted = CreateAndProcessBlock({CMutableTransaction{*valid}}, CScript() << OP_TRUE);
+        BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return chain.m_chain.Tip()->GetBlockHash()), accepted.GetHash());
+        BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
+        check_supply(opened.index, 100, 15 * COIN, 1);
+        {
+            LOCK(cs_main);
+            const auto state = chain.CoinsTip().GetDigiDollarState();
+            BOOST_REQUIRE(state);
+            BOOST_CHECK_EQUAL(state->open_vault_principal, 100);
+            BOOST_CHECK_EQUAL(state->active_vaults, 1U);
+            BOOST_CHECK(chain.CoinsTip().HaveCoin(COutPoint{valid->GetHash(), 2}));
+        }
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        opened.index.Stop();
+    }
+    {
+        OpenRedemptionStatsIndex reopened{m_node};
+        BOOST_REQUIRE(reopened.index.Init());
+        BOOST_REQUIRE(reopened.index.StartBackgroundSync());
+        IndexWaitSynced(reopened.index);
+        check_supply(reopened.index, 100, 15 * COIN, 1);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_rejects_readable_current_block_body_corruption, ThawMinerERRValidationSetup)
+{
+    constexpr CAmount fee_value{2 * COIN};
+    constexpr CAmount fee{COIN};
+    const auto funding = ConfirmOpTrueFunding(fee_value);
+    InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+    const auto redemption = BuildMatureRedemption(funding, fee_value, fee, 100);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto* prefix = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+    BOOST_REQUIRE(prefix);
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        const auto stats = opened.index.LookUpStats(*prefix);
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, 200);
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        opened.index.Stop();
+    }
+    const auto accepted = CreateAndProcessBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE);
+    auto* current = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+    BOOST_REQUIRE(current->GetBlockHash() == accepted.GetHash());
+    BOOST_REQUIRE(current->pprev == prefix);
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    BOOST_REQUIRE(canonical);
+    BOOST_CHECK_EQUAL(canonical->open_vault_principal, 100);
+
+    CBlock damaged = accepted;
+    BOOST_REQUIRE_EQUAL(damaged.vtx.size(), 2U);
+    CMutableTransaction altered{*damaged.vtx[1]};
+    BOOST_REQUIRE_EQUAL(altered.vout.size(), 4U);
+    altered.vout[3].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                            << CScriptNum(3) << CScriptNum(101);
+    damaged.vtx[1] = MakeTransactionRef(altered);
+    BOOST_REQUIRE(damaged.GetHash() == accepted.GetHash());
+    BOOST_REQUIRE(BlockMerkleRoot(damaged) != damaged.hashMerkleRoot);
+    {
+        struct RestorePhysicalFailure {
+            std::atomic<int>& exit_status;
+            const int saved_status;
+            ~RestorePhysicalFailure()
+            {
+                AbortShutdown();
+                exit_status.store(saved_status);
+                SetMiscWarning({});
+            }
+        } failure{m_node.exit_status, m_node.exit_status.load()};
+        BOOST_REQUIRE(!ShutdownRequested());
+        struct RestorePosition {
+            CBlockIndex& block;
+            const int file;
+            const unsigned int position;
+            ~RestorePosition()
+            {
+                LOCK(cs_main);
+                block.nFile = file;
+                block.nDataPos = position;
+            }
+        } restore{*current, current->nFile, current->nDataPos};
+        {
+            LOCK(cs_main);
+            // Append only to fixture-owned files; retain the original accepted bytes.
+            const auto position = chain.m_blockman.SaveBlockToDisk(damaged, current->nHeight, nullptr);
+            BOOST_REQUIRE(!position.IsNull());
+            current->nFile = position.nFile;
+            current->nDataPos = position.nPos;
+            CBlock readable;
+            BOOST_REQUIRE(chain.m_blockman.ReadBlockFromDisk(readable, *current));
+            BOOST_CHECK(readable.GetHash() == current->GetBlockHash());
+            BOOST_CHECK(BlockMerkleRoot(readable) != readable.hashMerkleRoot);
+        }
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_CHECK(opened.index.GetSummary().best_block_hash == prefix->GetBlockHash());
+        {
+            ASSERT_DEBUG_LOG("DigiDollar supply index current block failed integrity verification");
+            BOOST_REQUIRE(opened.index.StartBackgroundSync());
+            // Join the actual disk reconstruction worker, including its failure path.
+            opened.index.Stop();
+        }
+        BOOST_CHECK(ShutdownRequested());
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+        BOOST_CHECK(!opened.index.GetSummary().synced);
+        BOOST_CHECK(opened.index.GetSummary().best_block_hash == prefix->GetBlockHash());
+        BOOST_CHECK(!opened.index.LookUpStats(*current));
+        const auto retained = opened.index.LookUpStats(*prefix);
+        BOOST_REQUIRE(retained);
+        BOOST_CHECK_EQUAL(retained->total_dd_supply, 200);
+        BOOST_CHECK_EQUAL(retained->total_collateral, 45 * COIN);
+        BOOST_CHECK_EQUAL(retained->vault_count, 2U);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.m_chain.Tip()) == current);
+    }
+    {
+        OpenRedemptionStatsIndex reopened{m_node};
+        BOOST_REQUIRE(reopened.index.Init());
+        BOOST_CHECK(reopened.index.GetSummary().best_block_hash == prefix->GetBlockHash());
+        BOOST_CHECK(!reopened.index.LookUpStats(*current));
+        BOOST_REQUIRE(reopened.index.StartBackgroundSync());
+        IndexWaitSynced(reopened.index);
+        const auto stats = reopened.index.LookUpStats(*current);
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, 100);
+        BOOST_CHECK_EQUAL(stats->total_collateral, 15 * COIN);
+        BOOST_CHECK_EQUAL(stats->vault_count, 1U);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_missing_token_metadata_keeps_supply_unavailable, ThawMinerERRValidationSetup)
+{
+    CheckLegacyUncountableSupply(*this, false);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_metadata_keeps_supply_unavailable, ThawMinerERRValidationSetup)
+{
+    CheckLegacyUncountableSupply(*this, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_reports_missing_reference_before_selection, ThawMinerValidationSetup)
+{
+    PrepareCandidate(REFERENCE_PRICE);
+    CBlockIndex* ancestor = FirstRequiredAncestor();
+    BOOST_REQUIRE(ancestor);
+    const auto previous_status = WITH_LOCK(cs_main, return ancestor->nStatus);
+    {
+        UnavailableAncestorData unavailable{*ancestor};
+        BlockAssembler::Options options;
+        options.blockMinFeeRate = CFeeRate(0);
+        BOOST_CHECK_EXCEPTION(BuildTemplate(options), std::runtime_error, IsReferenceReadinessError);
+    }
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return ancestor->nStatus), previous_status);
+}
+
+BOOST_FIXTURE_TEST_CASE(thaw_miner_does_not_retry_missing_reference_in_final_validation, ThawMinerValidationSetup)
+{
+    const auto txs = PrepareCandidate(REFERENCE_PRICE);
+    CBlockIndex* ancestor = FirstRequiredAncestor();
+    BOOST_REQUIRE(ancestor);
+    const auto previous_status = WITH_LOCK(cs_main, return ancestor->nStatus);
+    std::unique_ptr<UnavailableAncestorData> unavailable;
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    int hook_calls{0};
+    options.on_before_test_block_validity = [&](CBlock& block) {
+        ++hook_calls;
+        BOOST_REQUIRE(BlockHasTx(block, txs.mint->GetHash()));
+        unavailable = std::make_unique<UnavailableAncestorData>(*ancestor);
+    };
+    BOOST_CHECK_EXCEPTION(BuildTemplate(options), std::runtime_error, IsReferenceReadinessError);
+    BOOST_CHECK_EQUAL(hook_calls, 1);
+    unavailable.reset();
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return ancestor->nStatus), previous_status);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

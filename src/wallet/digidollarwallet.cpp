@@ -14,6 +14,7 @@
 #include <digidollar/txbuilder.h>
 #include <digidollar/validation.h>
 #include <digidollar/scripts.h>
+#include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <logging.h>
 #include <util/time.h>
@@ -29,6 +30,9 @@
 #include <oracle/mock_oracle.h>
 #include <oracle/bundle_manager.h>
 #include <coins.h>
+#include <consensus/err.h>
+#include <node/context.h>
+#include <validation.h>
 #include <policy/policy.h>
 
 #include <algorithm>
@@ -5446,8 +5450,38 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
 }
 
 bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAmount& amount, CTransactionRef& tx_out) {
-    auto locks = LockDDWallet();
     try {
+        node::NodeContext* node_ctx = m_wallet ? m_wallet->chain().context() : nullptr;
+        struct CandidateHealth {
+            bool active{false};
+            bool ready{false};
+            int height{0};
+            int health{-1};
+            CAmount price{0};
+            DigiDollar::ChainstateHealth state;
+            std::string error;
+        };
+        const auto capture_candidate = [&] {
+            LOCK(cs_main);
+            CandidateHealth candidate;
+            if (!node_ctx || !node_ctx->chainman) return candidate;
+            auto& chainman = *node_ctx->chainman;
+            const auto* parent = chainman.ActiveChain().Tip();
+            candidate.height = parent ? parent->nHeight + 1 : 0;
+            candidate.active = DigiDollar::IsThawDayActive(Params().GetConsensus(), candidate.height);
+            if (candidate.active) {
+                candidate.ready = DigiDollar::GetNextBlockOracleQuote(parent, Params().GetConsensus(),
+                    chainman.m_blockman, candidate.price, candidate.error) &&
+                    DigiDollar::GetChainstateHealthForNextBlock(parent, Params().GetConsensus(), chainman.m_blockman,
+                        chainman.ActiveChainstate().CoinsTip(), candidate.price, candidate.health, candidate.state, candidate.error,
+                        [&chainman] { return bool(chainman.m_interrupt); });
+            }
+            return candidate;
+        };
+        // Keep copied values, never a live parent or coins reference, across wallet work.
+        const auto candidate = capture_candidate();
+        const bool canonical_health = candidate.active;
+        auto locks = LockDDWallet();
         LogPrintf("DigiDollar: RedeemDigiDollar called - position: %s, amount: %lld\n", dd_timelock_id.ToString(), static_cast<long long>(amount));
         if (!m_wallet || m_wallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
             LogPrintf("DigiDollar: RedeemDigiDollar blocked because wallet cannot sign DD redemptions\n");
@@ -5474,12 +5508,24 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
             return false;
         }
 
-        // BUG #5 FIX: Get real height and oracle price
-        int currentHeight = m_wallet ? m_wallet->GetLastBlockHeight() : 100000;
+        // Construction uses the candidate height once canonical health rules apply.
+        int currentHeight = canonical_health ? candidate.height : m_wallet->GetLastBlockHeight();
+        if ((!node_ctx || !node_ctx->chainman) && DigiDollar::IsThawDayActive(Params().GetConsensus(), currentHeight + 1)) {
+            LogPrintf("DigiDollar: candidate chain state unavailable for redemption\n");
+            return false;
+        }
+        const int candidateHealth = candidate.health;
         CAmount oraclePrice = OracleBundleManager::GetInstance().GetLatestPrice();
         if (oraclePrice <= 0 && Params().GetChainType() == ChainType::REGTEST &&
             MockOracleManager::GetInstance().IsEnabled()) {
             oraclePrice = MockOracleManager::GetInstance().GetCurrentPrice();
+        }
+        if (canonical_health) {
+            if (!candidate.ready) {
+                LogPrintf("DigiDollar: redemption state not ready: %s\n", candidate.error);
+                return false;
+            }
+            oraclePrice = candidate.price;
         }
         if (oraclePrice <= 0) {
             LogPrintf("DigiDollar: RedeemDigiDollar blocked because no oracle price is available\n");
@@ -5487,6 +5533,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         }
 
         DigiDollar::RedeemTxBuilder builder(Params(), currentHeight, oraclePrice);
+        if (canonical_health) builder.SetCandidateHealth(candidateHealth);
 
         DigiDollar::TxBuilderRedeemParams params;
         if (!GetMintCollateralOutpoint(dd_timelock_id, params.collateralOutpoint)) {
@@ -5560,10 +5607,12 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
         params.feeRate = 35000000; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
 
-        // Select DD UTXOs to burn (any DD can be used - DD is fungible)
-        // The key is to burn the EXACT amount that was minted for this vault
+        // Fungible DD inputs fund the full-vault burn, including any emergency surcharge.
+        const CAmount requiredBurn = canonical_health ?
+            DigiDollar::ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(params.ddMinted, candidateHealth) : amount;
+        if (canonical_health) params.ddToRedeem = requiredBurn;
         CAmount selectedTotal = 0;
-        if (!SelectDDCoins(amount, params.ddUtxos, selectedTotal, &params.ddAmounts)) {
+        if (!SelectDDCoins(requiredBurn, params.ddUtxos, selectedTotal, &params.ddAmounts)) {
             LogPrintf("DigiDollar: Insufficient DD balance for redemption\n");
             return false;
         }
@@ -5601,7 +5650,23 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         params.feeAmounts = fee_amounts;  // TxBuilder needs per-UTXO amounts for fee inputs
 
         LogPrintf("DigiDollar: CALLING BuildRedemptionTransaction now...\n");
-        auto result = builder.BuildRedemptionTransaction(params);
+        auto buildFundedRedemption = [&]() {
+            auto attempt = builder.BuildRedemptionTransaction(params);
+            while (canonical_health && !attempt.success && attempt.totalFees > selectedFeeTotal) {
+                const CAmount target = attempt.totalFees;
+                params.feeUtxos.clear();
+                fee_amounts.clear();
+                if (!SelectFeeCoins(target, params.feeUtxos, selectedFeeTotal, &fee_amounts, &exclude_utxos)) {
+                    LogPrintf("DigiDollar: insufficient DGB for the selected redemption inputs and fee\n");
+                    return attempt;
+                }
+                params.feeAmounts = fee_amounts;
+                attempt = builder.BuildRedemptionTransaction(params);
+            }
+
+            return attempt;
+        };
+        auto result = buildFundedRedemption();
         LogPrintf("DigiDollar: BuildRedemptionTransaction returned success=%d, error='%s'\n",
                   result.success, result.error.c_str());
         if (!result.success) {
@@ -5614,14 +5679,36 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         // Sign the transaction (includes collateral, DD, and fee inputs)
         LogPrintf("DigiDollar: ABOUT TO CALL SignRedemptionTransaction with %d DD inputs and %d fee inputs\n",
                   params.ddUtxos.size(), params.feeUtxos.size());
-        CMutableTransaction mtx(result.tx);
-        if (!SignRedemptionTransaction(mtx, params.collateralOutpoint, params.ddUtxos, params.feeUtxos, ownerKey)) {
-            LogPrintf("DigiDollar: Failed to sign redemption transaction\n");
-            return false;
+        CMutableTransaction mtx;
+        while (true) {
+            mtx = result.tx;
+            if (!SignRedemptionTransaction(mtx, params.collateralOutpoint, params.ddUtxos, params.feeUtxos, ownerKey)) {
+                LogPrintf("DigiDollar: Failed to sign redemption transaction\n");
+                return false;
+            }
+            if (!canonical_health) break;
+            const CAmount signedFee = std::max<CAmount>(10000000,
+                (GetVirtualTransactionSize(CTransaction(mtx)) * params.feeRate + 999) / 1000);
+            if (result.totalFees >= signedFee) break;
+            params.minimumFee = signedFee;
+            result = buildFundedRedemption();
+            if (!result.success) {
+                LogPrintf("DigiDollar: redemption fee funding failed: %s\n", result.error);
+                return false;
+            }
         }
-        LogPrintf("DigiDollar: SignRedemptionTransaction RETURNED SUCCESS\n");
 
         tx_out = MakeTransactionRef(mtx);
+
+        if (canonical_health) {
+            // Wallet -> chain matches rebroadcast; capture releases the chain lock before commit.
+            const auto current = capture_candidate();
+            if (!current.ready || current.height != candidate.height ||
+                current.state != candidate.state || current.price != candidate.price) {
+                LogPrintf("DigiDollar: redemption state or quote changed; retry construction: %s\n", current.error);
+                return false;
+            }
+        }
 
         // Broadcast transaction
         std::string error;

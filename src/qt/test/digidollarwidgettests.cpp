@@ -7,6 +7,11 @@
 
 #include <consensus/digidollar.h>
 #include <consensus/merkle.h>
+#include <consensus/volatility.h>
+#include <coins.h>
+#include <digidollar/health.h>
+#include <digidollar/scripts.h>
+#include <digidollar/validation.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <key_io.h>
@@ -14,6 +19,7 @@
 #include <oracle/mock_oracle.h>
 #include <pow.h>
 #include <primitives/transaction.h>
+#include <script/interpreter.h>
 #include <qt/clientmodel.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
@@ -34,6 +40,7 @@
 #include <qt/walletview.h>
 #include <support/allocators/secure.h>
 #include <test/util/setup_common.h>
+#include <timedata.h>
 #include <validation.h>
 #include <wallet/ddcoincontrol.h>
 #include <wallet/digidollarwallet.h>
@@ -43,6 +50,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 
 #include <QApplication>
 #include <QColor>
@@ -1742,6 +1750,258 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateReady()
     QVERIFY(validationLabel != nullptr);
     QVERIFY(validationLabel->text().contains("ready", Qt::CaseInsensitive));
     QVERIFY(validationLabel->toolTip().contains("Ready to redeem"));
+}
+
+void DigiDollarWidgetTests::redeemWidgetCanonicalHealthDoesNotRequireCirculatingSupply()
+{
+    TestChain100Setup test(ChainType::REGTEST,
+        {"-digidollaractivationheight=100", "-ddthawdayheight=400", "-digidollarstatsindex=0"});
+    struct ResetOracleState {
+        ~ResetOracleState()
+        {
+            OracleBundleManager::GetInstance().Clear();
+            MockOracleManager::GetInstance().Reset();
+            DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+            DigiDollar::SystemHealthMonitor::ResetMetrics();
+        }
+    } reset_oracle;
+    OracleBundleManager::GetInstance().Clear();
+    MockOracleManager::GetInstance().Reset();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    DigiDollar::SystemHealthMonitor::ResetMetrics();
+
+    const CScript coinbase_script = GetScriptForRawPubKey(test.coinbaseKey.GetPubKey());
+    std::vector<CMutableTransaction> funding;
+    for (int i = 0; i < 4; ++i) {
+        funding.push_back(test.CreateValidMempoolTransaction(test.m_coinbase_txns[i], 0, i + 1,
+            test.coinbaseKey, CScript() << OP_TRUE, 31 * COIN, false));
+    }
+    const auto funding_block = test.CreateAndProcessBlock(funding, coinbase_script);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == funding_block.GetHash());
+    QCOMPARE(funding_block.vtx.size(), size_t{5});
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+
+    CKey owner;
+    owner.MakeNewKey(true);
+    const XOnlyPubKey owner_pubkey{owner.GetPubKey()};
+    const int mint_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height() + 1);
+    DigiDollar::MintParams mint_params;
+    mint_params.ddAmount = 100;
+    mint_params.lockHeight = mint_height + DigiDollar::LockDaysToBlocks(0);
+    mint_params.ownerKey = owner_pubkey;
+    mint_params.internalKey = DigiDollar::GetCollateralNUMSKey();
+    mint_params.oracleKeys = DigiDollar::GetOracleKeys(15);
+    std::vector<CMutableTransaction> mints;
+    for (int i = 0; i < 3; ++i) {
+        CMutableTransaction mint;
+        mint.SetDigiDollarType(DD_TX_MINT);
+        mint.vin.emplace_back(COutPoint{funding_block.vtx[i + 1]->GetHash(), 0});
+        mint.vout.emplace_back(30 * COIN, DigiDollar::CreateCollateralP2TR(mint_params));
+        mint.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner_pubkey, 100));
+        mint.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(1) << CScriptNum(100) << CScriptNum(mint_params.lockHeight) << CScriptNum(0)
+            << std::vector<unsigned char>(owner_pubkey.begin(), owner_pubkey.end()));
+        mints.push_back(std::move(mint));
+    }
+    const auto minted = test.CreateAndProcessBlock(mints, coinbase_script);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == minted.GetHash());
+    QCOMPARE(minted.vtx.size(), size_t{4});
+    for (int height = mint_height + 1; height <= mint_params.lockHeight + 1; ++height) {
+        const auto block = test.CreateAndProcessBlock({}, coinbase_script);
+        QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    }
+
+    // Mining through the timelock crosses oracle epochs. Commit a fresh signed
+    // quote for the redemption's current epoch.
+    const int redemption_quote_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height() + 1);
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    QCOMPARE(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()), redemption_quote_height);
+
+    // Legacy redemption can leave change whose amount was never serialized.
+    // A separate token remains known and can fund another vault's redemption.
+    CMutableTransaction legacy_redeem;
+    legacy_redeem.SetDigiDollarType(DD_TX_REDEEM);
+    legacy_redeem.nLockTime = mint_params.lockHeight;
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[1]->GetHash(), 0}, CScript{}, 0xfffffffe);
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[1]->GetHash(), 1});
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[2]->GetHash(), 1});
+    legacy_redeem.vin.emplace_back(COutPoint{funding_block.vtx[4]->GetHash(), 0});
+    legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
+    legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
+    legacy_redeem.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner_pubkey, 100));
+    const CScript normal = DigiDollar::CreateNormalRedemptionPath(mint_params);
+    TaprootBuilder tree;
+    tree.Add(1, normal, 0xc0);
+    tree.Add(1, DigiDollar::CreateERRPath(mint_params), 0xc0);
+    tree.Finalize(mint_params.internalKey);
+    QVERIFY(tree.IsComplete());
+    const auto spend_data = tree.GetSpendData();
+    const auto paths = spend_data.scripts.find({normal, 0xc0});
+    QVERIFY(paths != spend_data.scripts.end());
+    QVERIFY(!paths->second.empty());
+    PrecomputedTransactionData data;
+    data.Init(legacy_redeem, std::vector<CTxOut>{minted.vtx[1]->vout[0], minted.vtx[1]->vout[1],
+        minted.vtx[2]->vout[1], funding_block.vtx[4]->vout[0]}, true);
+    ScriptExecutionData execution;
+    execution.m_annex_init = true;
+    execution.m_annex_present = false;
+    execution.m_tapleaf_hash_init = true;
+    execution.m_tapleaf_hash = ComputeTapleafHash(0xc0, normal);
+    execution.m_codeseparator_pos_init = true;
+    execution.m_codeseparator_pos = 0xffffffff;
+    uint256 hash;
+    std::vector<unsigned char> signature(64);
+    QVERIFY(SignatureHashSchnorr(hash, execution, legacy_redeem, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT,
+                                data, MissingDataBehavior::ASSERT_FAIL));
+    QVERIFY(owner.SignSchnorr(hash, signature, nullptr, uint256{}));
+    legacy_redeem.vin[0].scriptWitness.stack = {signature, std::vector<unsigned char>(normal.begin(), normal.end()),
+                                             *paths->second.begin()};
+    const uint256 no_script_tree;
+    for (int i = 1; i <= 2; ++i) {
+        QVERIFY(SignatureHashSchnorr(hash, execution, legacy_redeem, i, SIGHASH_DEFAULT, SigVersion::TAPROOT,
+                                    data, MissingDataBehavior::ASSERT_FAIL));
+        QVERIFY(owner.SignSchnorr(hash, signature, &no_script_tree, uint256{}));
+        legacy_redeem.vin[i].scriptWitness.stack = {signature};
+    }
+    auto& chainstate = test.m_node.chainman->ActiveChainstate();
+    const auto redeemed = test.CreateBlock({legacy_redeem}, coinbase_script, chainstate);
+    BlockValidationState redemption_state;
+    const bool redemption_valid = WITH_LOCK(cs_main, return TestBlockValidity(redemption_state, Params(), chainstate,
+        redeemed, chainstate.m_chain.Tip(), GetAdjustedTime));
+    QVERIFY2(redemption_valid, redemption_state.ToString().c_str());
+    QVERIFY(test.m_node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(redeemed), true, true, nullptr));
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == redeemed.GetHash());
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()) < 400);
+    const int redeemed_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height());
+    for (int height = redeemed_height + 1; height <= 400; ++height) {
+        const auto block = test.CreateAndProcessBlock({}, coinbase_script);
+        QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    }
+    // The candidate health request needs a quote for the epoch after activation.
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    QCOMPARE(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()), 401);
+    const auto canonical = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState());
+    QVERIFY(canonical && canonical->history_checked);
+    QCOMPARE(canonical->open_vault_principal, CAmount{200});
+    QCOMPARE(canonical->collateral, CAmount{60 * COIN});
+    QCOMPARE(canonical->active_vaults, uint64_t{2});
+
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-unknown-supply");
+    const auto position_id = minted.vtx[2]->GetHash();
+    wallet->EnsureDDWallet();
+    auto* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet);
+    WalletCollateralPosition position;
+    QVERIFY(dd_wallet->ExtractPositionFromMintTx(*minted.vtx[2], mint_height, position));
+    // The vault remains open after its token was spent. Store only the vault
+    // metadata; adding a new mint position would also add its spent token.
+    QVERIFY(dd_wallet->WriteDDTimeLock(position));
+    const COutPoint spent_position_token{position_id, 1};
+    QVERIFY(!WITH_LOCK(cs_main, return chainstate.CoinsTip().HaveCoin(spent_position_token)));
+    QVERIFY(WITH_LOCK(cs_main, return chainstate.CoinsTip().HaveCoin(COutPoint{position_id, 0})));
+    QVERIFY(!dd_wallet->HasDDUTXO(spent_position_token));
+    dd_wallet->StoreOwnerKey(position_id, owner);
+    const auto token_key = owner_pubkey.CreateTapTweak(nullptr);
+    QVERIFY(token_key);
+    dd_wallet->StoreAddressKey(token_key->first, owner);
+    {
+        LOCK(wallet->cs_wallet);
+        // Keep wallet confirmation depths aligned with the accepted chain.
+        wallet->SetLastBlockProcessed(401, canonical->best_block);
+        wallet->AddToWallet(minted.vtx[3], wallet::TxStateConfirmed{minted.GetHash(), mint_height, 3});
+    }
+    const COutPoint known_token{minted.vtx[3]->GetHash(), 1};
+    dd_wallet->AddDDUTXO(known_token, 100);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip().HaveCoin(known_token)));
+    CKey spending_key;
+    QVERIFY(dd_wallet->GetDDOutputSpendingKey(minted.vtx[3]->vout[1], spending_key));
+    QVERIFY(spending_key.GetPubKey() == owner.GetPubKey());
+    QCOMPARE(dd_wallet->GetTotalDDBalance(), CAmount{100});
+    const auto spendable_tokens = dd_wallet->GetDDUTXOs();
+    QCOMPARE(spendable_tokens.size(), size_t{1});
+    QVERIFY(spendable_tokens.front().outpoint == known_token);
+    QCOMPARE(spendable_tokens.front().dd_amount, CAmount{100});
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    WalletContext& context = *m_node.walletLoader().context();
+    AddWallet(context, wallet);
+    struct RemoveTestWallet {
+        WalletContext& context;
+        const std::shared_ptr<wallet::CWallet>& wallet;
+        ~RemoveTestWallet() { RemoveWallet(context, wallet, std::nullopt); }
+    } remove_wallet{context, wallet};
+
+    const UniValue params(UniValue::VARR);
+    bool supply_unavailable{false};
+    try {
+        mini_gui.walletModel->executeRpc("getdigidollarstats", params);
+    } catch (const UniValue& error) {
+        supply_unavailable = error["message"].get_str().find("invalid creating token metadata") != std::string::npos;
+    }
+    QVERIFY2(supply_unavailable, "Legacy token change must leave circulating supply unavailable");
+    const auto protection = mini_gui.walletModel->executeRpc("getprotectionstatus", params);
+    QVERIFY(protection["next_block_health"]["ready"].get_bool());
+    QVERIFY(protection["next_block_health"]["health_percentage"].getInt<int>() >= 100);
+
+    DigiDollarRedeemWidget redeem_widget;
+    redeem_widget.setWalletModel(mini_gui.walletModel.get());
+    redeem_widget.setClientModel(mini_gui.clientModel.get());
+    redeem_widget.m_selectedPositionId = QString::fromStdString(position_id.GetHex());
+    redeem_widget.m_positionIdEdit->setText(redeem_widget.m_selectedPositionId);
+    redeem_widget.m_positionFound = true;
+    redeem_widget.m_positionDDMinted = 1.0;
+    redeem_widget.m_positionDGBCollateral = 30.0;
+    redeem_widget.m_positionLockTier = 0;
+    redeem_widget.m_positionBlocksRemaining = 0;
+    redeem_widget.m_redeemableAmount = 1.0;
+    redeem_widget.m_amountEdit->setText(QStringLiteral("1.00"));
+    QVERIFY(redeem_widget.validateDDBalance());
+    redeem_widget.updateRedeemButtons();
+    QVERIFY(redeem_widget.m_redeemButton->isEnabled());
+
+    bool confirmation_seen{false};
+    QTimer close_confirmation;
+    connect(&close_confirmation, &QTimer::timeout, [&] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            confirmation_seen = dialog->windowTitle() == QStringLiteral("Confirm Redeem");
+            dialog->done(QMessageBox::No);
+        }
+    });
+    close_confirmation.start(0);
+    redeem_widget.onRedeemClicked();
+    close_confirmation.stop();
+    QVERIFY(confirmation_seen);
+
+    auto& coins = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip());
+    const auto saved = WITH_LOCK(cs_main, return coins.GetDigiDollarState());
+    QVERIFY(saved);
+    {
+        LOCK(cs_main);
+        auto unchecked = *saved;
+        unchecked.history_checked = false;
+        coins.SetDigiDollarState(unchecked);
+    }
+    struct RestoreCanonicalState {
+        CCoinsViewCache& coins;
+        std::optional<DigiDollar::ChainstateHealth> saved;
+        ~RestoreCanonicalState() { LOCK(cs_main); coins.SetDigiDollarState(saved); }
+    } restore{coins, saved};
+    QVERIFY(!mini_gui.walletModel->executeRpc("getprotectionstatus", params)["next_block_health"]["ready"].get_bool());
+    QVERIFY(!redeem_widget.validateDDBalance());
+    redeem_widget.updateRedeemButtons();
+    QVERIFY(!redeem_widget.m_redeemButton->isEnabled());
+    QSignalSpy messages(&redeem_widget, &DigiDollarRedeemWidget::message);
+    confirmation_seen = false;
+    close_confirmation.start(0);
+    redeem_widget.onRedeemClicked();
+    close_confirmation.stop();
+    QVERIFY(!confirmation_seen);
+    QCOMPARE(messages.count(), 1);
+    QCOMPARE(messages.at(0).at(0).toString(), QStringLiteral("Redemption unavailable"));
 }
 
 void DigiDollarWidgetTests::positionsWidgetLockedTooltipShowsRemainingBlocksAndTime()

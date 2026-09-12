@@ -117,6 +117,8 @@ private:
     QGridLayout* m_collateralLayout;
     QLabel* m_oraclePriceLabel;
     QLabel* m_oraclePriceValue;
+    QLabel* m_mintStatusLabel{nullptr};
+    bool m_mintVolatilityAllowed{true};
     QLabel* m_collateralLabel;
     QLabel* m_collateralValue;
     QLabel* m_ratioLabel;

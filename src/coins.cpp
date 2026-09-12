@@ -12,8 +12,9 @@
 
 bool CCoinsView::GetCoin(const COutPoint &outpoint, Coin &coin) const { return false; }
 uint256 CCoinsView::GetBestBlock() const { return uint256(); }
+std::optional<DigiDollar::ChainstateHealth> CCoinsView::GetDigiDollarState() const { return std::nullopt; }
 std::vector<uint256> CCoinsView::GetHeadBlocks() const { return std::vector<uint256>(); }
-bool CCoinsView::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase) { return false; }
+bool CCoinsView::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase, const std::optional<DigiDollar::ChainstateHealth>& dd_state) { return false; }
 std::unique_ptr<CCoinsViewCursor> CCoinsView::Cursor() const { return nullptr; }
 
 bool CCoinsView::HaveCoin(const COutPoint &outpoint) const
@@ -26,9 +27,10 @@ CCoinsViewBacked::CCoinsViewBacked(CCoinsView *viewIn) : base(viewIn) { }
 bool CCoinsViewBacked::GetCoin(const COutPoint &outpoint, Coin &coin) const { return base->GetCoin(outpoint, coin); }
 bool CCoinsViewBacked::HaveCoin(const COutPoint &outpoint) const { return base->HaveCoin(outpoint); }
 uint256 CCoinsViewBacked::GetBestBlock() const { return base->GetBestBlock(); }
+std::optional<DigiDollar::ChainstateHealth> CCoinsViewBacked::GetDigiDollarState() const { return base->GetDigiDollarState(); }
 std::vector<uint256> CCoinsViewBacked::GetHeadBlocks() const { return base->GetHeadBlocks(); }
 void CCoinsViewBacked::SetBackend(CCoinsView &viewIn) { base = &viewIn; }
-bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase) { return base->BatchWrite(mapCoins, hashBlock, erase); }
+bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase, const std::optional<DigiDollar::ChainstateHealth>& dd_state) { return base->BatchWrite(mapCoins, hashBlock, erase, dd_state); }
 std::unique_ptr<CCoinsViewCursor> CCoinsViewBacked::Cursor() const { return base->Cursor(); }
 size_t CCoinsViewBacked::EstimateSize() const { return base->EstimateSize(); }
 
@@ -179,7 +181,86 @@ void CCoinsViewCache::SetBestBlock(const uint256 &hashBlockIn) {
     hashBlock = hashBlockIn;
 }
 
-bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlockIn, bool erase) {
+std::optional<DigiDollar::ChainstateHealth> CCoinsViewCache::GetDigiDollarState() const
+{
+    if (!m_dd_state_loaded) {
+        m_dd_state = base->GetDigiDollarState();
+        m_dd_state_loaded = true;
+    }
+    if (m_dd_state && (!m_dd_state->IsValid() || m_dd_state->best_block != GetBestBlock())) return std::nullopt;
+    return m_dd_state;
+}
+
+void CCoinsViewCache::SetDigiDollarState(std::optional<DigiDollar::ChainstateHealth> state)
+{
+    m_dd_state = std::move(state);
+    m_dd_state_loaded = true;
+}
+
+namespace {
+/** The backing cursor can use a database-specific ordering. Filter overridden
+ * outpoints while visiting it, then visit the cache copy, without relying on
+ * that ordering or publishing any unflushed changes. */
+class CacheCoinsCursor final : public CCoinsViewCursor {
+    using Overlay = std::unordered_map<COutPoint, Coin, SaltedOutpointHasher>;
+    std::unique_ptr<CCoinsViewCursor> m_base;
+    Overlay m_overlay;
+    Overlay::const_iterator m_it;
+
+    void Skip()
+    {
+        while (m_base->Valid()) {
+            COutPoint key;
+            if (!m_base->GetKey(key) || m_overlay.count(key) == 0) return;
+            m_base->Next();
+        }
+        while (m_it != m_overlay.end() && m_it->second.IsSpent()) ++m_it;
+    }
+
+public:
+    CacheCoinsCursor(std::unique_ptr<CCoinsViewCursor> base, const CCoinsMap& cache, const uint256& block)
+        : CCoinsViewCursor(block), m_base(std::move(base))
+    {
+        for (const auto& [outpoint, entry] : cache) {
+            if (entry.flags & CCoinsCacheEntry::DIRTY) m_overlay.emplace(outpoint, entry.coin);
+        }
+        m_it = m_overlay.begin();
+        Skip();
+    }
+    bool GetKey(COutPoint& key) const override
+    {
+        if (m_base->Valid()) return m_base->GetKey(key);
+        if (m_it == m_overlay.end()) return false;
+        key = m_it->first;
+        return true;
+    }
+    bool GetValue(Coin& coin) const override
+    {
+        if (m_base->Valid()) return m_base->GetValue(coin);
+        if (m_it == m_overlay.end()) return false;
+        coin = m_it->second;
+        return true;
+    }
+    bool Valid() const override { return m_base->Valid() || m_it != m_overlay.end(); }
+    void CheckStatus() const override { m_base->CheckStatus(); }
+    void Next() override
+    {
+        if (m_base->Valid()) m_base->Next();
+        else if (m_it != m_overlay.end()) ++m_it;
+        Skip();
+    }
+};
+} // namespace
+
+std::unique_ptr<CCoinsViewCursor> CCoinsViewCache::Cursor() const
+{
+    auto cursor = base->Cursor();
+    if (!cursor) return nullptr;
+    return std::make_unique<CacheCoinsCursor>(std::move(cursor), cacheCoins, GetBestBlock());
+}
+
+bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlockIn, bool erase, const std::optional<DigiDollar::ChainstateHealth>& dd_state) {
+    if (dd_state && (!dd_state->IsValid() || dd_state->best_block != hashBlockIn)) return false;
     for (CCoinsMap::iterator it = mapCoins.begin();
             it != mapCoins.end();
             it = erase ? mapCoins.erase(it) : std::next(it)) {
@@ -248,25 +329,51 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlockIn
         }
     }
     hashBlock = hashBlockIn;
+    SetDigiDollarState(dd_state);
     return true;
 }
 
 bool CCoinsViewCache::Flush() {
-    bool fOk = base->BatchWrite(cacheCoins, hashBlock, /*erase=*/true);
+    const auto state = GetDigiDollarState();
+    auto failed = [&] {
+        SetDigiDollarState(std::nullopt);
+        cachedCoinsUsage = 0;
+        for (const auto& [_, entry] : cacheCoins) cachedCoinsUsage += entry.coin.DynamicMemoryUsage();
+    };
+    bool fOk;
+    try {
+        fOk = base->BatchWrite(cacheCoins, GetBestBlock(), /*erase=*/true, state);
+    } catch (...) {
+        failed();
+        throw;
+    }
     if (fOk) {
         if (!cacheCoins.empty()) {
             /* BatchWrite must erase all cacheCoins elements when erase=true. */
             throw std::logic_error("Not all cached coins were erased");
         }
         ReallocateCache();
+        cachedCoinsUsage = 0;
+    } else {
+        failed();
     }
-    cachedCoinsUsage = 0;
     return fOk;
 }
 
 bool CCoinsViewCache::Sync()
 {
-    bool fOk = base->BatchWrite(cacheCoins, hashBlock, /*erase=*/false);
+    const auto state = GetDigiDollarState();
+    bool fOk;
+    try {
+        fOk = base->BatchWrite(cacheCoins, GetBestBlock(), /*erase=*/false, state);
+    } catch (...) {
+        SetDigiDollarState(std::nullopt);
+        throw;
+    }
+    if (!fOk) {
+        SetDigiDollarState(std::nullopt);
+        return false;
+    }
     // Instead of clearing `cacheCoins` as we would in Flush(), just clear the
     // FRESH/DIRTY flags of any coin that isn't spent.
     for (auto it = cacheCoins.begin(); it != cacheCoins.end(); ) {

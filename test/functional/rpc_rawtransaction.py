@@ -76,6 +76,8 @@ class RawTransactionsTest(DigiByteTestFramework):
         # whitelist all peers to speed up tx relay / mempool sync
         for args in self.extra_args:
             args.append("-whitelist=noban@127.0.0.1")
+            # This fixture requires ordinary DGB history to be prunable.
+            args.append("-digidollaractivationheight=2147483646")
         self.supports_cli = False
 
     def setup_network(self):
@@ -248,6 +250,13 @@ class RawTransactionsTest(DigiByteTestFramework):
         # check that verbosity 2 for a mempool tx will fallback to verbosity 1
         # Do this with a pruned chain, as a regression test for https://github.com/digibyte/digibyte/pull/29003
         self.generate(self.nodes[2], 400)
+        # The earlier reorg checks move future prune locks back to the fork.
+        # Restore the configured DD floor before this independent pruning check.
+        self.restart_node(2)
+        self.connect_nodes(0, 2)
+        self.connect_nodes(1, 2)
+        self.sync_all()
+        assert_equal(self.nodes[2].getdeploymentinfo()["deployments"]["digidollar"]["height"], 2147483646)
         assert_greater_than(self.nodes[2].pruneblockchain(250), 0)
         mempool_tx = self.wallet.send_self_transfer(from_node=self.nodes[2])['txid']
         gottx = self.nodes[2].getrawtransaction(txid=mempool_tx, verbosity=2)

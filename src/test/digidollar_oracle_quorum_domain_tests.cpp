@@ -163,6 +163,7 @@ Consensus::Params MakeQuorumDomainParams(int total_oracles, int required)
     params.nOraclePubkeyCount = total_oracles;
     params.nOracleConsensusRequired = required;
     params.vOraclePublicKeys.clear();
+    params.vOracleCompressedPublicKeys.clear();
 
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     BOOST_REQUIRE(ctx);
@@ -178,6 +179,11 @@ Consensus::Params MakeQuorumDomainParams(int total_oracles, int required)
         std::array<unsigned char, 32> serialized{};
         BOOST_REQUIRE(secp256k1_xonly_pubkey_serialize(ctx, serialized.data(), &xonly));
         params.vOraclePublicKeys.push_back(HexStr(serialized));
+        std::vector<unsigned char> compressed(CPubKey::COMPRESSED_SIZE);
+        size_t compressed_size = compressed.size();
+        BOOST_REQUIRE(secp256k1_ec_pubkey_serialize(ctx, compressed.data(), &compressed_size,
+                                                  &pubkey, SECP256K1_EC_COMPRESSED));
+        params.vOracleCompressedPublicKeys.push_back(compressed);
     }
     secp256k1_context_destroy(ctx);
     return params;
@@ -513,8 +519,13 @@ BOOST_AUTO_TEST_CASE(aggregate_pubkey_changes_when_single_key_rotates)
     BOOST_REQUIRE(secp256k1_xonly_pubkey_from_pubkey(ctx, &xonly, &parity, &pubkey));
     std::array<unsigned char, 32> serialized{};
     BOOST_REQUIRE(secp256k1_xonly_pubkey_serialize(ctx, serialized.data(), &xonly));
+    std::vector<unsigned char> compressed(CPubKey::COMPRESSED_SIZE);
+    size_t compressed_size = compressed.size();
+    BOOST_REQUIRE(secp256k1_ec_pubkey_serialize(ctx, compressed.data(), &compressed_size,
+                                              &pubkey, SECP256K1_EC_COMPRESSED));
     secp256k1_context_destroy(ctx);
     rotated.vOraclePublicKeys[11] = HexStr(serialized);
+    rotated.vOracleCompressedPublicKeys[11] = compressed;
 
     BOOST_CHECK_MESSAGE(rotated.vOraclePublicKeys[11] != base.vOraclePublicKeys[11],
         "test setup must actually rotate the slot 11 key");
@@ -524,32 +535,12 @@ BOOST_AUTO_TEST_CASE(aggregate_pubkey_changes_when_single_key_rotates)
 
     secp256k1_xonly_pubkey agg_base{}, agg_rot{};
 
-    // Drive aggregation directly off the params under test; this mirrors the
-    // anonymous-namespace helper inside bundle_manager.cpp without depending
-    // on the active chainparams selector.
-    auto compute_agg = [](const Consensus::Params& p,
+    MuSig2OracleAggregator aggregator;
+    auto compute_agg = [&](const Consensus::Params& params,
                            const std::vector<uint8_t>& ids,
-                           secp256k1_xonly_pubkey& out_pk) -> bool {
-        secp256k1_context* ctx2 = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-        if (!ctx2) return false;
-        std::vector<secp256k1_pubkey> pks(ids.size());
-        std::vector<const secp256k1_pubkey*> ptrs(ids.size());
-        for (size_t i = 0; i < ids.size(); ++i) {
-            const auto raw = ParseHex(p.vOraclePublicKeys[ids[i]]);
-            std::vector<unsigned char> compressed;
-            compressed.reserve(33);
-            compressed.push_back(0x02);
-            compressed.insert(compressed.end(), raw.begin(), raw.end());
-            if (!secp256k1_ec_pubkey_parse(ctx2, &pks[i], compressed.data(), compressed.size())) {
-                secp256k1_context_destroy(ctx2);
-                return false;
-            }
-            ptrs[i] = &pks[i];
-        }
-        secp256k1_musig_keyagg_cache c{};
-        const bool ok = secp256k1_musig_pubkey_agg(ctx2, &out_pk, &c, ptrs.data(), ptrs.size()) == 1;
-        secp256k1_context_destroy(ctx2);
-        return ok;
+                           secp256k1_xonly_pubkey& out_pk) {
+        secp256k1_musig_keyagg_cache cache{};
+        return aggregator.ComputeAggregatePubkey(ids, params, out_pk, cache);
     };
 
     BOOST_REQUIRE(compute_agg(base, signers, agg_base));
@@ -577,11 +568,7 @@ BOOST_AUTO_TEST_CASE(cross_network_aggregate_differs_between_regtest_and_mainnet
         std::vector<secp256k1_pubkey> pks(n);
         std::vector<const secp256k1_pubkey*> ptrs(n);
         for (size_t i = 0; i < n; ++i) {
-            const auto raw = ParseHex(p.vOraclePublicKeys[i]);
-            std::vector<unsigned char> compressed;
-            compressed.reserve(33);
-            compressed.push_back(0x02);
-            compressed.insert(compressed.end(), raw.begin(), raw.end());
+            const auto& compressed = p.vOracleCompressedPublicKeys[i];
             if (!secp256k1_ec_pubkey_parse(ctx, &pks[i], compressed.data(), compressed.size())) {
                 secp256k1_context_destroy(ctx);
                 return false;

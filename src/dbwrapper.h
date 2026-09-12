@@ -142,6 +142,8 @@ public:
     ~CDBIterator();
 
     bool Valid() const;
+    //! Throw on an iterator read error, including an error reported at end of scan.
+    void CheckStatus() const;
 
     void SeekToFirst();
 

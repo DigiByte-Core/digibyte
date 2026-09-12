@@ -116,6 +116,9 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, const std::vecto
     gArgs.ClearPathCache();
     {
         m_node.args->ClearArgs();
+        // Help defaults are built for every network before the new arguments
+        // are parsed. Do not let the previous fixture's command line select them.
+        m_node.args->LockSettings([](auto& settings) { settings.command_line_options.clear(); });
         SetupServerArgs(*m_node.args);
         std::string error;
         if (!m_node.args->ParseParameters(arguments.size(), arguments.data(), error)) {

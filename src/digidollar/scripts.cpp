@@ -114,7 +114,7 @@ CScript CreateERRPath(const MintParams& params)
     return script;
 }
 
-CScript CreateCollateralP2TR(const MintParams& params)
+CScript CreateCollateralP2TR(const MintParams& params, bool register_metadata)
 {
     if (params.ddAmount <= 0 || params.lockHeight < 0 || !params.internalKey.IsFullyValid()) {
         // LogPrintf("DigiDollar: Invalid parameters for P2TR collateral script\n");
@@ -166,7 +166,7 @@ CScript CreateCollateralP2TR(const MintParams& params)
         //           params.ddAmount, scriptPubKey.size());
 
         // Phase 1: Register metadata for testing
-        RegisterScriptMetadata(scriptPubKey, DigiDollar::ScriptType::COLLATERAL_LOCK, params.ddAmount, params.lockHeight);
+        if (register_metadata) RegisterScriptMetadata(scriptPubKey, DigiDollar::ScriptType::COLLATERAL_LOCK, params.ddAmount, params.lockHeight);
 
         return scriptPubKey;
 

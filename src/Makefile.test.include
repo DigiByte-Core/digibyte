@@ -75,6 +75,10 @@ DIGIBYTE_TESTS =\
   test/base64_tests.cpp \
   test/digidollar_activation_tests.cpp \
   test/digidollar_thawday_tests.cpp \
+  test/digidollar_thaw_volatility_tests.cpp \
+  test/digidollar_thaw_recovery_tests.cpp \
+  test/digidollar_chainstate_tests.cpp \
+  test/digidollar_chainstate_validation_tests.cpp \
   test/digidollar_activation_wave12_tests.cpp \
   test/digidollar_thawday_chainparams_tests.cpp \
   test/digidollar_thawday_selection_tests.cpp \
@@ -98,6 +102,9 @@ DIGIBYTE_TESTS =\
   test/digidollar_err_tests.cpp \
   test/digidollar_health_dca_tests.cpp \
   test/digidollar_health_tests.cpp \
+  test/digidollar_chainstate_db_tests.cpp \
+  test/digidollar_stats_migration_tests.cpp \
+  test/digidollar_accounting_transition_tests.cpp \
   test/digidollar_t2_05_tests.cpp \
   test/digidollar_opcodes_tests.cpp \
   test/digidollar_script_attacks_tests.cpp \
@@ -166,9 +173,11 @@ DIGIBYTE_TESTS =\
   test/musig2_bundle_mining_tests.cpp \
   test/redteam_phase2_audit_tests.cpp \
   test/oracle_consensus_threshold_tests.cpp \
+  test/oracle_params_aggregation_tests.cpp \
   test/digidollar_p2p_tests.cpp \
   test/digidollar_rh46_rpc_input_validation_tests.cpp \
   test/digidollar_rpc_tests.cpp \
+  test/digidollar_rpc_totals_cache_tests.cpp \
   test/digidollar_integration_attack_tests.cpp \
   test/digidollar_redteam_tests.cpp \
   test/digidollar_rh26_tests.cpp \
@@ -340,6 +349,7 @@ DIGIBYTE_TESTS += \
   wallet/test/digidollar_wave17_spendability_tests.cpp \
   wallet/test/digidollar_wave17_helper_asymmetry_tests.cpp \
   test/digidollar_rpc_unit_tests.cpp \
+  test/digidollar_wallet_candidate_lock_tests.cpp \
   test/digidollar_wave18_rpc_schema_tests.cpp \
   test/digidollar_wallet_hd_tests.cpp
 
@@ -535,6 +545,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/digidollar_txbuilder.cpp \
  test/fuzz/digidollar_txbuilder_validate.cpp \
  test/fuzz/digidollar_health.cpp \
+ test/fuzz/digidollar_chainstate.cpp \
  test/fuzz/digidollar_dca_volatility.cpp \
  test/fuzz/digidollar_lock_tier.cpp \
  test/fuzz/digidollar_prune_blockdb.cpp \

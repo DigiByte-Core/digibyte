@@ -649,6 +649,7 @@ libdigibyte_consensus_a_SOURCES = \
   consensus/amount.h \
   consensus/digidollar.cpp \
   consensus/digidollar.h \
+  consensus/digidollar_state.h \
   consensus/digidollar_transaction_validation.cpp \
   consensus/digidollar_transaction_validation.h \
   consensus/digidollar_tx.cpp \

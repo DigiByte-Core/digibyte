@@ -181,7 +181,9 @@ CAmount MintTxBuilder::CalculateRequiredCollateral(CAmount ddAmount, int lockDay
         LogPrintf("DigiDollar TxBuilder: Cannot calculate collateral without canonical system health\n");
         return 0;
     }
-    int effectiveRatio = DCA::DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemCollateral);
+    int effectiveRatio = IsThawDayActive(chainParams.GetConsensus(), currentHeight) ?
+        DCA::DynamicCollateralAdjustment::ApplyDCAForHealth(baseRatio, systemCollateral) :
+        DCA::DynamicCollateralAdjustment::ApplyDCA(baseRatio, systemCollateral);
     if (effectiveRatio <= 0 || effectiveRatio == std::numeric_limits<int>::max()) {
         LogPrintf("DigiDollar TxBuilder: DCA calculation failed (baseRatio=%d, health=%d)\n",
                   baseRatio, systemCollateral);
@@ -313,6 +315,9 @@ bool MintTxBuilder::ValidateMintParams(const TxBuilderMintParams& params) const 
 }
 
 int TxBuilder::GetCurrentSystemCollateral() const {
+    if (IsThawDayActive(chainParams.GetConsensus(), currentHeight)) {
+        return candidateHealth && *candidateHealth >= 0 && *candidateHealth <= 30000 ? *candidateHealth : -1;
+    }
     int systemHealth = DCA::DynamicCollateralAdjustment::GetCurrentSystemHealth();
     if (systemHealth >= 0) {
         return systemHealth;
@@ -352,6 +357,12 @@ TxBuilderResult MintTxBuilder::BuildMintTransaction(const TxBuilderMintParams& p
     if (oraclePrice <= 0) {
         result.error = "Oracle price unavailable or invalid";
         return result;
+    }
+
+    if (IsThawDayActive(chainParams.GetConsensus(), currentHeight)) {
+        const int health = GetCurrentSystemCollateral();
+        if (health < 0) { result.error = "DigiDollar candidate health state not ready"; return result; }
+        if (health < 100) { result.error = "Minting blocked by candidate emergency health"; return result; }
     }
 
     // Create transaction
@@ -937,6 +948,13 @@ CAmount RedeemTxBuilder::CalculateRedemptionAmount(const TxBuilderRedeemParams& 
 
     // Calculate DGB to release based on DD burned and current conditions
 
+    if (IsThawDayActive(chainParams.GetConsensus(), currentHeight)) {
+        const int health = GetCurrentSystemCollateral();
+        if (health < 0 || position.ddMinted <= 0) return 0;
+        const CAmount required = ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(position.ddMinted, health);
+        return required > 0 && params.ddToRedeem >= required ? position.dgbLocked : 0;
+    }
+
     if (params.path == RedemptionPath::ERR) {
         // ERR (Emergency Redemption Ratio) path:
         // System < 100% requires MORE DD to burn for full collateral
@@ -1129,6 +1147,16 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
                  position.dgbLocked, position.ddMinted, position.unlockHeight);
     }
 
+    if (IsThawDayActive(chainParams.GetConsensus(), currentHeight)) {
+        const int health = GetCurrentSystemCollateral();
+        if (health < 0) { result.error = "DigiDollar candidate health state not ready"; return result; }
+        const auto expected = health < 100 ? RedemptionPath::ERR : RedemptionPath::NORMAL;
+        if (params.path != expected) {
+            result.error = "Candidate emergency health changed; rebuild the redemption with the current required burn";
+            return result;
+        }
+    }
+
     CAmount ddToBurn = params.ddToRedeem;
     if (params.path == RedemptionPath::ERR) {
         const int systemHealth = GetCurrentSystemCollateral();
@@ -1287,6 +1315,10 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     // policy used by mint and transfer builders.
     CAmount calculatedFee = CalculateFee(tx, params.feeRate);
     result.totalFees = std::max<CAmount>(calculatedFee, MIN_DD_TX_FEE);
+    if (IsThawDayActive(chainParams.GetConsensus(), currentHeight)) {
+        if (!MoneyRange(params.minimumFee)) { result.error = "Invalid redemption fee requirement"; return result; }
+        result.totalFees = std::max(result.totalFees, params.minimumFee);
+    }
     if (result.totalFees > calculatedFee) {
         LogPrintf("DigiDollar: Calculated redemption fee (%d sats) below DD minimum fee, using %d sats\n",
                   calculatedFee, result.totalFees);
