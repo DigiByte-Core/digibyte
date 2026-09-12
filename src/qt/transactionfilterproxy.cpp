@@ -49,8 +49,13 @@ bool TransactionFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &
         return false;
     }
 
-    qint64 amount = llabs(index.data(TransactionTableModel::AmountRole).toLongLong());
-    if (amount < minAmount)
+    // The minimum-amount box takes a DigiByte figure, so it only applies to
+    // rows that hold a DigiByte amount. A row that holds DigiDollars instead
+    // has no DigiByte figure to compare, and hiding it would make a mint or a
+    // transfer look as if it had gone missing.
+    const qint64 amount = llabs(index.data(TransactionTableModel::AmountRole).toLongLong());
+    const qint64 amountDD = llabs(index.data(TransactionTableModel::AmountDDRole).toLongLong());
+    if (amount < minAmount && amountDD == 0)
         return false;
 
     return true;

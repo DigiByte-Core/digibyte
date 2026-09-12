@@ -18,10 +18,12 @@
 
 #ifdef ENABLE_WALLET
 #include <qt/test/addressbooktests.h>
+#include <qt/test/ddtransactiontabletests.h>
 #include <qt/test/wallettests.h>
 #include <qt/test/digidollarwidgettests.h>
 #include <qt/test/digidollarwave19widgettests.h>
 #include <qt/test/digidollarmintrecordtests.h>
+#include <qt/test/ddtransactionrecordtests.h>
 #endif // ENABLE_WALLET
 
 #include <QApplication>
@@ -131,6 +133,12 @@ int main(int argc, char* argv[])
     // collide.
     DigiDollarMintRecordTests test9(app.node());
     num_test_failures += QTest::qExec(&test9);
+
+    DDTransactionRecordTests test10(app.node());
+    num_test_failures += QTest::qExec(&test10);
+
+    DDTransactionTableTests test11(app.node());
+    num_test_failures += QTest::qExec(&test11);
 #endif
 
     if (num_test_failures) {

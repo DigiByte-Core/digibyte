@@ -47,8 +47,10 @@ struct TxBuilderMintParams {
     CAmount feeRate;            // Fee rate in sat/vB
     std::vector<COutPoint> utxos; // Available UTXOs for collateral
 
-    // Optional: Destination for DGB change output. Production wallet/RPC/Qt
-    // paths must set this to a wallet-controlled address.
+    // Where leftover DGB goes. Set this to an address the wallet owns. It must
+    // be an ordinary bech32 address, never taproot: a mint may hold DGB in only
+    // one taproot output, the locked collateral. If a mint would leave change
+    // behind and this is not set, the build fails and no transaction is made.
     std::optional<CTxDestination> dgbChangeDest;
 
     TxBuilderMintParams() : ddAmount(0), lockDays(0), lockTier(0), feeRate(1000) {} // Default 1000 sat/vB
@@ -64,8 +66,9 @@ struct TxBuilderTransferParams {
     std::vector<CAmount> feeAmounts;   // DGB amounts for each fee UTXO (parallel to feeUtxos)
     CKey spenderKey;            // Key for signing DD inputs
 
-    // Optional: Destination for DGB change output (if not set, uses spenderKey pubkey)
-    // CRITICAL: Must be set to a wallet-controlled address to avoid losing DGB!
+    // Where leftover DGB goes. Set this to an address the wallet owns. If a
+    // transfer would leave change behind and this is not set, the build fails
+    // and no transaction is made.
     std::optional<CTxDestination> dgbChangeDest;
 
     TxBuilderTransferParams() : feeRate(1000) {} // Default 1000 sat/vB
@@ -90,8 +93,11 @@ struct TxBuilderRedeemParams {
     // Optional: Destination for returned collateral (if not set, uses ownerKey pubkey)
     std::optional<CTxDestination> collateralDest;
 
-    // Optional: Destination for DGB change output (if not set, uses collateralDest or ownerKey)
-    // CRITICAL: Must be set to a wallet-controlled address to avoid losing DGB!
+    // Where leftover fee money goes. Set this to an address the wallet owns so
+    // it stays in its own output, separate from the returned collateral. If it
+    // is not set, the collateral address above is used instead. If neither is
+    // set and there is change to pay, the build fails and no transaction is
+    // made.
     std::optional<CTxDestination> dgbChangeDest;
 
     // Optional pre-queried position data (caller can provide to avoid UTXO lookups)
@@ -201,7 +207,6 @@ protected:
 private:
     CScript CreateCollateralScript(const TxBuilderMintParams& params) const;
     CScript CreateDDOutputScript(const CKey& owner, CAmount amount) const;
-    CKey GenerateChangeKey() const;
 };
 
 // Transfer transaction builder

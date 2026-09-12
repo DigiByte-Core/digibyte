@@ -326,6 +326,12 @@ BOOST_AUTO_TEST_CASE(rh12_04_fee_siphon_redemption)
     params.ddMinted = 10000;
     params.unlockHeight = 500;
 
+    // The fee inputs leave change behind, and the builder only pays change to
+    // an address the caller names. This one stands in for a wallet address.
+    CKey changeKey;
+    changeKey.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(changeKey.GetPubKey())};
+
     DigiDollar::RedeemTxBuilder builder(Params(), 1000, 6310);
     DigiDollar::TxBuilderResult result = builder.BuildRedemptionTransaction(params);
 

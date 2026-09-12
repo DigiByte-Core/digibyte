@@ -272,6 +272,7 @@ BASE_SCRIPTS = [
     'digidollar_wallet.py',
     'digidollar_oracle.py',
     'digidollar_mint.py',
+    'digidollar_mint_change_destination.py',
     'digidollar_oracle_price.py',
     'digidollar_protection_status.py',
     'digidollar_send.py',

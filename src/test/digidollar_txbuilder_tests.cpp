@@ -34,6 +34,12 @@ bool IsCanonicalP2TROutput(const CScript& script)
            witness_program.size() == WITNESS_V1_TAPROOT_SIZE;
 }
 
+// An ordinary bech32 address, the kind a wallet hands out for leftover DGB.
+// The builders will not place change anywhere else.
+CTxDestination CreateChangeDestination() {
+    return CTxDestination{WitnessV0KeyHash(CreateTestKey().GetPubKey())};
+}
+
 // Helper function to create test UTXOs
 std::vector<COutPoint> CreateTestUTXOs(size_t count) {
     std::vector<COutPoint> utxos;
@@ -116,6 +122,7 @@ BOOST_AUTO_TEST_CASE(mint_transaction_basic)
     mintParams.ownerKey = CreateTestKey();
     mintParams.feeRate = 100000; // 100,000 sat/kB (minimum for DigiByte)
     mintParams.utxos = CreateTestUTXOs(5);
+    mintParams.dgbChangeDest = CreateChangeDestination();
 
     // Build mint transaction
     TxBuilderResult result = builder.BuildMintTransaction(mintParams);
@@ -132,7 +139,10 @@ BOOST_AUTO_TEST_CASE(mint_transaction_basic)
     BOOST_CHECK(::GetDigiDollarTxType(CTransaction(result.tx)) == ::DD_TX_MINT);
 }
 
-BOOST_AUTO_TEST_CASE(mint_change_without_destination_is_not_p2tr_collateral)
+// A mint with leftover DGB and no change address must stop. The builder no
+// longer makes up a key of its own, because money paid to a key nobody keeps
+// cannot be spent again.
+BOOST_AUTO_TEST_CASE(mint_without_change_destination_fails)
 {
     const CChainParams& params = Params();
     const int height = 1000;
@@ -147,6 +157,32 @@ BOOST_AUTO_TEST_CASE(mint_change_without_destination_is_not_p2tr_collateral)
     mintParams.ownerKey = CreateTestKey();
     mintParams.feeRate = 100000;
     mintParams.utxos = CreateTestUTXOs(5);
+
+    TxBuilderResult result = builder.BuildMintTransaction(mintParams);
+
+    BOOST_CHECK(!result.success);
+    BOOST_CHECK(result.tx.vout.empty());
+}
+
+// With a change address the mint goes through, and the locked collateral is
+// still the only taproot output holding DGB. A second one would make every node
+// reject the mint.
+BOOST_AUTO_TEST_CASE(mint_change_is_not_p2tr_collateral)
+{
+    const CChainParams& params = Params();
+    const int height = 1000;
+    const CAmount price = 10000; // $0.01 per DGB (10,000 micro-USD)
+
+    TestMintTxBuilder builder(params, height, price);
+
+    TxBuilderMintParams mintParams;
+    mintParams.ddAmount = 10000;
+    mintParams.lockDays = 365;
+    mintParams.lockTier = CanonicalTierForLockDays(mintParams.lockDays);
+    mintParams.ownerKey = CreateTestKey();
+    mintParams.feeRate = 100000;
+    mintParams.utxos = CreateTestUTXOs(5);
+    mintParams.dgbChangeDest = CreateChangeDestination();
 
     TxBuilderResult result = builder.BuildMintTransaction(mintParams);
 
@@ -267,6 +303,7 @@ BOOST_AUTO_TEST_CASE(transfer_transaction_basic)
     transferParams.spenderKey = CreateTestKey();
     // Provide DD amounts for the test UTXOs (total must >= output amount)
     transferParams.ddAmounts = {5000, 3000}; // Total 8000 cents available
+    transferParams.dgbChangeDest = CreateChangeDestination();
 
     // Build transfer transaction
     TxBuilderResult result = builder.BuildTransferTransaction(transferParams);
@@ -367,6 +404,7 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_basic)
     redeemParams.unlockHeight = 500; // Unlock at height 500 (current height is 1000, so timelock expired)
     // EXACT-AMOUNT REDEMPTION: DD UTXOs must contain exactly the amount being redeemed
     redeemParams.ddAmounts = {10000}; // DD UTXO contains exactly 10000 cents (matches ddMinted)
+    redeemParams.dgbChangeDest = CreateChangeDestination();
 
     // Build redeem transaction
     TxBuilderResult result = builder.BuildRedemptionTransaction(redeemParams);
@@ -441,6 +479,10 @@ TxBuilderRedeemParams MakeRedeemParams(CAmount feeRate = PRODUCTION_DD_FEE_RATE)
     params.feeRate = feeRate;
     params.ddUtxos = CreateTestUTXOs(1);
     params.ddAmounts = {10000};
+    // A wallet always tells the builder where to send the DGB left over after
+    // the fee. Without it the build refuses, rather than paying that money to
+    // an address nobody keeps the key for.
+    params.dgbChangeDest = CreateChangeDestination();
     params.collateralAmount = 30000000000; // 300 DGB
     params.ddMinted = 10000;
     params.unlockHeight = 500;
@@ -713,6 +755,7 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_different_paths)
         redeemParams.unlockHeight = 500; // Unlock at height 500 (current height is 1000, so timelock expired)
         // EXACT-AMOUNT REDEMPTION: DD UTXOs must contain exactly the amount being redeemed
         redeemParams.ddAmounts = {10000}; // DD UTXO contains exactly 10000 cents (matches ddMinted)
+        redeemParams.dgbChangeDest = CreateChangeDestination();
 
         TxBuilderResult result = builder.BuildRedemptionTransaction(redeemParams);
 
@@ -787,6 +830,7 @@ BOOST_AUTO_TEST_CASE(transaction_validation_integration)
     mintParams.ownerKey = CreateTestKey();
     mintParams.feeRate = 100000; // 100,000 sat/kB (minimum for DigiByte)
     mintParams.utxos = CreateTestUTXOs(5);
+    mintParams.dgbChangeDest = CreateChangeDestination();
 
     // Build mint transaction
     TxBuilderResult result = builder.BuildMintTransaction(mintParams);
@@ -923,6 +967,7 @@ BOOST_AUTO_TEST_CASE(select_coins_respects_max_inputs)
     mintParams.ownerKey = CreateTestKey();
     mintParams.feeRate = 100000;
     mintParams.utxos = CreateTestUTXOs(500);
+    mintParams.dgbChangeDest = CreateChangeDestination();
 
     TxBuilderResult result = builder.BuildMintTransaction(mintParams);
     BOOST_CHECK(result.success);

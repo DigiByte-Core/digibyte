@@ -36,6 +36,55 @@ static const double MAX_FEE_RATIO = 0.5;           // Maximum fee as ratio of to
 static const size_t MAX_TX_INPUTS = 400;           // Maximum inputs per transaction to stay under MAX_STANDARD_TX_WEIGHT
 static const CAmount MIN_DD_TX_FEE = 10000000;     // 0.1 DGB minimum DD transaction fee
 
+// A taproot output is OP_1 followed by a 32-byte key.
+static bool IsTaprootOutputScript(const CScript& script)
+{
+    int witnessVersion = -1;
+    std::vector<unsigned char> witnessProgram;
+    return script.IsWitnessProgram(witnessVersion, witnessProgram) &&
+           witnessVersion == 1 &&
+           witnessProgram.size() == WITNESS_V1_TAPROOT_SIZE;
+}
+
+// Work out where the leftover DGB in a DigiDollar transaction should go.
+//
+// The caller names the address. The builder must never make one up. A key
+// invented here belongs to no wallet, so DGB paid to it can never be spent
+// again. When there is no address to use, the build stops and the caller
+// reports the error instead of sending the money somewhere unrecoverable.
+//
+// Mints have one extra rule. In a mint the only taproot output allowed to hold
+// DGB is the locked collateral. A taproot change output would be a second one
+// and every node would reject the mint, so mints pass allowTaproot = false and
+// send their change to an ordinary bech32 address.
+static bool ResolveDGBChangeScript(const std::optional<CTxDestination>& changeDest,
+                                   bool allowTaproot,
+                                   CScript& scriptOut,
+                                   std::string& errorOut)
+{
+    if (!changeDest.has_value() || !IsValidDestination(*changeDest)) {
+        errorOut = "No wallet change address is available for the leftover DGB. "
+                   "Unlock the wallet, or check that it can still hand out addresses, then try again.";
+        return false;
+    }
+
+    const CScript script = GetScriptForDestination(*changeDest);
+    if (script.empty()) {
+        errorOut = "The wallet change address for the leftover DGB could not be used.";
+        return false;
+    }
+
+    if (!allowTaproot && IsTaprootOutputScript(script)) {
+        errorOut = "A mint cannot send its leftover DGB to a taproot address. "
+                   "A mint may hold DGB in only one taproot output, the locked collateral, "
+                   "so the change must go to an ordinary bech32 address.";
+        return false;
+    }
+
+    scriptOut = script;
+    return true;
+}
+
 CAmount ApplyCollateralSafetyMargin(CAmount requiredCollateral)
 {
     if (requiredCollateral <= 0) {
@@ -337,13 +386,6 @@ int TxBuilder::GetCurrentSystemCollateral() const {
     return -1;
 }
 
-CKey MintTxBuilder::GenerateChangeKey() const {
-    // Generate a new key for change
-    CKey changeKey;
-    changeKey.MakeNewKey(true);
-    return changeKey;
-}
-
 TxBuilderResult MintTxBuilder::BuildMintTransaction(const TxBuilderMintParams& params) {
     TxBuilderResult result;
 
@@ -451,22 +493,13 @@ TxBuilderResult MintTxBuilder::BuildMintTransaction(const TxBuilderMintParams& p
 
     // If we have significant change, add change output and recalculate
     if (change >= DUST_THRESHOLD) {
-        // CRITICAL FIX: Use wallet-provided change destination if available
-        // This ensures the wallet recognizes the change output as its own!
+        // The change only goes to the address the caller gave us. If there is
+        // none, stop here: the money is still in the inputs and nothing has
+        // been sent.
         CScript changeScript;
-        if (params.dgbChangeDest.has_value()) {
-            // Use wallet-controlled change address (PREFERRED - fixes DGB loss bug)
-            changeScript = GetScriptForDestination(params.dgbChangeDest.value());
-            LogPrintf("DigiDollar: MINT using wallet-provided DGB change destination\n");
-        } else {
-            // Fallback to a non-P2TR script so validation never confuses DGB
-            // change with DigiDollar collateral. Production wallet/RPC/Qt paths
-            // should still provide a wallet-controlled change destination.
-            CKey changeKey = GenerateChangeKey();
-            CPubKey changePubkey = changeKey.GetPubKey();
-            CTxDestination changeDest{WitnessV0KeyHash(changePubkey)};
-            changeScript = GetScriptForDestination(changeDest);
-            LogPrintf("DigiDollar: WARNING - MINT using non-wallet fallback DGB change destination\n");
+        if (!ResolveDGBChangeScript(params.dgbChangeDest, /*allowTaproot=*/false, changeScript, result.error)) {
+            LogPrintf("DigiDollar: MINT stopped - %s\n", result.error);
+            return result;
         }
         tx.vout.push_back(CTxOut(change, changeScript));
 
@@ -797,18 +830,14 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     if (totalFeeIn > 0) {
         CAmount dgbChange = totalFeeIn - actualFee;
         if (dgbChange > 0 && dgbChange >= DUST_THRESHOLD) {
-            // CRITICAL FIX: Use wallet-provided change destination if available
-            // This ensures the wallet recognizes the change output as its own!
+            // The change only goes to the address the caller gave us. A wallet
+            // watches the addresses it handed out and nothing else, so change
+            // paid anywhere else looks to the owner like money that left the
+            // wallet and never came back.
             CScript dgbChangeScript;
-            if (params.dgbChangeDest.has_value()) {
-                // Use wallet-controlled change address (PREFERRED - fixes DGB loss bug)
-                dgbChangeScript = GetScriptForDestination(params.dgbChangeDest.value());
-                LogPrintf("DigiDollar: Using wallet-provided DGB change destination\n");
-            } else {
-                // Fallback to spenderKey pubkey (WARNING: wallet may not recognize this!)
-                // Create DGB change output using a P2WPKH (not P2TR) to differentiate from DD outputs
-                dgbChangeScript = GetScriptForDestination(WitnessV0KeyHash(params.spenderKey.GetPubKey()));
-                LogPrintf("DigiDollar: WARNING - Using spenderKey for DGB change (wallet may not recognize!)\n");
+            if (!ResolveDGBChangeScript(params.dgbChangeDest, /*allowTaproot=*/true, dgbChangeScript, result.error)) {
+                LogPrintf("DigiDollar: Transfer stopped - %s\n", result.error);
+                return result;
             }
             tx.vout.push_back(CTxOut(dgbChange, dgbChangeScript));
             LogPrintf("DigiDollar: Added DGB change output: %d sats\n", dgbChange);
@@ -1343,24 +1372,29 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     if (totalFeeIn > 0) {
 
         if (feeChange >= DUST_THRESHOLD) {
-            // CRITICAL FIX: Use separate destination for DGB change
-            // This ensures collateral return and DGB change are SEPARATE outputs
-            CTxDestination changeDest;
-            if (params.dgbChangeDest.has_value()) {
-                changeDest = params.dgbChangeDest.value();
-                LogPrintf("DigiDollar: Using provided dgbChangeDest for fee change\n");
-            } else if (params.collateralDest.has_value()) {
-                // Fallback: use collateralDest (this WILL merge with collateral if amounts differ)
-                changeDest = params.collateralDest.value();
-                LogPrintf("DigiDollar: WARNING - No dgbChangeDest provided, using collateralDest for fee change (may merge with collateral)\n");
-            } else {
-                // Last resort: use owner key (wallet may not recognize)
-                CPubKey pubkey = params.ownerKey.GetPubKey();
-                changeDest = CTxDestination{WitnessV1Taproot(XOnlyPubKey(pubkey))};
-                LogPrintf("DigiDollar: WARNING - Using owner key for fee change (wallet may not recognize)\n");
+            // Prefer the caller's own change address, so the returned
+            // collateral and the leftover fee money stay in separate outputs.
+            // If there is no change address, the address chosen for the
+            // returned collateral is used instead: that one also belongs to
+            // whoever asked for the redemption, so nothing is lost.
+            //
+            // Those are the only two addresses used. Anything the builder could
+            // work out for itself from the owner key would be an address no
+            // wallet watches and no wallet can spend, so with neither of them
+            // the build stops.
+            std::optional<CTxDestination> changeDest = params.dgbChangeDest;
+            if (!changeDest.has_value()) {
+                changeDest = params.collateralDest;
+                LogPrintf("DigiDollar: No separate change address given, sending fee change to the collateral address\n");
             }
-            tx.vout.push_back(CTxOut(feeChange, GetScriptForDestination(changeDest)));
-            LogPrintf("DigiDollar: Added fee change output: %d sats to separate destination\n", feeChange);
+
+            CScript changeScript;
+            if (!ResolveDGBChangeScript(changeDest, /*allowTaproot=*/true, changeScript, result.error)) {
+                LogPrintf("DigiDollar: BuildRedemptionTransaction FAILED - %s\n", result.error);
+                return result;
+            }
+            tx.vout.push_back(CTxOut(feeChange, changeScript));
+            LogPrintf("DigiDollar: Added fee change output: %d sats\n", feeChange);
         } else {
             // Dust goes to miner as fee
             result.totalFees += feeChange;
