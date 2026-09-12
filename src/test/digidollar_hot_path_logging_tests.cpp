@@ -13,6 +13,15 @@
 // opts in with -debug=digidollar.
 //
 
+#include <addresstype.h>
+#include <chainparams.h>
+#include <consensus/digidollar.h>
+#include <consensus/validation.h>
+#include <consensus/volatility.h>
+#include <digidollar/health.h>
+#include <digidollar/scripts.h>
+#include <digidollar/txbuilder.h>
+#include <digidollar/validation.h>
 #include <logging.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
@@ -100,6 +109,18 @@ struct HotPathLogSetup : public BasicTestingSetup {
     }
 };
 
+struct VolatilityLogSetup : public HotPathLogSetup {
+    VolatilityLogSetup()
+    {
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    }
+
+    ~VolatilityLogSetup()
+    {
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    }
+};
+
 // Resolve the src/ root from __FILE__ so the invariant test can read
 // the hot-path .cpp files regardless of the cwd chosen by `make check`.
 fs_test::path ResolveSrcRoot()
@@ -118,6 +139,150 @@ fs_test::path ResolveSrcRoot()
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_hot_path_logging_tests, HotPathLogSetup)
+
+BOOST_FIXTURE_TEST_CASE(volatility_price_logging_follows_debug_category, VolatilityLogSetup)
+{
+    using DigiDollar::Volatility::VolatilityMonitor;
+
+    for (const bool debug_enabled : {false, true}) {
+        VolatilityMonitor::ClearHistory();
+        if (debug_enabled) LogInstance().EnableCategory(BCLog::DIGIDOLLAR);
+
+        LogPrintf("volatility-log-start\n");
+        const size_t log_start = ReadLog().size();
+
+        VolatilityMonitor::RecordPrice(50000, 10000, 10);
+        VolatilityMonitor::RecordPrice(50000, 10001, 11);
+        VolatilityMonitor::RecordPrice(-1, 13600, 12);
+
+        const auto history = VolatilityMonitor::GetPriceHistory();
+        BOOST_REQUIRE_EQUAL(history.size(), 1U);
+        BOOST_CHECK_EQUAL(history[0].price, 50000);
+        BOOST_CHECK_EQUAL(history[0].height, 10U);
+        BOOST_CHECK(!VolatilityMonitor::GetCurrentState().mintingFrozen);
+
+        const std::string log = ReadLog().substr(log_start);
+        BOOST_CHECK_EQUAL(log.find("VolatilityMonitor: Recorded price") != std::string::npos, debug_enabled);
+        BOOST_CHECK_EQUAL(log.find("VolatilityMonitor: Skipping price update") != std::string::npos, debug_enabled);
+        BOOST_CHECK(log.find("VolatilityMonitor: Rejecting invalid candidate price -1") != std::string::npos);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(volatility_warning_and_recovery_logs_remain_visible, VolatilityLogSetup)
+{
+    using DigiDollar::Volatility::VolatilityMonitor;
+
+    VolatilityMonitor::RecordPrice(50000, 10000, 10);
+    VolatilityMonitor::RecordPrice(100000, 13600, 11);
+    BOOST_CHECK(VolatilityMonitor::GetCurrentState().allOperationsFrozen);
+    const auto history = VolatilityMonitor::GetPriceHistory();
+    VolatilityMonitor::ReconstructFromBlockData(history, 11);
+    BOOST_CHECK(VolatilityMonitor::GetCurrentState().allOperationsFrozen);
+
+    const std::string log = ReadLog();
+    BOOST_CHECK(log.find("VolatilityMonitor: WARNING - High volatility detected") != std::string::npos);
+    BOOST_CHECK(log.find("VolatilityMonitor: FREEZE - All DigiDollar operations frozen") != std::string::npos);
+    BOOST_CHECK(log.find("VolatilityMonitor: Reconstructing state from") != std::string::npos);
+    BOOST_CHECK(log.find("VolatilityMonitor: Reconstruction complete") != std::string::npos);
+    BOOST_CHECK(log.find("VolatilityMonitor: Recorded price") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(mint_parameter_logs_keep_failures_visible)
+{
+    DigiDollar::MintTxBuilder builder(Params(), 1000, 50000);
+    DigiDollar::TxBuilderMintParams mint_params;
+    mint_params.ddAmount = 10000;
+    mint_params.lockDays = 365;
+    const int tier = DigiDollar::GetLockTierIndex(builder.LockDaysToBlocks(mint_params.lockDays), Params().GetDigiDollarParams());
+    BOOST_REQUIRE_GE(tier, 0);
+    mint_params.lockTier = static_cast<uint32_t>(tier);
+    mint_params.ownerKey.MakeNewKey(true);
+    mint_params.feeRate = 100000;
+    mint_params.utxos.emplace_back(uint256::ONE, 0);
+
+    for (const bool debug_enabled : {false, true}) {
+        if (debug_enabled) LogInstance().EnableCategory(BCLog::DIGIDOLLAR);
+
+        LogPrintf("mint-parameter-log-start\n");
+        const size_t log_start = ReadLog().size();
+        BOOST_CHECK(builder.ValidateMintParams(mint_params));
+        auto invalid_params = mint_params;
+        invalid_params.ddAmount = 0;
+        BOOST_CHECK(!builder.ValidateMintParams(invalid_params));
+
+        const std::string log = ReadLog().substr(log_start);
+        BOOST_CHECK_EQUAL(log.find("ValidateMintParams PASSED") != std::string::npos, debug_enabled);
+        BOOST_CHECK(log.find("ValidateMintParams FAILED: ddAmount <= 0 (0)") != std::string::npos);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_change_logging_preserves_validity, VolatilityLogSetup)
+{
+    struct HealthGuard {
+        DigiDollar::SystemMetrics previous{DigiDollar::SystemHealthMonitor::GetCachedMetrics()};
+        HealthGuard() { DigiDollar::SystemHealthMonitor::ResetMetrics(); }
+        ~HealthGuard() { DigiDollar::SystemHealthMonitor::RestoreLegacyMetrics(previous); }
+    } health_guard;
+
+    const auto chain_params = CChainParams::RegTest({});
+    const DigiDollar::ValidationContext context(1000, 500000, 150, *chain_params);
+    const CAmount dd_amount{10000};
+    const int64_t lock_blocks = DigiDollar::LockDaysToBlocks(30);
+    const int tier = DigiDollar::GetLockTierIndex(lock_blocks, chain_params->GetDigiDollarParams());
+    BOOST_REQUIRE_GE(tier, 0);
+    const CAmount collateral = DigiDollar::CalculateRequiredCollateral(dd_amount, lock_blocks, context);
+    BOOST_REQUIRE_GT(collateral, 1);
+
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    const XOnlyPubKey owner(owner_key.GetPubKey());
+    DigiDollar::MintParams mint_params;
+    mint_params.ddAmount = dd_amount;
+    mint_params.lockHeight = context.nHeight + lock_blocks;
+    mint_params.ownerKey = owner;
+    mint_params.internalKey = DigiDollar::GetCollateralNUMSKey();
+    mint_params.oracleKeys = DigiDollar::GetOracleKeys(15);
+
+    CMutableTransaction mint;
+    mint.nVersion = 0x01000770;
+    mint.vin.emplace_back(COutPoint(uint256::ONE, 0));
+    mint.vout.emplace_back(collateral, DigiDollar::CreateCollateralP2TR(mint_params));
+    mint.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner, dd_amount));
+    mint.vout.emplace_back(COIN, GetScriptForDestination(WitnessV0KeyHash(owner_key.GetPubKey())));
+    mint.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                      << CScriptNum(1) << CScriptNum(dd_amount)
+                                      << CScriptNum(mint_params.lockHeight) << CScriptNum(tier)
+                                      << std::vector<unsigned char>(owner.begin(), owner.end()));
+    int change_version{-1};
+    std::vector<unsigned char> change_program;
+    BOOST_REQUIRE(mint.vout[2].scriptPubKey.IsWitnessProgram(change_version, change_program));
+    BOOST_REQUIRE_EQUAL(change_version, 0);
+    BOOST_REQUIRE_EQUAL(change_program.size(), 20U);
+    const CTransaction valid_mint(mint);
+
+    // DGB change cannot make up for an underfunded collateral output.
+    mint.vout[0].nValue = collateral - 1;
+    const CTransaction insufficient_mint(mint);
+
+    for (const bool debug_enabled : {false, true}) {
+        if (debug_enabled) LogInstance().EnableCategory(BCLog::DIGIDOLLAR);
+
+        LogPrintf("mint-change-log-start\n");
+        const size_t log_start = ReadLog().size();
+        TxValidationState valid_state;
+        BOOST_REQUIRE_MESSAGE(DigiDollar::ValidateMintTransaction(valid_mint, context, valid_state),
+                              valid_state.ToString());
+        BOOST_CHECK(valid_state.IsValid());
+        const std::string valid_log = ReadLog().substr(log_start);
+        BOOST_CHECK_EQUAL(valid_log.find("DigiDollar: Output 2 is non-P2TR change output") != std::string::npos,
+                          debug_enabled);
+
+        TxValidationState insufficient_state;
+        BOOST_CHECK(!DigiDollar::ValidateMintTransaction(insufficient_mint, context, insufficient_state));
+        BOOST_CHECK_EQUAL(insufficient_state.GetRejectReason(), "insufficient-collateral");
+        BOOST_CHECK(ReadLog().substr(log_start).find("DigiDollar: Insufficient collateral:") != std::string::npos);
+    }
+}
 
 // RED→GREEN behaviour test: exercises bundle_manager.cpp's
 // GetCurrentOraclePriceMicroUSD() no-price fallback (the line that fired

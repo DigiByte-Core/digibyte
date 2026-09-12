@@ -233,7 +233,7 @@ bool MuSig2OracleAggregator::ComputeAggregatePubkey(
                 it = m_cache.erase(it);
                 --to_remove;
             }
-            LogPrintf("Oracle: Aggregate pubkey cache evicted (size was %zu, max %zu)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Aggregate pubkey cache evicted (size was %zu, max %zu)\n",
                      m_cache.size() + to_remove, m_max_cache_entries);
         }
         m_cache[hash] = {agg_pk, cache};

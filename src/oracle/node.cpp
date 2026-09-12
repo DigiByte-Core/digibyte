@@ -131,7 +131,7 @@ void OracleNode::Initialize(uint32_t oracle_id_in, const CKey& key, const CPubKe
     private_key = key;
     public_key = pubkey;
     enabled.store(true);
-    LogPrintf("Oracle: Test-initialized oracle %d\n", oracle_id);
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Test-initialized oracle %d\n", oracle_id);
 }
 
 void OracleNode::SetExchangeEndpoints(const std::vector<std::string>& endpoints)
@@ -299,7 +299,7 @@ bool OracleNode::BroadcastPriceMessage(const COraclePriceMessage& message)
         return false;
     }
 
-    LogPrintf("Oracle: Broadcasting price message - Oracle: %d, Price: %llu micro-USD, Time: %lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcasting price message - Oracle: %d, Price: %llu micro-USD, Time: %lld\n",
              message.oracle_id, message.price_micro_usd, message.timestamp);
 
     // Send to bundle manager for processing
@@ -419,7 +419,7 @@ void OracleNode::FetchAndUpdatePrice()
         last_update_time = GetTime();
         consecutive_fetch_failures = 0;
 
-        LogPrintf("Oracle: Updated price for oracle %d: %d micro-USD\n", oracle_id, median_price);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Updated price for oracle %d: %d micro-USD\n", oracle_id, median_price);
     } else {
         std::lock_guard<std::mutex> lock(mtx_price);
         consecutive_fetch_failures++;
@@ -456,7 +456,7 @@ CAmount OracleNode::FetchMedianPrice()
     CAmount price = aggregator.FetchAggregatePrice();
 
     if (price > 0) {
-        LogPrintf("Oracle: Fetched aggregate price from exchanges: %lld micro-USD ($%.6f)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Fetched aggregate price from exchanges: %lld micro-USD ($%.6f)\n",
                  price, static_cast<double>(price) / 1000000.0);
     } else {
         LogPrintf("Oracle: Failed to fetch aggregate price from exchanges\n");
@@ -743,7 +743,7 @@ ExchangePriceFetcher::ExchangePrice ExchangePriceFetcher::FetchFromPoloniex()
 std::string ExchangePriceFetcher::HttpRequest(const std::string& url)
 {
     // Mock HTTP request - in real implementation would use CURL
-    LogPrintf("Oracle: Mock HTTP request to %s\n", url);
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Mock HTTP request to %s\n", url);
     return "{\"price\":\"0.05\"}"; // Mock JSON response
 }
 

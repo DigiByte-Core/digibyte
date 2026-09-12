@@ -44,12 +44,14 @@
 #include <validation.h>
 #include <wallet/ddcoincontrol.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <map>
 #include <optional>
 
 #include <QApplication>
@@ -83,6 +85,7 @@
 #include <QDoubleSpinBox>
 #include <QSignalSpy>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolTip>
@@ -242,6 +245,19 @@ public:
         RemoveWallet(context, wallet, std::nullopt);
     }
 };
+
+std::map<uint256, int64_t> MintDescriptorNextIndexes(const wallet::CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    std::map<uint256, int64_t> indexes;
+    for (auto* manager : wallet.GetAllScriptPubKeyMans()) {
+        if (auto* descriptor = dynamic_cast<wallet::DescriptorScriptPubKeyMan*>(manager)) {
+            LOCK(descriptor->cs_desc_man);
+            indexes.emplace(descriptor->GetID(), descriptor->GetWalletDescriptor().next_index);
+        }
+    }
+    return indexes;
+}
 
 void TestOverviewWidget(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wallet)
 {
@@ -2320,6 +2336,194 @@ void DigiDollarWidgetTests::mintDigiDollarRejectsPrivateKeyDisabledWallet()
     // so the txid/positionId remain empty for the rejected attempt.
     QVERIFY(result.txid.isEmpty());
     QVERIFY(result.positionId.isEmpty());
+}
+
+void DigiDollarWidgetTests::mintWidgetRejectsUnsupportedWalletBeforeConfirmation_data()
+{
+    QTest::addColumn<QString>("kind");
+    QTest::addColumn<QString>("reason");
+    QTest::newRow("legacy") << QStringLiteral("legacy") << QStringLiteral("legacy wallet cannot mint DigiDollar");
+    QTest::newRow("watch-only") << QStringLiteral("watch-only") << QStringLiteral("Private keys are disabled");
+    QTest::newRow("blank") << QStringLiteral("blank") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("missing-taproot") << QStringLiteral("missing-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("public-taproot") << QStringLiteral("public-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("nonranged-taproot") << QStringLiteral("nonranged-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("missing-change") << QStringLiteral("missing-change") << QStringLiteral("cannot generate the change addresses");
+    QTest::newRow("public-change") << QStringLiteral("public-change") << QStringLiteral("cannot generate the change addresses");
+}
+
+void DigiDollarWidgetTests::mintWidgetRejectsUnsupportedWalletBeforeConfirmation()
+{
+    QFETCH(QString, kind);
+    QFETCH(QString, reason);
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    std::shared_ptr<wallet::CWallet> wallet;
+    if (kind == "legacy" || kind == "blank") {
+        wallet = std::make_shared<wallet::CWallet>(
+            test.m_node.chain.get(), "unsupported-mint", CreateMockableWalletDatabase());
+        wallet->LoadWallet();
+        if (kind == "blank") wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS | wallet::WALLET_FLAG_BLANK_WALLET);
+    } else {
+        wallet = SetupDescriptorsWallet(m_node, test);
+    }
+    if (kind == "watch-only") wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    if (kind == "missing-taproot" || kind == "missing-change") {
+        LOCK(wallet->cs_wallet);
+        const bool internal = kind == "missing-change";
+        const OutputType type = internal ? OutputType::BECH32 : OutputType::BECH32M;
+        auto* manager = wallet->GetScriptPubKeyMan(type, internal);
+        QVERIFY(manager);
+        wallet->DeactivateScriptPubKeyMan(manager->GetID(), type, internal);
+    }
+    if (kind == "public-taproot" || kind == "public-change" || kind == "nonranged-taproot") {
+        CExtKey master;
+        master.SetSeed(MakeByteSpan(uint256::ONE));
+        const std::string public_key = EncodeExtPubKey(master.Neuter());
+        const bool internal = kind == "public-change";
+        const std::string text = internal ? "wpkh(" + public_key + "/0/*)" :
+            (kind == "public-taproot" ? "tr(" + public_key + "/0/*)" : "tr(" + EncodeSecret(master.key) + ")");
+        FlatSigningProvider provider;
+        std::string error;
+        auto descriptor = Parse(text, provider, error, /*require_checksum=*/false);
+        QVERIFY2(descriptor, error.c_str());
+        wallet::WalletDescriptor record(std::move(descriptor), 0, 0, 2, 0);
+        LOCK(wallet->cs_wallet);
+        auto* manager = wallet->AddWalletDescriptor(record, provider, "", internal);
+        QVERIFY(manager);
+        wallet->AddActiveScriptPubKeyMan(manager->GetID(), internal ? OutputType::BECH32 : OutputType::BECH32M, internal);
+    }
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    DigiDollarMintWidget widget;
+    widget.setWalletModel(mini_gui.walletModel.get());
+    widget.setClientModel(mini_gui.clientModel.get());
+    auto* amount = widget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(amount);
+    amount->setText("100.00");
+
+    const auto before = MintDescriptorNextIndexes(*wallet);
+    const size_t transaction_count = wallet->mapWallet.size();
+    QSignalSpy messages(&widget, &DigiDollarMintWidget::message);
+    QSignalSpy unlocks(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    int confirmation_count = 0;
+    QTimer close_unexpected_dialogs;
+    connect(&close_unexpected_dialogs, &QTimer::timeout, [&]() {
+        for (QWidget* top : QApplication::topLevelWidgets()) {
+            if (auto* dialog = qobject_cast<QMessageBox*>(top); dialog && dialog->isVisible()) {
+                ++confirmation_count;
+                dialog->done(QMessageBox::No);
+            }
+        }
+    });
+    close_unexpected_dialogs.start(0);
+    QVERIFY(QMetaObject::invokeMethod(&widget, "onMintClicked", Qt::DirectConnection));
+    close_unexpected_dialogs.stop();
+    QCOMPARE(confirmation_count, 0);
+    QCOMPARE(unlocks.count(), 0);
+    QCOMPARE(messages.count(), 1);
+    QCOMPARE(messages.at(0).at(0).toString(), QStringLiteral("Cannot Mint DigiDollar"));
+    QVERIFY2(messages.at(0).at(1).toString().contains(reason), qPrintable(messages.at(0).at(1).toString()));
+
+    const auto result = mini_gui.walletModel->mintDigiDollar(10000, 0);
+    QCOMPARE(result.status, WalletModel::TransactionCreationFailed);
+    QVERIFY2(result.reasonFailed.contains(reason), qPrintable(result.reasonFailed));
+    QVERIFY(result.txid.isEmpty());
+    QVERIFY(result.positionId.isEmpty());
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    QCOMPARE(wallet->mapWallet.size(), transaction_count);
+}
+
+void DigiDollarWidgetTests::mintWidgetPreservesEncryptedWalletUnlockFlow()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    const SecureString passphrase{"mint-widget-passphrase"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+
+    struct MockPriceGuard {
+        MockOracleManager& mock{MockOracleManager::GetInstance()};
+        CAmount price{mock.GetCurrentPrice()};
+        bool enabled{mock.IsEnabled()};
+        ~MockPriceGuard() { mock.SetMockPrice(price); mock.SetEnabled(enabled); }
+    } mock_guard;
+    mock_guard.mock.SetEnabled(true);
+    mock_guard.mock.SetMockPrice(500000);
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    mini_gui.walletModel->startPollBalance();
+    const CAmount funded_balance = mini_gui.walletModel->wallet().getBalances().balance;
+    QVERIFY(funded_balance > 0);
+    QCOMPARE(mini_gui.walletModel->getAvailableDGBBalance(), funded_balance);
+    const CAmount required_collateral = mini_gui.walletModel->calculateRequiredCollateral(10000, 0);
+    QVERIFY(required_collateral > 0);
+    QVERIFY(funded_balance >= required_collateral);
+    QVERIFY(mini_gui.walletModel->getDigiDollarMintWalletError().isEmpty());
+    const auto before = MintDescriptorNextIndexes(*wallet);
+    const size_t transaction_count = wallet->mapWallet.size();
+    DigiDollarMintWidget widget;
+    widget.setWalletModel(mini_gui.walletModel.get());
+    widget.setClientModel(mini_gui.clientModel.get());
+    widget.show();
+    widget.updateView();
+    auto* amount = widget.findChild<QLineEdit*>("amountEdit");
+    auto* mint_button = widget.findChild<QPushButton*>("mintButton");
+    QVERIFY(amount);
+    QVERIFY(mint_button);
+    amount->setText("100.00");
+    QVERIFY(mint_button->isEnabled());
+
+    QSignalSpy unlocks(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy messages(&widget, &DigiDollarMintWidget::message);
+    QStringList confirmation_titles;
+    QTimer confirm;
+    connect(&confirm, &QTimer::timeout, [&]() {
+        for (QWidget* top : QApplication::topLevelWidgets()) {
+            if (auto* dialog = qobject_cast<QMessageBox*>(top); dialog && dialog->isVisible()) {
+                confirmation_titles.push_back(dialog->windowTitle());
+                dialog->done(QMessageBox::Yes);
+            }
+        }
+    });
+    confirm.start(0);
+    QVERIFY(QMetaObject::invokeMethod(&widget, "onMintClicked", Qt::DirectConnection));
+    confirm.stop();
+    QCOMPARE(confirmation_titles.size(), 2);
+    QCOMPARE(confirmation_titles.at(0), QStringLiteral("Confirm DigiDollar Mint"));
+    QVERIFY(confirmation_titles.at(1).contains("FINAL CONFIRMATION"));
+    QCOMPARE(unlocks.count(), 1);
+    QCOMPARE(messages.count(), 0);
+    QVERIFY(wallet->IsLocked());
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    QCOMPARE(wallet->mapWallet.size(), transaction_count);
+
+    connect(mini_gui.walletModel.get(), &WalletModel::requireUnlock, [&]() {
+        QVERIFY(wallet->Unlock(passphrase));
+    });
+    {
+        auto context = mini_gui.walletModel->requestUnlock();
+        QVERIFY(context.isValid());
+        QVERIFY(!wallet->IsLocked());
+        QVERIFY(mini_gui.walletModel->getDigiDollarMintWalletError().isEmpty());
+    }
+    QVERIFY(wallet->IsLocked());
+    QCOMPARE(unlocks.count(), 2);
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
 }
 
 void DigiDollarWidgetTests::transactionsWidgetTests()

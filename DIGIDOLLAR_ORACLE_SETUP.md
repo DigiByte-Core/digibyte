@@ -1,6 +1,6 @@
 # DigiDollar Oracle Setup Guide
 
-*The single source of truth for oracle operator setup — multi-oracle MuSig2 (V1 activates alongside DigiDollar; `nDigiDollarMuSig2Height = nDDActivationHeight` on mainnet and testnet26. On default regtest `nDigiDollarMuSig2Height = std::min(nDDActivationHeight, min_activation_height) = 0`.)*
+*The single source of truth for oracle operator setup — multi-oracle MuSig2 (V1 activates alongside DigiDollar; `nDigiDollarMuSig2Height = nDDActivationHeight` on mainnet and testnet26. On default regtest `nDigiDollarMuSig2Height = std::min(nDDActivationHeight, DigiDollarHeight) = 0`.)*
 
 ---
 
@@ -67,8 +67,6 @@ txindex=1
 server=1
 listen=1
 addnode=oracle1.digibyte.io
-debug=digidollar
-debug=net
 ```
 
 > **`testnet=1` goes at the top** (not under any section). Everything else under `[test]`.
@@ -89,6 +87,10 @@ algo=sha256d
 ```
 
 ---
+
+For two nodes behind one router, compact filter service and temporary debug
+logging, see [node operations](doc/digidollar-operations.md). Routine operation
+does not need `debug=digidollar` or `debug=net`.
 
 ## New Oracle Setup
 
@@ -130,11 +132,17 @@ Your oracle key persists in your wallet across upgrades. You do **not** need to 
 
 ### Current testnet26 restart / upgrade
 
+Follow the [upgrade and recovery guide](doc/digidollar-operations.md). Keep
+existing wallet backups and retained block/undo data. Mainnet, testnet26 and
+signet Thaw Day heights remain disabled in this development source; this is
+not a notice that public activation or release verification has completed.
+
 ```bash
-# 1. Stop your node
+# 1. Back up the loaded wallet, then stop cleanly
+digibyte-cli -testnet -rpcwallet=oracle backupwallet "/secure/backup/oracle.dat"
 digibyte-cli -testnet stop
 
-# 2. Replace binaries (download new release or rebuild from source)
+# 2. Wait for shutdown, then install the reviewed replacement binaries
 
 # 3. Start your node
 digibyted -testnet -daemon
@@ -243,7 +251,9 @@ removed / paid API key required).
 | Active Oracles (`nOraclePubkeyCount`) | 35 | 7 | 35 |
 | Reserved slots (`nOracleTotalOracles`) | 35 | 7 | 35 |
 | Consensus Required (`nOracleConsensusRequired`) | 7 | 4-of-7 | 7 |
-| Activation Height (`nDDActivationHeight`) | 600 | 650 | BIP9 (23,627,520) |
+| Static DD height (`nDDActivationHeight`) | 600 | 650 | 23,627,520 |
+| Buried DigiDollar height (`DigiDollarHeight`) | 600 | 0 | 23,869,440 |
+| Thaw Day (`nDDThawDayHeight`) | Disabled | Disabled unless configured | Disabled |
 | Rotation Interval (`nDDOracleEpochBlocks`) | 40 blocks | 40 blocks | 40 blocks |
 | Price Update Interval (`nDDOracleUpdateInterval`) | 2 blocks | 1 block | 4 blocks |
 | Bundle/MuSig2 Epoch (`nOracleEpochLength`) | 40 blocks | 40 blocks | 40 blocks |
@@ -486,7 +496,7 @@ digibyte-cli -testnet getdigidollarstats
 ```
 
 #### `getdigidollardeploymentinfo`
-Get DigiDollar BIP9 deployment status.
+Get buried DigiDollar activation status and separate Thaw Day tip/next-block status.
 
 ```
 digibyte-cli -testnet getdigidollardeploymentinfo

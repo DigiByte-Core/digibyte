@@ -5,14 +5,17 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chainparams.h>
+#include <common/args.h>
 #include <consensus/amount.h>
 #include <consensus/digidollar.h>
 #include <consensus/err.h>
 #include <digidollar/digidollar.h>
 #include <digidollar/health.h>
+#include <key_io.h>
 #include <oracle/mock_oracle.h>
 #include <rpc/client.h>
 #include <rpc/digidollar.h>
+#include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -21,11 +24,13 @@
 #include <util/string.h>
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/digidollarmintcapability.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
 #include <algorithm>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <tinyformat.h>
@@ -102,6 +107,150 @@ int ConsensusRatioForTier(int tier)
 }
 
 } // namespace
+
+BOOST_FIXTURE_TEST_CASE(local_oracle_rpc_names_use_generic_roster_fallback, DigiDollarRPCUnitSetup)
+{
+    const UniValue oracles = CallNodeRPC("getoracles");
+    BOOST_REQUIRE_EQUAL(oracles.size(), Params().GetOracleNodes().size());
+    for (const auto& oracle : oracles.getValues()) {
+        const auto id = oracle["oracle_id"].getInt<uint32_t>();
+        BOOST_REQUIRE(Params().GetOracleNode(id));
+        BOOST_CHECK(Params().GetOracleNode(id)->display_name.empty());
+        BOOST_CHECK_EQUAL(oracle["name"].get_str(), strprintf("Oracle %u", id));
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_wallet_capability_checks_do_not_allocate_keys, DigiDollarRPCUnitSetup)
+{
+    auto make_wallet = [&](const std::string& name, uint64_t flags) {
+        auto wallet = std::make_shared<wallet::CWallet>(
+            m_node.chain.get(), name, wallet::CreateMockableWalletDatabase());
+        wallet->LoadWallet();
+        wallet->m_keypool_size = 2;
+        if (flags) wallet->SetWalletFlag(flags);
+        return wallet;
+    };
+    auto next_indexes = [](const wallet::CWallet& wallet) {
+        LOCK(wallet.cs_wallet);
+        std::map<uint256, int64_t> indexes;
+        for (auto* manager : wallet.GetAllScriptPubKeyMans()) {
+            if (auto* descriptor = dynamic_cast<wallet::DescriptorScriptPubKeyMan*>(manager)) {
+                LOCK(descriptor->cs_desc_man);
+                indexes.emplace(descriptor->GetID(), descriptor->GetWalletDescriptor().next_index);
+            }
+        }
+        return indexes;
+    };
+    auto check_rpc_error = [&](const std::shared_ptr<wallet::CWallet>& wallet, int code,
+                               const std::string& message, CAmount amount = 10000) {
+        const auto before = next_indexes(*wallet);
+        wallet::WalletContext context;
+        context.args = m_node.args;
+        context.chain = m_node.chain.get();
+        wallet::AddWallet(context, wallet);
+        JSONRPCRequest request;
+        request.context = &context;
+        request.strMethod = "mintdigidollar";
+        request.params = UniValue(UniValue::VARR);
+        request.params.push_back(amount);
+        request.params.push_back(0);
+        BOOST_CHECK_EXCEPTION(mintdigidollar().HandleRequest(request), UniValue,
+            [&](const UniValue& error) {
+                BOOST_CHECK_EQUAL(error["code"].getInt<int>(), code);
+                BOOST_CHECK(error["message"].get_str().find(message) != std::string::npos);
+                return true;
+            });
+        wallet::RemoveWallet(context, wallet, std::nullopt);
+        BOOST_CHECK(next_indexes(*wallet) == before);
+        BOOST_CHECK(wallet->mapWallet.empty());
+    };
+    auto check_unsupported = [&](const std::shared_ptr<wallet::CWallet>& wallet, const std::string& reason) {
+        const auto before = next_indexes(*wallet);
+        for (int i = 0; i < 3; ++i) {
+            BOOST_CHECK(wallet::GetDigiDollarMintWalletError(*wallet).original.find(reason) != std::string::npos);
+        }
+        BOOST_CHECK(next_indexes(*wallet) == before);
+        check_rpc_error(wallet, RPC_WALLET_ERROR, reason);
+    };
+
+    const auto legacy = make_wallet("legacy-mint", 0);
+    check_unsupported(legacy, "legacy wallet cannot mint DigiDollar");
+    const auto watch_only = make_wallet("watch-only-mint", wallet::WALLET_FLAG_DESCRIPTORS | wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    check_unsupported(watch_only, "Private keys are disabled");
+    const auto restricted = make_wallet("restricted-mint", wallet::WALLET_FLAG_DESCRIPTORS | wallet::WALLET_FLAG_BLANK_WALLET);
+    check_unsupported(restricted, "cannot generate DigiDollar owner keys");
+
+    CExtKey master;
+    master.SetSeed(MakeByteSpan(uint256::ONE));
+    const std::string private_key = EncodeExtKey(master);
+    const std::string public_key = EncodeExtPubKey(master.Neuter());
+    auto activate_descriptor = [&](const std::string& text, OutputType type, bool internal) {
+        LOCK(restricted->cs_wallet);
+        FlatSigningProvider provider;
+        std::string error;
+        auto descriptor = Parse(text, provider, error, /*require_checksum=*/false);
+        BOOST_REQUIRE_MESSAGE(descriptor, error);
+        wallet::WalletDescriptor record(std::move(descriptor), 0, 0, 2, 0);
+        if (auto* existing = restricted->GetDescriptorScriptPubKeyMan(record)) {
+            // Reactivation must preserve the populated range and next address index.
+            LOCK(existing->cs_desc_man);
+            record = existing->GetWalletDescriptor();
+        }
+        auto* manager = restricted->AddWalletDescriptor(record, provider, "", internal);
+        BOOST_REQUIRE(manager);
+        restricted->AddActiveScriptPubKeyMan(manager->GetID(), type, internal);
+    };
+    activate_descriptor("wpkh(" + private_key + "/1/*)", OutputType::BECH32, true);
+    check_unsupported(restricted, "cannot generate DigiDollar owner keys");
+    activate_descriptor("tr(" + public_key + "/0/*)", OutputType::BECH32M, false);
+    check_unsupported(restricted, "cannot generate DigiDollar owner keys");
+    activate_descriptor("tr(" + EncodeSecret(master.key) + ")", OutputType::BECH32M, false);
+    check_unsupported(restricted, "cannot generate DigiDollar owner keys");
+    activate_descriptor("tr(" + private_key + "/0/*)", OutputType::BECH32M, false);
+
+    {
+        LOCK(restricted->cs_wallet);
+        auto* change = restricted->GetScriptPubKeyMan(OutputType::BECH32, true);
+        BOOST_REQUIRE(change);
+        restricted->DeactivateScriptPubKeyMan(change->GetID(), OutputType::BECH32, true);
+    }
+    check_unsupported(restricted, "cannot generate the change addresses");
+    activate_descriptor("wpkh(" + public_key + "/2/*)", OutputType::BECH32, true);
+    check_unsupported(restricted, "cannot generate the change addresses");
+    activate_descriptor("wpkh(" + private_key + "/1/*)", OutputType::BECH32, true);
+
+    auto check_supported = [&]() {
+        const auto before = next_indexes(*restricted);
+        for (int i = 0; i < 3; ++i) BOOST_CHECK(wallet::GetDigiDollarMintWalletError(*restricted).empty());
+        BOOST_CHECK(next_indexes(*restricted) == before);
+    };
+    check_supported();
+    check_rpc_error(restricted, RPC_INVALID_PARAMETER, "amount must be positive", 0);
+
+    // Script-path private keys do not guarantee that the internal owner key exists.
+    CExtKey script_master;
+    const uint256 script_seed;
+    script_master.SetSeed(MakeByteSpan(script_seed));
+    activate_descriptor("tr(" + public_key + "/0/*,pk(" + EncodeExtKey(script_master) + "/0/*))",
+                        OutputType::BECH32M, false);
+    check_supported();
+    {
+        LOCK(restricted->cs_wallet);
+        BOOST_CHECK(!restricted->GetHDKeyForDigiDollar("dd-owner").IsValid());
+        BOOST_CHECK(restricted->mapWallet.empty());
+    }
+    activate_descriptor("tr(" + private_key + "/0/*)", OutputType::BECH32M, false);
+
+    const SecureString passphrase{"mint-capability-passphrase"};
+    BOOST_REQUIRE(restricted->EncryptWallet(passphrase));
+    BOOST_REQUIRE(restricted->IsLocked());
+    check_supported();
+    check_rpc_error(restricted, RPC_WALLET_UNLOCK_NEEDED, "walletpassphrase first");
+    BOOST_REQUIRE(restricted->Unlock(passphrase));
+    check_supported();
+    check_rpc_error(restricted, RPC_INVALID_PARAMETER, "amount must be positive", 0);
+    BOOST_REQUIRE(restricted->Lock());
+}
 
 BOOST_FIXTURE_TEST_CASE(wave1_list_positions_min_amount_filters_dd_cents_not_dgb_sats, DigiDollarRPCUnitSetup)
 {
@@ -272,6 +421,11 @@ BOOST_FIXTURE_TEST_CASE(wave6_mintdigidollar_blocks_when_network_err_active, Dig
     auto wallet = std::make_shared<wallet::CWallet>(
         m_node.chain.get(), "wave6-rpc-mint-wallet", wallet::CreateMockableWalletDatabase());
     wallet->LoadWallet();
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(wallet::WALLET_FLAG_DESCRIPTORS);
+        wallet->SetupDescriptorScriptPubKeyMans();
+    }
     wallet->EnsureDDWallet();
     WITH_LOCK(wallet->cs_wallet, wallet->SetLastBlockProcessed(1000, uint256::ONE));
     wallet::AddWallet(context, wallet);

@@ -33,6 +33,10 @@ Mainnet and testnet slots 0-34 are in `consensus.vOraclePublicKeys` and
 Peer2Peer / DigiRoos key, and slots 32-34 use final submitted operator keys.
 Slot 35 is outside the configured roster.
 
+Names are display metadata from each network's roster. Mainnet slot 0 is
+`DigiByte.Io Oracle` and slot 11 is `Crypto Corner Shop`; their testnet names
+are `Jared` and `hallvardo`. Names do not change operator IDs, keys or quorum.
+
 ## Operator Flow
 
 1. The oracle node fetches DGB/USD from the active exchange fetchers in
@@ -143,17 +147,26 @@ disconnect, reorg, reindex, and IBD flows.
 
 ## Activation
 
-DigiDollar and the oracle validator activate together:
+DigiDollar uses buried activation heights. Block oracle validation follows
+the candidate's DigiDollar activation status. The static oracle P2P height
+also applies to network oracle messages.
 
-| Network | DigiDollar activation | Oracle activation | MuSig2 height |
-|---------|-----------------------|-------------------|---------------|
-| Mainnet | BIP9 bit 23, min height 23,627,520 | same trigger | 23,627,520 |
-| Testnet26 | height 600 / BIP9 active | same trigger | 600 |
-| Regtest | BIP9 `ALWAYS_ACTIVE`; DD/oracle P2P height gates 650 by default, or the direct `-digidollaractivationheight=N` override | same height trigger | 0 |
+| Network | Buried DigiDollar height | Static oracle P2P height | MuSig2 height |
+|---------|--------------------------|-------------------------|---------------|
+| Mainnet | 23,869,440 | 23,627,520 | 23,627,520 |
+| Testnet26 | 600 | 600 | 600 |
+| Default regtest | 0 | 650 | 0 |
 
-Before activation, DD-looking data does not trigger V1 consensus rules. After
-activation, DD mint/redeem blocks must satisfy the V1 oracle rules above;
-DD transfer-only and ordinary DGB blocks may omit the coinbase oracle bundle.
+On regtest, `-digidollaractivationheight=N` sets the buried DigiDollar and
+static DD/oracle/MuSig2 heights together. Once DigiDollar is active, mint/redeem
+blocks must satisfy the V1 oracle rules above; transfer-only and ordinary DGB
+blocks may omit the coinbase oracle bundle.
+
+Thaw Day is a separate shared height for the new DigiDollar validation rules.
+Mainnet, testnet26 and signet Thaw Day heights remain disabled in this source.
+It does not change the oracle signing quorum or the v0x03 bundle format. See
+the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for tip and next-block
+status and the limits of this development candidate.
 
 ## Regtest Mocking
 

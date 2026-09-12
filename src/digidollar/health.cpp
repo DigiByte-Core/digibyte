@@ -653,7 +653,7 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
             if (validation_view) {
                 Coin validation_coin;
                 if (!validation_view->GetCoin(key, validation_coin) || validation_coin.IsSpent()) {
-                    LogPrintf("DigiDollar: Skipping spent DD vault candidate: %s:%d\n", txid.ToString(), key.n);
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Skipping spent DD vault candidate: %s:%d\n", txid.ToString(), key.n);
                     processed_txids.insert(txid);
                     pcursor->Next();
                     continue;
@@ -714,8 +714,7 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
             LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Found DD vault - collateral=%s, DD=%s (exact)\n",
                      FormatMoney(collateral), FormatMoney(ddAmount));
 
-            // ALWAYS log vault findings (not just BCLog::DIGIDOLLAR)
-            LogPrintf("DigiDollar: UTXO Scanner found vault: %s:%d - Collateral=%s DGB, DD=%s cents\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: UTXO Scanner found vault: %s:%d - Collateral=%s DGB, DD=%s cents\n",
                      txid.ToString(), key.n, FormatMoney(collateral), FormatMoney(ddAmount));
         }
 

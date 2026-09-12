@@ -22,19 +22,19 @@ There are only 4 operations: **Mint**, **Transfer**, **Redeem**, and regular DGB
 | Fees | Always paid in **DGB** (not DD) |
 | Minimum fee | 0.1 DGB per DD transaction for transfer builders; mint and redeem builders enforce their own DGB fee floors in `src/digidollar/txbuilder.cpp` |
 | Signing | Schnorr (BIP-340) for DD inputs, ECDSA/Schnorr for DGB fee inputs |
-| Wallet type | Descriptor/bech32m HD wallet required for DigiDollar V1 mint/address creation; legacy wallets are unsupported |
+| Wallet type | Mint needs private keys, HD support, Taproot receiving and bech32 change descriptors; see wallet support below |
 | Confirmations | Same as DGB — 15-second blocks |
-| Backend | Requires DigiByte Core v9.26.2+ with DigiDollar built in; features remain BIP9-gated until activation |
+| Backend | Use the coordinated release for the target network; see the activation and upgrade guidance below |
 
 ---
 
 ## 1. Prerequisites
 
 Your wallet must:
-- Run DigiByte Core v9.26.2 or later (with DigiDollar consensus rules)
+- Use the reviewed release selected for the target network and its activation height
 - Set `digidollar=1` in `digibyte.conf`
 - Set `txindex=1`; startup enforces this on mainnet/testnet DigiDollar chains and on regtest when DD testing is enabled
-- Wait for BIP9 activation (DigiDollar features are disabled until activation; status is exposed via `getdigidollardeploymentinfo`)
+- Check `getdigidollardeploymentinfo`: DigiDollar uses a buried activation height; Thaw Day has its own separately reported height
 - Use a descriptor/bech32m HD wallet with private keys enabled. DD mint
   requires deriving an HD owner key for the time-lock; encryption is
   supported, in which case the wallet must be unlocked with
@@ -424,11 +424,13 @@ digibyte-cli -rpcwallet=restored listdigidollarpositions
 digibyte-cli -rpcwallet=restored getdigidollarbalance
 ```
 
-After step 4, the restored wallet may immediately `redeemdigidollar` any
-position whose `unlock_height` has passed. There is no separate "DD owner
-key import" step. The rescan reconstructs positions from mint metadata after
-wallet ownership of the zero-value DD token output is proven, then recovers the
-Taproot spending key from the imported descriptors when available.
+After step 4, check the restored positions and whether the wallet has their
+matching spending keys. A visible position and an expired timelock alone do
+not establish that redemption can succeed. It also needs the required DD burn,
+DGB fees and a valid quote. Rescan can recover the Taproot spending key only
+when the imported private descriptors provide it. Keep the original backups;
+final wallet recovery integration and restore verification remain pending for
+this development candidate.
 
 ### If redeeming reports a missing owner key
 
@@ -503,13 +505,48 @@ positions remain visible to read-only RPCs while locked, but
 `listdigidollarpositions` reports them as not spendable/not redeemable until
 the wallet is unlocked.
 
-### Legacy (BDB) wallets are unsupported for V1
+### Wallet support for minting
 
-DigiDollar V1 mint requires HD-derived owner keys persisted via the
-descriptor wallet path. Loading or restoring a BDB legacy wallet that has
-DD records is not supported and is not exercised by the V1 test suite.
-Operators with legacy wallets must migrate to a descriptor wallet
-(`migratewallet` or fresh export/import) before minting on mainnet.
+Minting requires a descriptor wallet with private keys and HD key support.
+A descriptor describes the keys and script for a wallet's addresses.
+It needs an active ranged Taproot (`bech32m`) receiving descriptor and an
+active ranged SegWit (`bech32`) internal change descriptor, both with private
+keys. A ranged descriptor can derive a sequence of wallet addresses. Merely
+having `descriptors=true` in `getwalletinfo` does not prove those capabilities.
+
+| Wallet | Mint support |
+|--------|--------------|
+| Ordinary descriptor wallet with private keys | Supported if the required receiving/change descriptors are available |
+| Encrypted supported wallet | Supported through the normal unlock flow |
+| Legacy/BDB wallet | Refused; use a supported descriptor wallet for new mints |
+| Watch-only or private keys disabled | Refused; public keys alone cannot sign |
+| Blank or restricted descriptor wallet | Refused if the required key/address capability is absent |
+
+Qt checks this before either mint confirmation dialog. RPC mint checks it
+before requesting an unlock or deriving a key. The check itself does not
+reserve an address or consume a key. Construction and signing can still fail
+later, and confirmation remains subject to the applicable chain rules.
+For complex imported descriptors, finding stored private keys does not prove
+that the wallet can derive the required Taproot owner key. That later step
+must succeed too.
+
+Back up the existing wallet before changing its setup. For new mints, create
+a normal descriptor wallet and transfer spendable DGB to it, or restore a
+backup containing the required descriptors and private keys. Keep the original
+wallet and its backups for existing funds and vaults. Creating a replacement
+wallet does not recover a missing vault key.
+
+`migratewallet` is marked experimental by its RPC help. It creates a legacy
+backup, requires the passphrase for an encrypted wallet and requires a new
+backup after migration. Do not run it automatically or assume every migrated
+wallet supplies the mint capabilities above. Check the result before funding
+new mints. A migration or rescan cannot recreate private keys absent from the
+recovery material.
+
+Source: [mint capability check](src/wallet/digidollarmintcapability.h),
+[Qt mint flow](src/qt/digidollarmintwidget.cpp),
+[RPC mint flow](src/rpc/digidollar.cpp) and
+[migration help](src/wallet/rpc/wallet.cpp).
 
 ---
 
@@ -577,10 +614,35 @@ digibyte-cli getoracleprice
 
 # Check activation status
 digibyte-cli getdigidollardeploymentinfo
-# Returns: BIP9 status, signaling progress
+# Returns: buried DigiDollar activation and separate tip/next-block Thaw Day status
 ```
 
 ---
+
+### Circulating tokens, vault principal and estimates
+
+`getdigidollarstats.total_dd_supply` is the circulating-supply field in cents:
+issuance minus actual burns, subject to the legacy fallback limit below. `canonical_health.open_vault_principal` is the original DD
+attached to vaults that remain open. It is not a wallet balance or a count of
+all historical mints. Read canonical values only when `ready` is true.
+
+Before Thaw Day, the legacy fallback used when `digidollarstatsindex` is
+disabled scans vault amounts. Do not treat that fallback's `total_dd_supply`
+as a verified circulating token count. Use a synchronized stats index for
+circulation reporting below the transition. At and above Thaw Day, the
+fallback reconstructs tokens separately from vault principal.
+
+After Thaw Day, health uses open-vault principal. Closing a 100-DD vault with
+a 125-DD burn reduces these totals by different amounts. The resulting health
+can keep emergency mint restrictions active longer or require extra DD to
+redeem another vault. The switch does not create tokens or change balances.
+
+Top-level `health_rule_height` and `selected_health_denominator` describe tip
+health. `next_block_health` describes the next candidate, with its own quote,
+readiness and denominator. At tip H-1 these may legitimately use different
+rules. Use current construction/estimate RPCs and handle a retry if chain state
+or the quote changes; a displayed estimate does not bind the confirming block.
+The [architecture guide](DIGIDOLLAR_ARCHITECTURE.md) explains the accounting.
 
 ## 11. Identifying DD Transactions (Raw Parsing)
 
@@ -675,11 +737,18 @@ Registered in `RegisterDigiDollarRPCCommands()` at `src/rpc/digidollar.cpp`:
 
 ### Qt GUI integration
 
-DigiByte Core ships a DD lifecycle tab plus Qt widgets/dialogs/helpers: `digidollartab`, `digidollaroverviewwidget`, `digidollarsendwidget`, `digidollarreceivewidget`, `digidollarmintwidget`, `digidollarredeemwidget`, `digidollarpositionswidget`, `digidollartransactionswidget`, `digidollarcoincontroldialog`, `digidollarreceiverequest`, `ddaddressbookpage`, and `digidollar_qt_translate`. `DigiDollarTab` exposes the tabs `$DD Overview`, `Send $DD`, `Receive $DD`, `Mint $DD`, `Redeem $DD`, `$DD Vault`, and `$DD Transactions`, with an activation overlay until BIP9 activates. The Qt mint flow derives an HD owner key and persists it before broadcasting (commit `1e95478b7e`), so an HD wallet with private keys enabled is required. See `REPO_MAP_DIGIDOLLAR.md` (Qt GUI section) for individual widget responsibilities.
+DigiByte Core ships a DD lifecycle tab plus Qt widgets/dialogs/helpers: `digidollartab`, `digidollaroverviewwidget`, `digidollarsendwidget`, `digidollarreceivewidget`, `digidollarmintwidget`, `digidollarredeemwidget`, `digidollarpositionswidget`, `digidollartransactionswidget`, `digidollarcoincontroldialog`, `digidollarreceiverequest`, `ddaddressbookpage`, and `digidollar_qt_translate`. `DigiDollarTab` exposes the tabs `$DD Overview`, `Send $DD`, `Receive $DD`, `Mint $DD`, `Redeem $DD`, `$DD Vault`, and `$DD Transactions`, with an activation overlay until the buried DigiDollar height is reached. The Qt mint flow uses an HD-derived owner key and the wallet capability checks described above. Key storage is requested before wallet commit; that sequence alone does not establish durable recovery. See `REPO_MAP_DIGIDOLLAR.md` (Qt GUI section) for individual widget responsibilities.
 
 #### Qt mint reject-reason translation (`DD-FA-DOC-010`)
 
-The Qt mint widget broadcasts the assembled mint transaction directly through `node().broadcastTransaction` rather than through the `mintdigidollar` RPC. As a result the Wave 6 RPC pre-check that translates Emergency Redemption Ratio (ERR) state into a friendly RPC error does **not** run on the Qt code path: the widget's owner-key derivation, two-step confirmation dialogs, and HD wallet flow are all driven before broadcast, and the consensus reject reason (`minting-blocked-during-err`, `bad-tx-no-musig2-quote`, `volatility-freeze`, `bad-mint-lock-tier-duration`, `bad-oracle-price`, `bad-mint-collateral`) reaches the user only when mempool refuses the transaction.
+The Qt mint widget calls `WalletModel::mintDigiDollar`. The wallet model
+constructs and signs the transaction, then calls `CWallet::CommitTransaction`
+through the wallet relay path. The widget checks wallet capabilities before
+either confirmation dialog, retains the normal unlock flow and refreshes
+estimates before construction. Commit or relay can still fail
+if a quote or the chain changes, or if a remaining validation requirement is
+not met. The wallet displays the returned reason through the translation
+helper below.
 
 In v9.26.2 (`DD-FA-FUNC-032`), the mint widget routes the broadcast reason through `qt/digidollar_qt_translate.h::TranslateMintRejectReasonForUser` before display. Known DD/oracle reject tokens are rewritten with a plain-English explanation and a remediation hint (e.g. `minting-blocked-during-err` is shown as "DigiDollar minting is paused because the system is in Emergency Redemption Ratio (ERR) recovery mode."). Unknown reasons pass through unchanged so operators retain forensic detail. The translator is unit-tested by `src/test/digidollar_qt_translate_tests.cpp` and is buildable without enabling Qt.
 
@@ -689,11 +758,11 @@ For wallet integrators that bypass the Qt widget and submit raw mint transaction
 
 ## 13. Test on Testnet Now!
 
-The current public testnet in this source tree is **testnet26**. DigiDollar activation is BIP9-gated at/after block 600 once 140 of 200 blocks signal; verify live status with `getdigidollardeploymentinfo`.
+The public testnet configured in this source is **testnet26**. DigiDollar uses buried activation height 600. Thaw Day remains unscheduled in this development source; no public activation or soak result is claimed. Check `getdigidollardeploymentinfo` on the installed build.
 
 ### Quick Setup
 
-1. Download the latest DigiByte Core v9.26.2 build from this branch
+1. Obtain the reviewed test build and network instructions from the release owner
 2. Configure for testnet:
    ```ini
    testnet=1
@@ -719,11 +788,15 @@ The current public testnet in this source tree is **testnet26**. DigiDollar acti
 | Oracle Consensus | 35 active slots, 7 signatures required |
 | Exchange Sources | Binance, CoinGecko, KuCoin, Gate.io, HTX, Crypto.com (6 active feeders, see `src/oracle/exchange.cpp:1092-1097`) |
 | Outlier filter | Median-distance: a price is dropped when its distance from the median exceeds `outlier_threshold × median` (`MultiExchangeAggregator::FilterOutliers` at `src/oracle/exchange.cpp:1225`) |
-| Activation | BIP9 bit 23, min activation height 600; check `getdigidollardeploymentinfo` for current status |
+| Activation | DigiDollar buried at 600; Thaw Day separately reported by `getdigidollardeploymentinfo` |
 
 ### Mainnet Activation
 
-Mainnet activation is BIP9-gated on bit 23 (`src/kernel/chainparams.cpp:177-180`): signaling starts 2026-06-01 (`nStartTime=1780272000`), times out 2027-06-01 (`nTimeout=1811808000`), uses a 40,320-block confirmation window with a 70% threshold (28,224 blocks), and the minimum activation height is 23,627,520. Use `getdigidollardeploymentinfo` on the target release and network as the runtime source of truth for status, window size, threshold, timeout, and minimum activation height.
+DigiDollar's buried mainnet activation height is 23,869,440. The separate
+Thaw Day height is disabled in this development source. Before a coordinated
+activation, upgrade the backend using the [node operations guide](doc/digidollar-operations.md).
+See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for the candidate
+height boundary and old-node compatibility limits.
 
 ---
 

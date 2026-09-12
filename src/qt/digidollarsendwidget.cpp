@@ -911,11 +911,11 @@ bool DigiDollarSendWidget::showConfirmationDialog(const QString& address, double
     int result = confirmationDialog->exec();
 
     if (result == QMessageBox::Yes) {
-        LogPrintf("DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
                   amount, address.toStdString());
         return true;
     } else {
-        LogPrintf("DigiDollar: User cancelled transfer\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: User cancelled transfer\n");
         return false;
     }
 }
@@ -1000,7 +1000,7 @@ void DigiDollarSendWidget::showSuccess(const QString& txid, double amount)
     msgBox.setStandardButtons(QMessageBox::Ok);
     msgBox.exec();
 
-    LogPrintf("DigiDollar: Transfer broadcast - txid: %s\n", txid.toStdString());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transfer broadcast - txid: %s\n", txid.toStdString());
 }
 
 // PHASE 7.3: Backend error message mapping

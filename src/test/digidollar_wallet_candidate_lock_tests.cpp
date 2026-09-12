@@ -14,6 +14,7 @@
 #include <validation.h>
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/digidollarmintcapability.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
@@ -146,6 +147,13 @@ BOOST_FIXTURE_TEST_SUITE(digidollar_wallet_candidate_lock_tests, CandidateWallet
 
 BOOST_AUTO_TEST_CASE(activated_mint_releases_chain_before_wallet_selection)
 {
+    {
+        LOCK(test_wallet->cs_wallet);
+        test_wallet->m_keypool_size = 2;
+        test_wallet->SetWalletFlag(wallet::WALLET_FLAG_DESCRIPTORS);
+        test_wallet->SetupDescriptorScriptPubKeyMans();
+    }
+    BOOST_REQUIRE(wallet::GetDigiDollarMintWalletError(*test_wallet).empty());
     auto request = Request("mintdigidollar");
     request.params.push_back(int64_t{10000});
     request.params.push_back(0);

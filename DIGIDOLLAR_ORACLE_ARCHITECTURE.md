@@ -16,30 +16,15 @@
 
 ## Table of Contents
 
-### Part I: Executive Summary & Overview
-1. [Executive Summary](#1-executive-summary)
-2. [Quick Start Guide](#2-quick-start-guide)
-3. [System Architecture Overview](#3-system-architecture-overview)
+- [Executive Summary](#1-executive-summary)
+- [Quick Start Guide](#2-quick-start-guide)
+- [System Architecture Overview](#3-system-architecture-overview)
+- [Data Structures & Serialization](#4-data-structures--serialization)
+- [Block Validation & Consensus Rules](#5-block-validation--consensus-rules)
+- [Current Oracle Configuration](#14-current-oracle-configuration)
 
-### Part II: Core Components (Deep Dive)
-4. [Data Structures & Serialization](#4-data-structures--serialization)
-5. [Block Validation & Consensus Rules](#5-block-validation--consensus-rules)
-6. [P2P Networking & Message Broadcasting](#6-p2p-networking--message-broadcasting)
-7. [Exchange API Integration](#7-exchange-api-integration)
-
-### Part III: Testing & Quality Assurance
-8. [Test Suite Documentation](#8-test-suite-documentation)
-9. [Validation Flows](#9-validation-flows)
-
-### Part IV: Operational Guide
-10. [Configuration & Deployment](#10-configuration--deployment)
-11. [Monitoring & Troubleshooting](#11-monitoring--troubleshooting)
-12. [Performance & Security](#12-performance--security)
-
-### Part V: Reference
-13. [API Reference](#13-api-reference)
-14. [Phase Two Roadmap](#14-phase-two-roadmap)
-15. [Glossary](#15-glossary)
+For deployment and diagnostics, see the [oracle setup guide](DIGIDOLLAR_ORACLE_SETUP.md)
+and [node operations](doc/digidollar-operations.md).
 
 ---
 
@@ -112,7 +97,7 @@ V1 ships with:
 **If you're running a node:**
 - Your node validates the MuSig2 aggregate signature in every DD mint/redeem block once `DEPLOYMENT_DIGIDOLLAR` is active (buried height since v9.26.5) and `nHeight >= nOracleActivationHeight`; DD transfer-only and ordinary DGB blocks can omit a coinbase oracle bundle
 - No setup needed — validation happens automatically; the trust anchor is `consensus.vOraclePublicKeys` in chainparams
-- Enable `-debug=digidollar` to see oracle activity
+- Enable `-debug=digidollar` temporarily for routine oracle diagnostics. Useful errors and startup/recovery progress remain visible without it. See [node operations](doc/digidollar-operations.md) for log retention and compact filter service.
 
 ### 2.2 For Developers: Integration Points
 
@@ -1818,7 +1803,7 @@ void OracleBundleManager::RemovePriceCache(int height)
 
 ---
 
-## 14. Phase Two Roadmap - Multi-Oracle Consensus
+## 14. Current Oracle Configuration
 
 ### 14.1 V1 Activation & Quorum Reality (replaces the old Phase Two roadmap)
 
@@ -1867,41 +1852,27 @@ consensus.nOracleConsensusRequired   = 4;
 
 There is no longer a "mainnet validation bypass" — mainnet runs the same validator and the same MuSig2 verification path as testnet and regtest.
 
-### 14.3 Mainnet/Testnet Oracle Keys (35 Active - slot order 0-34)
+### 14.3 Network-specific oracle roster
 
-**Location:** `src/kernel/chainparams.cpp` mainnet/testnet `consensus.vOraclePublicKeys.push_back(...)` blocks. The mainnet and testnet rosters share the same active operators/placeholders and slot order for slots 0-34.
+The roster is in [src/kernel/chainparams.cpp](src/kernel/chainparams.cpp).
+Mainnet and testnet each configure 35 active slots, IDs 0–34, but their names
+and keys are network-specific. `getoracles` uses the selected roster's
+`OracleNodeInfo.display_name`.
 
-| Slot | Operator |
-|------|----------|
-| 0 | Jared |
-| 1 | Green Candle |
-| 2 | Bastian |
-| 3 | DanGB |
-| 4 | Shenger |
-| 5 | Ycagel |
-| 6 | Aussie |
-| 7 | LookInto |
-| 8 | JohnnyLawDGB |
-| 9 | Ogilvie |
-| 10 | ChopperBrian |
-| 11 | hallvardo (RC31 rotated key) |
-| 12 | DaPunzy (RC31 rotated key) |
-| 13 | DigiByteForce (RC31 rotated key) |
-| 14 | Neel |
-| 15 | DigiSwarm |
-| 16 | GTO90 |
-| 17 | digibyte-maxi |
-| 18 | Anthony |
-| 19 | mbah_jambon |
-| 20 | Camden |
+| Slot | Mainnet display name | Testnet display name |
+|------|----------------------|----------------------|
+| 0 | DigiByte.Io Oracle | Jared |
+| 11 | Crypto Corner Shop | hallvardo |
 
-Mainnet and testnet26 `vOracleNodes` slots 21-34 are active consensus
-metadata and are aligned with `consensus.vOraclePublicKeys`. Slot 28 uses the
-DigiHash Mining Pool key. Slot 31 is assigned to Peer2Peer / DigiRoos but
-remains a placeholder until a valid compressed secp256k1 oracle key is supplied;
-slots 32-34 use the submitted 3DogsKanab, LiberatedLark, and Manu_DGB_oracle
-keys. The local mini-testnet mode still keeps a 24-key local-only harness
-because only slots 0-23 have deterministic local private keys there.
+Slot 28 uses the DigiHash Mining Pool key and slot 31 uses the Peer2Peer /
+DigiRoos key. Slot 31 is not an empty placeholder in this source. All configured
+mainnet/testnet slots have compressed public keys; use the selected network's
+actual roster when checking an operator.
+
+Display names are local metadata. They are excluded from `OracleNodeInfo`
+serialization and do not change IDs, keys, slot order, quorum or signatures.
+See [src/primitives/oracle.h](src/primitives/oracle.h) and the name lookup in
+[src/rpc/digidollar.cpp](src/rpc/digidollar.cpp).
 
 ### 14.4 V1 Validator Helpers (`src/oracle/bundle_manager.cpp`)
 
@@ -1949,7 +1920,7 @@ There is no longer a separate "activate Phase Two on testnet" step — testnet/r
 **Verified against code:**
 - Price format: micro-USD (`1,000,000 = $1.00 USD`), constants `ORACLE_MIN_PRICE_MICRO_USD=100`, `ORACLE_MAX_PRICE_MICRO_USD=100000000` (`src/primitives/oracle.h:23-24`)
 - v0x03 on-chain payload: `version + bitmap_len + bitmap + epoch + price + timestamp + 64-byte aggregate sig` (`COracleBundle::SerializeV03Data`, `OracleBundleManager::CreateOracleScript`)
-- Validator: single code path for mainnet/testnet/regtest in `OracleDataValidator::ValidateBlockOracleData` (`src/oracle/bundle_manager.cpp:2151`)
+- Validator: single code path for mainnet/testnet/regtest in `OracleDataValidator::ValidateBlockOracleData` in [src/oracle/bundle_manager.cpp](src/oracle/bundle_manager.cpp)
 - P2P handlers: 9 message types in `src/protocol.cpp:53-62`; price/consensus/MuSig2/getoracles handlers, including `oraclehb`, share the `IsOracleP2PActive` gate in `src/net_processing.cpp` ~5440–6340, and `oraclebundle` is accepted-and-dropped.
 - Historical BIP9 (deployment buried in v9.26.5 — mainnet activated at 23,869,440, testnet26 at 600, regtest buried height 0): bit 23, mainnet start `2026-06-01`, mainnet timeout `2027-06-01`, mainnet `min_activation_height=23627520`, mainnet window 40320 / threshold 28224 (70%); testnet26 start at genesis, `min_activation_height=600`, window 200, threshold 140 (70%); regtest `ALWAYS_ACTIVE`
 - `OP_CHECKPRICE` is reserved and deterministically disabled (`src/script/interpreter.cpp:708-735`); it consumes one operand and pushes false without reading oracle state

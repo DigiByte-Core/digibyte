@@ -199,7 +199,7 @@ void VolatilityMonitor::RecordPrice(CAmount price, int64_t timestamp, uint32_t h
 
         // Don't record if too recent (< 1 hour interval)
         if (timestamp - lastPrice.timestamp < MIN_PRICE_INTERVAL) {
-            LogPrintf("VolatilityMonitor: Skipping price update (too recent: %d seconds)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Skipping price update (too recent: %d seconds)\n",
                      timestamp - lastPrice.timestamp);
             return;
         }
@@ -209,7 +209,7 @@ void VolatilityMonitor::RecordPrice(CAmount price, int64_t timestamp, uint32_t h
     // Add new price point
     priceHistory.emplace_back(price, timestamp, height);
 
-    LogPrintf("VolatilityMonitor: Recorded price %s at height %d (timestamp %d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Recorded price %s at height %d (timestamp %d)\n",
              FormatMoney(price), height, timestamp);
 
     // Clean old history to maintain size limits
@@ -246,7 +246,7 @@ void VolatilityMonitor::ClearHistory()
     currentState = VolatilityState();
     lastUpdateHeight = 0;
 
-    LogPrintf("VolatilityMonitor: History cleared\n");
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: History cleared\n");
 }
 
 double VolatilityMonitor::CalculateVolatility(int64_t timeWindow)
@@ -518,7 +518,7 @@ void VolatilityMonitor::RemovePriceForHeight(uint32_t height)
         UpdateVolatilityState();
     }
 
-    LogPrintf("VolatilityMonitor: Removed price data for height %u, remaining=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Removed price data for height %u, remaining=%d\n",
               height, priceHistory.size());
 }
 

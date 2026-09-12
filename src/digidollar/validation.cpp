@@ -51,7 +51,7 @@ struct ValidationCache {
         if (scriptTypeCache.size() > MAX_CACHE_SIZE) {
             scriptTypeCache.clear();
             amountCache.clear();
-            LogPrintf("DigiDollar: Validation cache cleared (size limit reached)\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Validation cache cleared (size limit reached)\n");
         }
     }
 };
@@ -1038,20 +1038,20 @@ bool ValidateCollateralRatio(CAmount dgbLocked, CAmount ddMinted,
     int baseRatio = GetCollateralRatioForLockTime(lockTime, ddParams);
     int effectiveRatio = GetEffectiveCollateralRatio(baseRatio, ctx.systemCollateral, ctx.params, IsThawDayActive(ctx.params.GetConsensus(), ctx.nHeight));
 
-    LogPrintf("DigiDollar: Collateral validation details:\n");
-    LogPrintf("  DGB locked: %d satoshis (%.2f DGB)\n", dgbLocked, dgbLocked / (double)COIN);
-    LogPrintf("  DD minted: %d cents ($%.2f)\n", ddMinted, ddMinted / 100.0);
-    LogPrintf("  Lock time: %d blocks (~%d days)\n", lockTime, lockTime / (24 * 60 * 4));
-    LogPrintf("  Oracle price: %lld micro-USD ($%.6f per DGB)\n", ctx.oraclePriceMicroUSD, ctx.oraclePriceMicroUSD / 1000000.0);
-    LogPrintf("  DGB value: %d cents ($%.2f)\n", dgbValueInCents, dgbValueInCents / 100.0);
-    LogPrintf("  Base ratio: %d%%, Effective ratio: %d%%, Actual ratio: %d%%\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral validation details:\n");
+    LogPrint(BCLog::DIGIDOLLAR, "  DGB locked: %d satoshis (%.2f DGB)\n", dgbLocked, dgbLocked / (double)COIN);
+    LogPrint(BCLog::DIGIDOLLAR, "  DD minted: %d cents ($%.2f)\n", ddMinted, ddMinted / 100.0);
+    LogPrint(BCLog::DIGIDOLLAR, "  Lock time: %d blocks (~%d days)\n", lockTime, lockTime / (24 * 60 * 4));
+    LogPrint(BCLog::DIGIDOLLAR, "  Oracle price: %lld micro-USD ($%.6f per DGB)\n", ctx.oraclePriceMicroUSD, ctx.oraclePriceMicroUSD / 1000000.0);
+    LogPrint(BCLog::DIGIDOLLAR, "  DGB value: %d cents ($%.2f)\n", dgbValueInCents, dgbValueInCents / 100.0);
+    LogPrint(BCLog::DIGIDOLLAR, "  Base ratio: %d%%, Effective ratio: %d%%, Actual ratio: %d%%\n",
               baseRatio, effectiveRatio, actualRatio);
-    LogPrintf("  Required collateral: %d satoshis (%.2f DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "  Required collateral: %d satoshis (%.2f DGB)\n",
               requiredCollateral, requiredCollateral / (double)COIN);
-    LogPrintf("  System collateral: %d%%\n", ctx.systemCollateral);
+    LogPrint(BCLog::DIGIDOLLAR, "  System collateral: %d%%\n", ctx.systemCollateral);
 
     bool isValid = dgbLocked >= requiredCollateral;
-    LogPrintf("  Result: %s\n", isValid ? "VALID" : "INVALID");
+    LogPrint(BCLog::DIGIDOLLAR, "  Result: %s\n", isValid ? "VALID" : "INVALID");
 
     return isValid;
 }
@@ -1075,7 +1075,7 @@ bool ValidateNormalRedemption(const CScript& script, int currentHeight) {
             return false;
         }
         // Timelock has expired - redemption allowed
-        LogPrintf("DigiDollar: Normal redemption allowed - timelock expired\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Normal redemption allowed - timelock expired\n");
         return true;
     }
 
@@ -1083,7 +1083,7 @@ bool ValidateNormalRedemption(const CScript& script, int currentHeight) {
     // For testing purposes, allow redemptions when height > 0
     // In Phase 2, this would extract timelock from witness data during script execution
     if (currentHeight > 0) {
-        LogPrintf("DigiDollar: Normal redemption validation simplified (Phase 1) - allowing based on height > 0\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Normal redemption validation simplified (Phase 1) - allowing based on height > 0\n");
         return true;
     }
 
@@ -1104,7 +1104,7 @@ bool ValidateEmergencyRedemption(const CScript& script,
         }
     }
 
-    LogPrintf("DigiDollar: Emergency redemption - %d signatures provided, %d required\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Emergency redemption - %d signatures provided, %d required\n",
               validSigs, requiredSigs);
 
     return validSigs >= requiredSigs;
@@ -1115,7 +1115,7 @@ bool ValidateERRRedemption(const CScript& script, int systemCollateral) {
     // ERR (Emergency Redemption Ratio) activates when system < 100% collateralized
     bool errActive = systemCollateral < 100;
 
-    LogPrintf("DigiDollar: ERR validation - System collateral: %d%%, ERR %s\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR validation - System collateral: %d%%, ERR %s\n",
               systemCollateral, errActive ? "ACTIVE" : "INACTIVE");
 
     return errActive;
@@ -1175,7 +1175,7 @@ bool ValidateDigiDollarScript(const CScript& script,
             break;
     }
 
-    LogPrintf("DigiDollar: Script validation passed - Type: %d, Amount: %d cents\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Script validation passed - Type: %d, Amount: %d cents\n",
               static_cast<int>(type), amount);
 
     return true;
@@ -1189,7 +1189,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                             const ValidationContext& ctx,
                             TxValidationState& state) {
     const bool canonical = IsThawDayActive(ctx.params.GetConsensus(), ctx.nHeight);
-    LogPrintf("DigiDollar: Validating mint transaction (txid: %s)\n", tx.GetHash().ToString());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Validating mint transaction (txid: %s)\n", tx.GetHash().ToString());
 
     // 1. Basic structural checks
     if (tx.vin.empty()) {
@@ -1291,7 +1291,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
             // Non-P2TR outputs are allowed as change outputs - skip them
             if (!isP2TR) {
                 // This is a change output (P2WPKH, P2SH, etc.) - not collateral
-                LogPrintf("DigiDollar: Output %zu is non-P2TR change output (value=%d, scriptSize=%d)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Output %zu is non-P2TR change output (value=%d, scriptSize=%d)\n",
                          i, output.nValue, output.scriptPubKey.size());
                 continue;  // Skip to next output - change outputs are allowed
             }
@@ -1351,7 +1351,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                     try {
                         CScriptNum txTypeNum(data, true);
                         txType = txTypeNum.getint();
-                        LogPrintf("DigiDollar: Extracted tx type from OP_RETURN: %d\n", txType);
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted tx type from OP_RETURN: %d\n", txType);
                     } catch (const std::exception&) {}
                 }
                 if (txType != static_cast<int64_t>(DD_TX_MINT)) {
@@ -1373,7 +1373,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                     // Allow up to 8 bytes for DD amounts (int64_t range)
                     CScriptNum ddAmountNum(data, true, 8);
                     totalDD = ddAmountNum.GetInt64();
-                    LogPrintf("DigiDollar: Extracted DD amount from OP_RETURN: %lld cents ($%.2f)\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted DD amount from OP_RETURN: %lld cents ($%.2f)\n",
                               static_cast<long long>(totalDD), totalDD / 100.0);
                 } catch (const scriptnum_error&) {
                     LogPrintf("DigiDollar: Malformed DD amount in mint OP_RETURN\n");
@@ -1399,7 +1399,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                     // Allow up to 8 bytes for lock heights (int64_t range)
                     CScriptNum lockHeightNum(data, true, 8);
                     lockTime = lockHeightNum.GetInt64();
-                    LogPrintf("DigiDollar: Extracted lock height from OP_RETURN: %lld blocks\n", static_cast<long long>(lockTime));
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted lock height from OP_RETURN: %lld blocks\n", static_cast<long long>(lockTime));
                 } catch (const scriptnum_error&) {
                     LogPrintf("DigiDollar: Malformed lock height in mint OP_RETURN\n");
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-lock-height",
@@ -1422,7 +1422,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                         CScriptNum lockTierNum(data, true);
                         int64_t lockTier = lockTierNum.getint();
                         claimedLockTier = lockTier;
-                        LogPrintf("DigiDollar: Extracted lock tier from OP_RETURN: %lld\n", static_cast<long long>(lockTier));
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted lock tier from OP_RETURN: %lld\n", static_cast<long long>(lockTier));
 
                         // Validate tier is in range (0-9)
                         if (lockTier < 0 || lockTier > 9) {
@@ -1492,7 +1492,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                     if (data.size() == 32) {
                         ownerXOnlyPubKeyData = data;
                         hasOwnerPubKey = true;
-                        LogPrintf("DigiDollar: Extracted owner x-only pubkey from OP_RETURN (%d bytes)\n", data.size());
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted owner x-only pubkey from OP_RETURN (%d bytes)\n", data.size());
                     } else {
                         LogPrintf("DigiDollar: SECURITY - Invalid owner pubkey size in OP_RETURN: %d (expected 32)\n", data.size());
                         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-mint-owner-pubkey",
@@ -1569,7 +1569,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
         int minRatio = 200;
         totalDD = (totalCollateral * oraclePrice) / (minRatio * COIN);
 
-        LogPrintf("DigiDollar: Calculated DD amount from collateral: %d cents ($%.2f) from %d DGB at %d cents\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculated DD amount from collateral: %d cents ($%.2f) from %d DGB at %d cents\n",
                   totalDD, totalDD / 100.0, totalCollateral / COIN, oraclePrice);
     }
 
@@ -1641,7 +1641,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
                                "Internal key must be the NUMS point to prevent key-path spending.");
         }
 
-        LogPrintf("DigiDollar: NUMS verification passed - collateral P2TR matches expected output\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: NUMS verification passed - collateral P2TR matches expected output\n");
     }
 
     // 6. Validate total DD amount against mint limits
@@ -1717,12 +1717,12 @@ bool ValidateMintTransaction(const CTransaction& tx,
     }
 
     // 9. Log successful validation
-    LogPrintf("DigiDollar: Mint validation successful:\n");
-    LogPrintf("  Total DD: %d cents ($%.2f)\n", totalDD, totalDD / 100.0);
-    LogPrintf("  Total collateral: %d satoshis (%.2f DGB)\n", totalCollateral, totalCollateral / (double)COIN);
-    LogPrintf("  Required collateral: %d satoshis (%.2f DGB)\n", requiredCollateral, requiredCollateral / (double)COIN);
-    LogPrintf("  Lock time: %d blocks (~%d days)\n", lockTime, lockTime / (24 * 60 * 4));
-    LogPrintf("  Oracle price: %lld micro-USD ($%.6f per DGB)\n", ctx.oraclePriceMicroUSD, ctx.oraclePriceMicroUSD / 1000000.0);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Mint validation successful:\n");
+    LogPrint(BCLog::DIGIDOLLAR, "  Total DD: %d cents ($%.2f)\n", totalDD, totalDD / 100.0);
+    LogPrint(BCLog::DIGIDOLLAR, "  Total collateral: %d satoshis (%.2f DGB)\n", totalCollateral, totalCollateral / (double)COIN);
+    LogPrint(BCLog::DIGIDOLLAR, "  Required collateral: %d satoshis (%.2f DGB)\n", requiredCollateral, requiredCollateral / (double)COIN);
+    LogPrint(BCLog::DIGIDOLLAR, "  Lock time: %d blocks (~%d days)\n", lockTime, lockTime / (24 * 60 * 4));
+    LogPrint(BCLog::DIGIDOLLAR, "  Oracle price: %lld micro-USD ($%.6f per DGB)\n", ctx.oraclePriceMicroUSD, ctx.oraclePriceMicroUSD / 1000000.0);
 
     return true;
 }
@@ -1994,7 +1994,7 @@ bool ValidateTransferTransaction(const CTransaction& tx,
     // 2. Add new output UTXOs
     // 3. Update DD balance tracking
 
-    LogPrintf("DigiDollar: Transfer transaction validated successfully - DD: %d cents (%d inputs, %d outputs)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transfer transaction validated successfully - DD: %d cents (%d inputs, %d outputs)\n",
               outputDD, tx.vin.size(), ddOutputCount);
 
     return true;
@@ -2004,7 +2004,7 @@ bool ValidateRedemptionTransaction(const CTransaction& tx,
                                   const ValidationContext& ctx,
                                   TxValidationState& state) {
     // Redemption transactions unlock collateral and burn DD tokens
-    LogPrintf("DigiDollar: Validating redemption transaction %s\n", tx.GetHash().ToString());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Validating redemption transaction %s\n", tx.GetHash().ToString());
 
     // Extract DD transaction type for specific redemption path validation
     DigiDollarTxType txType = DigiDollar::GetDigiDollarTxType(tx);
@@ -2333,7 +2333,7 @@ bool ValidateRedemptionTransaction(const CTransaction& tx,
         return false;
     }
 
-    LogPrintf("DigiDollar: Redemption transaction %s validated successfully\n", tx.GetHash().ToString());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Redemption transaction %s validated successfully\n", tx.GetHash().ToString());
     return true;
 }
 
@@ -2363,7 +2363,7 @@ bool ValidateNormalRedemptionConditions(const CTransaction& tx,
                             strprintf("ERR active - system health %d%% (normal redemptions blocked)", ctx.systemCollateral));
     }
 
-    LogPrintf("DigiDollar: Normal redemption validation passed (height: %d >= locktime: %d, system health: %d%%)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Normal redemption validation passed (height: %d >= locktime: %d, system health: %d%%)\n",
               ctx.nHeight, tx.nLockTime, ctx.systemCollateral);
     return true;
 }
@@ -2376,7 +2376,7 @@ bool ValidateEmergencyRedemptionConditions(const CTransaction& tx,
     // - User must burn MORE DD than originally minted to get FULL collateral back
     // - Example: At 80% ratio, burn 125 DD to get back collateral for 100 DD position
 
-    LogPrintf("DigiDollar: Validating emergency (ERR) redemption conditions\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Validating emergency (ERR) redemption conditions\n");
 
     // IMPORTANT: Check structural requirements FIRST before checking ERR activation
     // This ensures more specific error messages for invalid transactions
@@ -2412,12 +2412,12 @@ bool ValidateEmergencyRedemptionConditions(const CTransaction& tx,
     double errRatio = ERR::EmergencyRedemptionRatio::CalculateERRAdjustment(systemHealth);
     double ddMultiplier = 1.0 / errRatio; // How much MORE DD is needed
 
-    LogPrintf("DigiDollar: ERR redemption - system health: %d%%, ratio: %.2f, DD burn multiplier: %.2fx\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR redemption - system health: %d%%, ratio: %.2f, DD burn multiplier: %.2fx\n",
               systemHealth, errRatio, ddMultiplier);
 
     // DD burn accounting is enforced by ValidateCollateralReleaseAmount(), which
     // has the collateral mint metadata needed to calculate the required ERR burn.
-    LogPrintf("DigiDollar: ERR redemption conditions validated - user must burn %.1f%% extra DD to get full collateral\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR redemption conditions validated - user must burn %.1f%% extra DD to get full collateral\n",
               (ddMultiplier - 1.0) * 100);
     return true;
 }
@@ -2752,7 +2752,7 @@ bool ValidateCollateralReleaseAmount(const CTransaction& tx,
     const __int128 maxAllowedDGBOutputs = static_cast<__int128>(allowedRelease) +
                                          static_cast<__int128>(totalFeeInputs);
 
-    LogPrintf("DigiDollar: Collateral release check - totalOutputs: %lld, feeInputs: %lld, allowedCollateral: %lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral release check - totalOutputs: %lld, feeInputs: %lld, allowedCollateral: %lld\n",
               (long long)totalDGBOutputs, (long long)totalFeeInputs,
               (long long)allowedRelease);
 
@@ -2777,7 +2777,7 @@ bool ValidateCollateralReleaseAmount(const CTransaction& tx,
                                      (long long)totalDGBOutputs, (long long)allowedRelease));
     }
 
-    LogPrintf("DigiDollar: Collateral release validated - outputs: %lld, allowed collateral: %lld, fee inputs: %lld, ddBurned: %lld/%lld (original: %lld)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral release validated - outputs: %lld, allowed collateral: %lld, fee inputs: %lld, ddBurned: %lld/%lld (original: %lld)\n",
               (long long)totalDGBOutputs, (long long)allowedRelease,
               (long long)totalFeeInputs, (long long)ddBurned,
               (long long)requiredDDBurn, (long long)originalDDMinted);
@@ -2795,7 +2795,7 @@ bool ValidateScriptPathSpending(const CTransaction& tx,
     // The Schnorr signature verification is handled by the consensus engine
     // No additional validation needed here for Phase 1
 
-    LogPrintf("DigiDollar: Script path spending validation - using key-path (Schnorr), validation passed\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Script path spending validation - using key-path (Schnorr), validation passed\n");
     return true;  // Allow key-path spending (standard Taproot)
 }
 
@@ -2962,7 +2962,7 @@ bool ValidateCollateralOutput(const CTxOut& output, const CTransaction& tx,
     // - Check for valid redemption paths
     // - Validate timelock parameters
 
-    LogPrintf("DigiDollar: Collateral output validation passed - Value: %d DGB\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral output validation passed - Value: %d DGB\n",
               output.nValue / COIN);
 
     return true;
@@ -2990,7 +2990,7 @@ bool ValidateDDOutput(const CTxOut& output, const CTransaction& tx,
     // (P2TR with value=0 indicates DD token output)
     // Phase 2 will use UTXO database tracking for proper identification
 
-    LogPrintf("DigiDollar: DD output validation passed\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD output validation passed\n");
 
     return true;
 }
@@ -3032,7 +3032,7 @@ int64_t ExtractLockTime(const CScript& script) {
                 int64_t maxLock = 10 * 365 * 24 * 60 * 4; // 10 years
 
                 if (lockValue >= minLock && lockValue <= maxLock) {
-                    LogPrintf("DigiDollar: Extracted lock time: %d blocks (~%d days)\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted lock time: %d blocks (~%d days)\n",
                               lockValue, lockValue / (24 * 60 * 4));
                     return lockValue;
                 }
@@ -3110,7 +3110,7 @@ bool ValidateERRRedemption(const CTransaction& tx,
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "err-not-active");
         return ValidateRedemptionTransaction(tx, ctx, state);
     }
-    LogPrintf("DigiDollar: Validating ERR redemption transaction\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Validating ERR redemption transaction\n");
 
     // Check if ERR should be active based on system health
     if (!DigiDollar::ERR::EmergencyRedemptionRatio::ShouldActivateERR(ctx.systemCollateral)) {
@@ -3183,7 +3183,7 @@ bool ValidateERRRedemption(const CTransaction& tx,
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-err-no-collateral-return");
     }
 
-    LogPrintf("DigiDollar: ERR redemption validation passed - DD burned: %lld, required: %lld, collateral returned: %lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR redemption validation passed - DD burned: %lld, required: %lld, collateral returned: %lld\n",
               (long long)ddInputAmount, (long long)requiredDDBurn, (long long)collateralOutputAmount);
     return true;
 }

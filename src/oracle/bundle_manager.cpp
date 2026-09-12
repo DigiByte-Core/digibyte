@@ -169,7 +169,7 @@ bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
              message.oracle_id, message.price_micro_usd, message.timestamp, enabled);
 
     if (!enabled) {
-        LogPrintf("Oracle: Manager not enabled, rejecting message\n");
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Manager not enabled, rejecting message\n");
         return false;
     }
 
@@ -265,7 +265,7 @@ bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
         // Replace if new message is more recent
         if (message.timestamp > it->second.timestamp) {
             it->second = message;
-            LogPrintf("Oracle: Updated message from oracle %d with newer timestamp\n", message.oracle_id);
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Updated message from oracle %d with newer timestamp\n", message.oracle_id);
         } else {
             LogPrint(BCLog::DIGIDOLLAR, "Oracle: Ignoring older message from oracle %d\n", message.oracle_id);
             return false;
@@ -273,7 +273,7 @@ bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
     } else {
         // Add new message
         pending_messages[message.oracle_id] = message;
-        LogPrintf("Oracle: Added new message from oracle %d: price=%llu micro-USD, timestamp=%d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Added new message from oracle %d: price=%llu micro-USD, timestamp=%d\n",
                  message.oracle_id, message.price_micro_usd, message.timestamp);
     }
 
@@ -368,7 +368,7 @@ bool OracleBundleManager::RemoveOracleMessage(uint32_t oracle_id)
     auto it = pending_messages.find(oracle_id);
     if (it != pending_messages.end()) {
         pending_messages.erase(it);
-        LogPrintf("Oracle: Removed message from oracle %d\n", oracle_id);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Removed message from oracle %d\n", oracle_id);
         return true;
     }
 
@@ -415,7 +415,7 @@ void OracleBundleManager::InjectTestMessage(const COraclePriceMessage& message)
 {
     std::lock_guard<std::recursive_mutex> lock(mtx_messages);
     pending_messages[message.oracle_id] = message;
-    LogPrintf("Oracle: Injected test message for oracle %d, price=%llu\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Injected test message for oracle %d, price=%llu\n",
              message.oracle_id, message.price_micro_usd);
     m_messages_updated_cv.notify_all();
 }
@@ -482,7 +482,7 @@ bool OracleBundleManager::AddConsensusAttestation(const COraclePriceMessage& att
         pending_attestations[attestation.oracle_id] = attestation;
     }
 
-    LogPrintf("Oracle: Added consensus attestation from oracle %d: price=%llu, timestamp=%lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Added consensus attestation from oracle %d: price=%llu, timestamp=%lld\n",
              attestation.oracle_id, attestation.price_micro_usd, attestation.timestamp);
     m_messages_updated_cv.notify_all();
     return true;
@@ -671,7 +671,7 @@ bool OracleBundleManager::UpdateBundle(const COracleBundle& bundle)
         }
     }
 
-    LogPrintf("Oracle: Updated bundle for epoch %d with %d messages\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Updated bundle for epoch %d with %d messages\n",
              bundle.epoch, bundle.messages.size());
 
     // Only complete MuSig2 bundles may update the latest price cache. Off-chain
@@ -701,7 +701,7 @@ void OracleBundleManager::CleanupOldBundles(int32_t current_epoch)
     auto it = epoch_bundles.begin();
     while (it != epoch_bundles.end()) {
         if (it->first < current_epoch - 1) {
-            LogPrintf("Oracle: Cleaning up old bundle for epoch %d\n", it->first);
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Cleaning up old bundle for epoch %d\n", it->first);
             it = epoch_bundles.erase(it);
         } else {
             ++it;
@@ -714,7 +714,7 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
     const bool block_touches_dd = BlockTouchesDigiDollar(block);
     const bool block_needs_oracle_price = BlockNeedsOraclePrice(block);
 
-    LogPrintf("Oracle: AddOracleBundleToBlock called for height %d, enabled=%d, min_oracle_count=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: AddOracleBundleToBlock called for height %d, enabled=%d, min_oracle_count=%d\n",
              block_height, enabled, min_oracle_count);
 
     if (!enabled) {
@@ -722,13 +722,13 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
             LogPrintf("Oracle: price-dependent DD block at height %d requires a MuSig2 bundle, but oracles are disabled\n",
                       block_height);
         } else {
-            LogPrintf("Oracle: Oracles disabled, no bundle available for block %d\n", block_height);
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Oracles disabled, no bundle available for block %d\n", block_height);
         }
         return false;
     }
 
     int32_t epoch = GetCurrentEpoch(block_height);
-    LogPrintf("Oracle: Current epoch=%d for height %d\n", epoch, block_height);
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Current epoch=%d for height %d\n", epoch, block_height);
     // Cleanup stale MuSig2 sessions at epoch boundary (keep current epoch only).
     // This prevents unbounded growth of the global session map when epoch advances.
     {
@@ -736,7 +736,7 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
         auto it = g_oracle_signing_sessions.begin();
         while (it != g_oracle_signing_sessions.end()) {
             if (it->first < epoch) {
-                LogPrintf("Oracle: Pruning stale MuSig2 session for epoch %d (current epoch=%d)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Pruning stale MuSig2 session for epoch %d (current epoch=%d)\n",
                           it->first, epoch);
                 it = g_oracle_signing_sessions.erase(it);
             } else {
@@ -793,7 +793,7 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
             signed_price, signed_timestamp);
 
         if (session_ready) {
-            LogPrintf("Oracle: MuSig2 session for epoch %d is COMPLETE, sig=%zu bytes, bitmap=%zu bytes\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 session for epoch %d is COMPLETE, sig=%zu bytes, bitmap=%zu bytes\n",
                      epoch, bundle.aggregate_sig.size(), bundle.participation_bitmap.size());
 
             // Use the EXACT values signed by the MuSig2 ceremony
@@ -804,7 +804,7 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
             if (ValidateMuSig2Bundle(bundle, block_height, Params().GetConsensus(), error) &&
                 bundle_is_fresh(bundle) &&
                 add_bundle_to_coinbase(bundle)) {
-                LogPrintf("Oracle: Added MuSig2 v0x03 bundle to block %d (epoch %d)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Added MuSig2 v0x03 bundle to block %d (epoch %d)\n",
                          block_height, epoch);
                 return true;
             }
@@ -818,7 +818,7 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
     if (ValidateMuSig2Bundle(cached_bundle, block_height, Params().GetConsensus(), error) &&
         bundle_is_fresh(cached_bundle) &&
         add_bundle_to_coinbase(cached_bundle)) {
-        LogPrintf("Oracle: Added cached MuSig2 v0x03 bundle to block %d (epoch %d)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Added cached MuSig2 v0x03 bundle to block %d (epoch %d)\n",
                   block_height, epoch);
         return true;
     }
@@ -830,10 +830,10 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
     }
 
     if (block_touches_dd) {
-        LogPrintf("Oracle: MuSig2 not ready/fresh for transfer-only DD block %d (epoch %d); no oracle data added\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 not ready/fresh for transfer-only DD block %d (epoch %d); no oracle data added\n",
                   block_height, epoch);
     } else {
-        LogPrintf("Oracle: MuSig2 not ready/fresh for epoch %d; no oracle data added to block template\n", epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 not ready/fresh for epoch %d; no oracle data added to block template\n", epoch);
     }
     return true;
 }
@@ -882,7 +882,7 @@ CScript OracleBundleManager::CreateOracleScript(const COracleBundle& bundle) con
         script << std::vector<unsigned char>{0x03};
         script << v03_data;
 
-        LogPrintf("Oracle: Created MuSig2 v0x03 script with bitmap_bytes=%zu, payload=%zu, price=%llu\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Created MuSig2 v0x03 script with bitmap_bytes=%zu, payload=%zu, price=%llu\n",
                  bundle.participation_bitmap.size(),
                  v03_data.size(),
                  static_cast<unsigned long long>(bundle.median_price_micro_usd));
@@ -1311,7 +1311,7 @@ bool OracleBundleManager::BroadcastConsensusProposal(int32_t epoch, uint64_t con
                 NetMsgType::ORACLECONSENSUS, proposal));
     });
 
-    LogPrintf("Oracle: Broadcast consensus proposal for epoch %d: price=%llu, timestamp=%lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcast consensus proposal for epoch %d: price=%llu, timestamp=%lld\n",
              epoch, consensus_price, consensus_timestamp);
     return true;
 }
@@ -1611,7 +1611,7 @@ bool OracleBundleManager::ProcessRemoteMusigPartialSig(const OracleMusigPartialS
         session.GetState() == MuSig2SessionState::SIGNING) {
         std::vector<unsigned char> sig64;
         if (session.AggregateSignature(sig64)) {
-            LogPrintf("Oracle: MuSig2 signature eagerly aggregated for epoch %d (%zu bytes)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 signature eagerly aggregated for epoch %d (%zu bytes)\n",
                      msg.epoch, sig64.size());
         }
     }
@@ -2104,7 +2104,7 @@ void OracleBundleManager::UpdatePriceCache(int height, uint64_t price_micro_usd,
         last_update_time = effective_update_time;
     }
 
-    LogPrintf("Oracle: Price cache updated for height %d: %llu micro-USD ($%.6f), source_time=%lld - cached_price updated\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Price cache updated for height %d: %llu micro-USD ($%.6f), source_time=%lld - cached_price updated\n",
              height, price_micro_usd, price_micro_usd / 1000000.0, (long long)effective_update_time);
 }
 
@@ -2654,14 +2654,14 @@ CAmount GetCurrentOraclePrice()
             price_cents = 1; // Minimum 1 cent for any non-zero price
         }
         // Use LogPrint instead of LogPrintf to avoid log spam during sync
-        LogPrint(BCLog::NET, "Oracle: GetCurrentOraclePrice returning %lld micro-USD = %lld cents ($%.4f)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: GetCurrentOraclePrice returning %lld micro-USD = %lld cents ($%.4f)\n",
                  price_micro_usd, price_cents, price_cents / 100.0);
         return price_cents;
     }
 
     // No oracle price available - return 0 to indicate no data
     // Caller must handle this case appropriately
-    LogPrintf("Oracle: No oracle price available, returning 0\n");
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: No oracle price available, returning 0\n");
     return 0;
 }
 
@@ -2672,7 +2672,7 @@ CAmount GetCurrentOraclePriceMicroUSD()
     if (Params().GetChainType() == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
         CAmount mockPriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
         if (mockPriceMicroUSD > 0) {
-            LogPrintf("Oracle: GetCurrentOraclePriceMicroUSD returning %lld micro-USD ($%.6f) from MockOracleManager\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: GetCurrentOraclePriceMicroUSD returning %lld micro-USD ($%.6f) from MockOracleManager\n",
                      mockPriceMicroUSD, mockPriceMicroUSD / 1000000.0);
             return mockPriceMicroUSD;
         }
@@ -2682,7 +2682,7 @@ CAmount GetCurrentOraclePriceMicroUSD()
     CAmount price_micro_usd = manager.GetLatestPrice();
 
     if (price_micro_usd > 0) {
-        LogPrintf("Oracle: GetCurrentOraclePriceMicroUSD returning %lld micro-USD ($%.6f)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: GetCurrentOraclePriceMicroUSD returning %lld micro-USD ($%.6f)\n",
                  price_micro_usd, price_micro_usd / 1000000.0);
         return price_micro_usd;
     }

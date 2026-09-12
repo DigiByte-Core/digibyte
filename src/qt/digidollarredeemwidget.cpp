@@ -567,7 +567,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
             if (systemHealth < 100) {
                 requiredDDBurn = CalculateRequiredDDBurnDisplayAmount(m_positionDDMinted, systemHealth);
 
-                LogPrintf("DigiDollar Qt: ERR active (health: %d%%), required DD burn: %.8f\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: ERR active (health: %d%%), required DD burn: %.8f\n",
                          systemHealth, requiredDDBurn);
             }
         }

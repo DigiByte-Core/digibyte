@@ -151,7 +151,7 @@ bool TxBuilder::SelectCoins(const std::vector<COutPoint>& utxos, CAmount target,
 
         // Stop if we have enough
         if (total >= target) {
-            LogPrintf("DigiDollar: SelectCoins succeeded with %d inputs totaling %lld sats (target: %lld)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: SelectCoins succeeded with %d inputs totaling %lld sats (target: %lld)\n",
                       inputs.size(), total, target);
             return true;
         }
@@ -244,7 +244,7 @@ CAmount MintTxBuilder::CalculateRequiredCollateral(CAmount ddAmount, int lockDay
     // DD amount is in cents (100 = $1.00), oracle price is in micro-USD (1,000,000 = $1.00)
     CAmount usdValue = ddAmount; // DD amount = USD value in cents
 
-    LogPrintf("DigiDollar TxBuilder: CalculateRequiredCollateral - DD: %d cents, Price: %lld micro-USD ($%.6f), BaseRatio: %d%%, DCA: %.2f, EffectiveRatio: %d%%\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar TxBuilder: CalculateRequiredCollateral - DD: %d cents, Price: %lld micro-USD ($%.6f), BaseRatio: %d%%, DCA: %.2f, EffectiveRatio: %d%%\n",
               ddAmount, oraclePrice, oraclePrice / 1000000.0, baseRatio, dcaMultiplier, effectiveRatio);
 
     // Use 128-bit arithmetic to prevent overflow
@@ -278,7 +278,7 @@ CAmount MintTxBuilder::CalculateRequiredCollateral(CAmount ddAmount, int lockDay
         return 0;
     }
 
-    LogPrintf("DigiDollar TxBuilder: - Required collateral base: %llu sats (%.8f DGB), with 1%% safety margin: %llu sats (%.8f DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar TxBuilder: - Required collateral base: %llu sats (%.8f DGB), with 1%% safety margin: %llu sats (%.8f DGB)\n",
               requiredCollateral, requiredCollateral / 100000000.0,
               requiredWithSafetyMargin, requiredWithSafetyMargin / 100000000.0);
 
@@ -359,7 +359,7 @@ bool MintTxBuilder::ValidateMintParams(const TxBuilderMintParams& params) const 
         return false;
     }
 
-    LogPrintf("ValidateMintParams PASSED\n");
+    LogPrint(BCLog::DIGIDOLLAR, "ValidateMintParams PASSED\n");
     return true;
 }
 
@@ -610,7 +610,7 @@ bool TransferTxBuilder::ValidateTransferParams(const TxBuilderTransferParams& pa
         return false;
     }
 
-    LogPrintf("DigiDollar: ValidateTransferParams PASSED\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ValidateTransferParams PASSED\n");
     return true;
 }
 
@@ -731,7 +731,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
 
     // Add DGB fee inputs (after DD inputs)
     // Note: Phase 2.1 already selected these UTXOs, so we just add them directly
-    LogPrintf("DigiDollar: TxBuilder - feeUtxos.size=%d, feeAmounts.size=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: TxBuilder - feeUtxos.size=%d, feeAmounts.size=%d\n",
               params.feeUtxos.size(), params.feeAmounts.size());
 
     CAmount totalFeeIn = 0;
@@ -740,17 +740,17 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         tx.vin.push_back(CTxIn(utxo));
         // Get actual fee UTXO amount from feeAmounts
         CAmount feeAmount = (i < params.feeAmounts.size()) ? params.feeAmounts[i] : GetDGBFromUTXO(utxo);
-        LogPrintf("DigiDollar: Fee input %d - using %s: %d sats\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Fee input %d - using %s: %d sats\n",
                   i, (i < params.feeAmounts.size()) ? "feeAmounts[i]" : "GetDGBFromUTXO()", feeAmount);
         totalFeeIn += feeAmount;
-        LogPrintf("DigiDollar: Added fee input %s:%d (%d sats)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added fee input %s:%d (%d sats)\n",
                   utxo.hash.ToString(), utxo.n, feeAmount);
     }
 
     // Add DD outputs for recipients (all with 0 DGB value)
-    LogPrintf("DigiDollar: TxBuilder - recipients.size=%d\n", params.recipients.size());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: TxBuilder - recipients.size=%d\n", params.recipients.size());
     for (const auto& [address, amount] : params.recipients) {
-        LogPrintf("DigiDollar: Creating DD output - address=%s, amount=%d cents\n", address, amount);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Creating DD output - address=%s, amount=%d cents\n", address, amount);
         CTxDestination dest = DecodeDigiDollarAddress(address);
         const auto* taproot = std::get_if<WitnessV1Taproot>(&dest);
         if (!taproot) {
@@ -769,7 +769,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         // can extract the DD amount when spending this output
         RegisterScriptMetadata(ddScript, ScriptType::DD_TOKEN_OUTPUT, amount, 0);
 
-        LogPrintf("DigiDollar: Added DD output for %s: %d cents (registered)\n", address, amount);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added DD output for %s: %d cents (registered)\n", address, amount);
     }
 
     // Add DD change output if needed — EVERY cent of DD must be accounted for.
@@ -800,7 +800,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         // because ExtractDDAmount can't find the amount.
         RegisterScriptMetadata(changeScript, ScriptType::DD_TOKEN_OUTPUT, ddChange, 0);
 
-        LogPrintf("DigiDollar: Added DD change output: %d cents (tweaked key, registered)\n", ddChange);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added DD change output: %d cents (tweaked key, registered)\n", ddChange);
     } else if (ddChange < 0) {
         // This should never happen - SelectDDCoins should ensure enough DD
         result.error = strprintf("Insufficient DD: need %d cents, have %d cents", totalDDOut, totalDDIn);
@@ -812,7 +812,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     CAmount calculatedFee = CalculateFee(tx, params.feeRate);
     CAmount actualFee = std::max(calculatedFee, MIN_DD_TX_FEE);
 
-    LogPrintf("DigiDollar: Fee calculation - calculated: %d sats, minimum: %d sats, actual: %d sats\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Fee calculation - calculated: %d sats, minimum: %d sats, actual: %d sats\n",
               calculatedFee, MIN_DD_TX_FEE, actualFee);
 
     if (totalFeeIn <= 0) {
@@ -840,7 +840,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
                 return result;
             }
             tx.vout.push_back(CTxOut(dgbChange, dgbChangeScript));
-            LogPrintf("DigiDollar: Added DGB change output: %d sats\n", dgbChange);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added DGB change output: %d sats\n", dgbChange);
         }
     }
 
@@ -865,7 +865,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     }
 
     tx.vout.push_back(CTxOut(0, metadataScript));
-    LogPrintf("DigiDollar: Added OP_RETURN with %d DD output amounts\n", ddOutputAmounts.size());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added OP_RETURN with %d DD output amounts\n", ddOutputAmounts.size());
 
     // Final validation - ensure DD conservation
     // DD amounts are now stored in OP_RETURN, so sum up ddOutputAmounts instead
@@ -874,7 +874,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         finalDDOut += amt;
     }
 
-    LogPrintf("DigiDollar: Conservation check - Input: %d cents, Output: %d cents\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Conservation check - Input: %d cents, Output: %d cents\n",
               totalDDIn, finalDDOut);
 
     // DD conservation is absolute — every cent in must equal every cent out.
@@ -946,7 +946,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     result.tx = tx;
     result.success = true;
 
-    LogPrintf("DigiDollar: Transaction finalized - %d inputs, %d outputs, version=%d, locktime=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transaction finalized - %d inputs, %d outputs, version=%d, locktime=%d\n",
               tx.vin.size(), tx.vout.size(), tx.nVersion, tx.nLockTime);
 
     return result;
@@ -1133,7 +1133,7 @@ CCollateralPosition RedeemTxBuilder::GetCollateralPosition(const COutPoint& outp
         position.collateralRatio = 0;
     }
 
-    LogPrintf("DigiDollar: GetCollateralPosition - Found UTXO %s:%d with dgbLocked=%d, ddMinted=%d, unlockHeight=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetCollateralPosition - Found UTXO %s:%d with dgbLocked=%d, ddMinted=%d, unlockHeight=%d\n",
              outpoint.hash.ToString(), outpoint.n, position.dgbLocked, position.ddMinted, position.unlockHeight);
 
     return position;
@@ -1142,7 +1142,7 @@ CCollateralPosition RedeemTxBuilder::GetCollateralPosition(const COutPoint& outp
 TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedeemParams& params) {
     TxBuilderResult result;
 
-    LogPrintf("DigiDollar: BuildRedemptionTransaction - Starting (path: %d, ddToRedeem: %d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: BuildRedemptionTransaction - Starting (path: %d, ddToRedeem: %d)\n",
              static_cast<int>(params.path), params.ddToRedeem);
 
     // Step 1: Validate parameters
@@ -1166,13 +1166,13 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         position.ddMinted = params.ddMinted;
         position.unlockHeight = params.unlockHeight;
         position.collateralRatio = CalculatePositionCollateralRatio(position.dgbLocked, position.ddMinted, oraclePrice);
-        LogPrintf("DigiDollar: Using pre-queried collateral position - dgbLocked: %d, ddMinted: %d, unlockHeight: %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using pre-queried collateral position - dgbLocked: %d, ddMinted: %d, unlockHeight: %d\n",
                  position.dgbLocked, position.ddMinted, position.unlockHeight);
     } else {
         // Fallback is fail-safe unless a caller has supplied a chainstate-backed
         // position lookup in a derived builder.
         position = GetCollateralPosition(params.collateralOutpoint);
-        LogPrintf("DigiDollar: Queried collateral position from UTXO - dgbLocked: %d, ddMinted: %d, unlockHeight: %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Queried collateral position from UTXO - dgbLocked: %d, ddMinted: %d, unlockHeight: %d\n",
                  position.dgbLocked, position.ddMinted, position.unlockHeight);
     }
 
@@ -1200,7 +1200,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
             return result;
         }
         ddToBurn = ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(position.ddMinted, systemHealth);
-        LogPrintf("DigiDollar: ERR redemption burn requirement - original: %lld, health: %d%%, required burn: %lld\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR redemption burn requirement - original: %lld, health: %d%%, required burn: %lld\n",
                   (long long)position.ddMinted, systemHealth, (long long)ddToBurn);
     }
 
@@ -1220,7 +1220,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         return result;
     }
 
-    LogPrintf("DigiDollar: Collateral to release: %d sats (%.8f DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral to release: %d sats (%.8f DGB)\n",
              dgbToRelease, dgbToRelease / 100000000.0);
 
     // Step 5: Build transaction
@@ -1229,14 +1229,14 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     // Set type - always DD_TX_REDEEM (ERR is handled via burn amount, not tx type)
     // NOTE: Only 2 paths exist - NORMAL and ERR. Both use DD_TX_REDEEM.
     tx.SetDigiDollarType(::DD_TX_REDEEM);
-    LogPrintf("DigiDollar: Using DD_TX_REDEEM type (path=%s)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using DD_TX_REDEEM type (path=%s)\n",
               params.path == RedemptionPath::ERR ? "ERR" : "NORMAL");
 
     // Input 0: Collateral UTXO (P2TR)
     // CRITICAL: nSequence must be < 0xFFFFFFFF to enable OP_CHECKLOCKTIMEVERIFY
     // Using 0xFFFFFFFE to signal opt-in Replace-By-Fee (BIP125) and enable CLTV
     tx.vin.push_back(CTxIn(params.collateralOutpoint, CScript(), 0xFFFFFFFE));
-    LogPrintf("DigiDollar: Added collateral input: %s:%d (nSequence=0xFFFFFFFE for CLTV)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added collateral input: %s:%d (nSequence=0xFFFFFFFE for CLTV)\n",
              params.collateralOutpoint.hash.ToString(), params.collateralOutpoint.n);
 
     // Inputs 1+: DD UTXOs to burn
@@ -1244,7 +1244,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     // So they MUST use nSequence < 0xFFFFFFFF to enable locktime checking
     for (const auto& utxo : params.ddUtxos) {
         tx.vin.push_back(CTxIn(utxo, CScript(), 0xFFFFFFFE));
-        LogPrintf("DigiDollar: Added DD input to burn: %s:%d (nSequence=0xFFFFFFFE for CLTV)\n", utxo.hash.ToString(), utxo.n);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added DD input to burn: %s:%d (nSequence=0xFFFFFFFE for CLTV)\n", utxo.hash.ToString(), utxo.n);
     }
 
     // Inputs N+: Fee UTXOs (DGB)
@@ -1262,7 +1262,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
             for (CAmount amount : params.feeAmounts) {
                 totalFeeIn += amount;
             }
-            LogPrintf("DigiDollar: Added %d fee inputs (total: %d sats) from pre-selected UTXOs\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added %d fee inputs (total: %d sats) from pre-selected UTXOs\n",
                       params.feeUtxos.size(), totalFeeIn);
         } else {
             // Fallback: Try to get amounts from UTXO set (shouldn't normally happen)
@@ -1271,7 +1271,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
                 CAmount amount = GetUTXOValue(feeUtxo);
                 totalFeeIn += amount;
             }
-            LogPrintf("DigiDollar: Added %d fee inputs (total: %d sats) via GetUTXOValue fallback\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added %d fee inputs (total: %d sats) via GetUTXOValue fallback\n",
                       params.feeUtxos.size(), totalFeeIn);
         }
     }
@@ -1281,7 +1281,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     CTxDestination collateralReturnDest;
     if (params.collateralDest.has_value()) {
         collateralReturnDest = params.collateralDest.value();
-        LogPrintf("DigiDollar: Using provided wallet destination for returned collateral\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using provided wallet destination for returned collateral\n");
     } else {
         // Fallback to owner key (for backwards compatibility)
         CPubKey pubkey = params.ownerKey.GetPubKey();
@@ -1289,7 +1289,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         LogPrintf("DigiDollar: Using owner key pubkey for returned collateral (wallet may not recognize)\n");
     }
     tx.vout.push_back(CTxOut(dgbToRelease, GetScriptForDestination(collateralReturnDest)));
-    LogPrintf("DigiDollar: Added collateral return output: %d sats (100%% of locked collateral)\n", dgbToRelease);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added collateral return output: %d sats (100%% of locked collateral)\n", dgbToRelease);
 
     // Calculate DD change - if we selected more DD UTXOs than needed, return the change
     CAmount totalDDInput = 0;
@@ -1297,14 +1297,14 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         totalDDInput += amount;
     }
     CAmount ddChange = totalDDInput - ddToBurn;
-    LogPrintf("DigiDollar: DD input total: %d cents, to burn: %d cents, change: %d cents\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD input total: %d cents, to burn: %d cents, change: %d cents\n",
               totalDDInput, ddToBurn, ddChange);
 
     // Add DD change output if wallet selected more DD UTXOs than needed
     // NOTE: DD is fungible - exact-amount enforcement is at the VAULT level (ddToRedeem == position.ddMinted)
     // not at the DD input level. The wallet may select excess DD UTXOs and receive change.
     if (ddChange > 0) {
-        LogPrintf("DigiDollar: DD change: %d cents will be returned to owner\n", ddChange);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD change: %d cents will be returned to owner\n", ddChange);
         // Create DD change output back to the owner using P2TR
         CPubKey ownerPubKey = params.ownerKey.GetPubKey();
         CScript ddChangeScript = CreateDigiDollarP2TR(XOnlyPubKey(ownerPubKey), ddChange);
@@ -1320,7 +1320,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
                        << CScriptNum(3)  // 3 = REDEEM transaction type
                        << CScriptNum(ddChange);  // DD change amount in cents
         tx.vout.push_back(CTxOut(0, metadataScript));
-        LogPrintf("DigiDollar: Added OP_RETURN for DD change: %d cents\n", ddChange);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added OP_RETURN for DD change: %d cents\n", ddChange);
 
         // CRITICAL FIX: Store ddChange in result so wallet can track the change UTXO
         // Without this, result.ddChange stays 0 and wallet never tracks the change!
@@ -1337,7 +1337,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
 
     // Set transaction locktime to unlockHeight (critical for CLTV validation)
     tx.nLockTime = position.unlockHeight;
-    LogPrintf("DigiDollar: Set tx.nLockTime = %d (unlockHeight)\n", position.unlockHeight);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Set tx.nLockTime = %d (unlockHeight)\n", position.unlockHeight);
 
     // Calculate actual fees. DigiDollar redemptions must pay the absolute DD
     // fee floor, independent of transaction size, to preserve the anti-spam
@@ -1349,11 +1349,11 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         result.totalFees = std::max(result.totalFees, params.minimumFee);
     }
     if (result.totalFees > calculatedFee) {
-        LogPrintf("DigiDollar: Calculated redemption fee (%d sats) below DD minimum fee, using %d sats\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculated redemption fee (%d sats) below DD minimum fee, using %d sats\n",
                   calculatedFee, result.totalFees);
     }
 
-    LogPrintf("DigiDollar: Calculated fees: %d sats (fee inputs: %d sats)\n", result.totalFees, totalFeeIn);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculated fees: %d sats (fee inputs: %d sats)\n", result.totalFees, totalFeeIn);
 
     if (totalFeeIn <= 0) {
         result.error = "Insufficient fee inputs for DD redemption fee";
@@ -1394,11 +1394,11 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
                 return result;
             }
             tx.vout.push_back(CTxOut(feeChange, changeScript));
-            LogPrintf("DigiDollar: Added fee change output: %d sats\n", feeChange);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added fee change output: %d sats\n", feeChange);
         } else {
             // Dust goes to miner as fee
             result.totalFees += feeChange;
-            LogPrintf("DigiDollar: Fee change (%d sats) below dust, added to fee\n", feeChange);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Fee change (%d sats) below dust, added to fee\n", feeChange);
         }
     }
 
@@ -1407,7 +1407,7 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     result.success = true;
     result.collateralRequired = 0; // No collateral required for redemption
 
-    LogPrintf("DigiDollar: BuildRedemptionTransaction SUCCESS - %d inputs, %d outputs, fee: %d sats\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: BuildRedemptionTransaction SUCCESS - %d inputs, %d outputs, fee: %d sats\n",
              tx.vin.size(), tx.vout.size(), result.totalFees);
 
     return result;
@@ -1599,7 +1599,7 @@ CAmount RedeemTxBuilder::CalculateCollateralReturn(CAmount ddAmount, CAmount ori
     // Since we're redeeming the full position in most cases, we return the full collateral
     // For partial redemptions, this would be adjusted
 
-    LogPrintf("DigiDollar: Calculating collateral return - DD amount: %d, Original collateral: %d, Current price: %d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculating collateral return - DD amount: %d, Original collateral: %d, Current price: %d\n",
              ddAmount, originalCollateral, currentPrice);
 
     // V1 supports only full-position redemption. Normal redemption and ERR both
@@ -1608,7 +1608,7 @@ CAmount RedeemTxBuilder::CalculateCollateralReturn(CAmount ddAmount, CAmount ori
 
     CAmount returnAmount = originalCollateral;
 
-    LogPrintf("DigiDollar: Collateral return calculated: %d sats (%.8f DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Collateral return calculated: %d sats (%.8f DGB)\n",
              returnAmount, returnAmount / 100000000.0);
 
     return returnAmount;
@@ -1629,7 +1629,7 @@ bool RedeemTxBuilder::VerifyRedemptionConditions(const TxBuilderRedeemParams& pa
 
     switch (path) {
         case RedemptionPath::NORMAL:
-            LogPrintf("DigiDollar: Normal redemption conditions met (timelock expired)\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Normal redemption conditions met (timelock expired)\n");
             return true;
 
         case RedemptionPath::ERR:
@@ -1645,7 +1645,7 @@ bool RedeemTxBuilder::VerifyRedemptionConditions(const TxBuilderRedeemParams& pa
                     LogPrintf("DigiDollar: ERR redemption FAILED - invalid oracle price (%d)\n", oraclePrice);
                     return false;
                 }
-                LogPrintf("DigiDollar: ERR redemption conditions met (system health: %d%%)\n", systemHealth);
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ERR redemption conditions met (system health: %d%%)\n", systemHealth);
                 return true;
             }
 

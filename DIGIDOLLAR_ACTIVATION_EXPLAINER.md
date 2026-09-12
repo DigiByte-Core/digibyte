@@ -1,4 +1,51 @@
-# DigiDollar BIP9 Activation — Complete Explainer
+# DigiDollar activation and Thaw Day
+
+## Thaw Day in the v9.26.6 development source
+
+Thaw Day is a separate, coordinated change to DigiDollar validation. It uses
+one height per network, `Consensus::Params::nDDThawDayHeight`. Mainnet,
+testnet26 and signet are **not scheduled** in this source: their value is
+`std::numeric_limits<int>::max()`, which means disabled. Regtest is also
+unscheduled unless explicitly configured. No public-network activation or
+soak test has been completed for this candidate.
+
+The new rules apply only when the height is configured, DigiDollar itself is
+active, and the candidate block's height is at least that height. The same
+boundary selects the mint-only volatility rule, open-vault health accounting
+and vault recognition by the creating transaction and output index. Earlier
+blocks retain their legacy validation path, including during replay.
+Installing this source does not turn those rules on early.
+
+| Caller | Height used |
+|--------|-------------|
+| Block validation and replay | The block being checked |
+| Mining, mempool and wallet estimates | The next block on the current branch |
+| Disconnect and reorganization | The affected block and replacement branch |
+| Status display | Tip and next block reported separately |
+
+For a scheduled height H, a tip at H-1 has `active_at_tip=false` and
+`active_next_block=true`, provided DigiDollar is active at H. This is the
+expected boundary. A wallet estimate cannot guarantee the quote, chain state
+or preceding transactions of the block that eventually confirms it.
+
+`getdigidollardeploymentinfo.thaw_day` reports `scheduled`, the `height` only
+when scheduled, `tip_height`, `next_block_height`, `active_at_tip` and
+`active_next_block`. Do not confuse its `height` with the older
+`activation_height` for DigiDollar itself. There is no public-network runtime
+switch or miner signal that changes Thaw Day. `-ddthawdayheight=N` is for
+regtest only and is a startup error on other networks.
+
+A future release must publish its exact source, binaries and activation height
+with time for operators to upgrade. A calendar estimate is not the trigger.
+Older nodes may disagree after activation; burial of a previously activated
+deployment does not establish compatibility with this new transition.
+See [node operations](doc/digidollar-operations.md) for backup, upgrade and
+recovery guidance. Release and network readiness still require separate
+verification.
+
+Source: [shared predicate](src/digidollar/digidollar.cpp),
+[network heights](src/kernel/chainparams.cpp),
+[status RPC](src/rpc/digidollar.cpp) and [regtest options](src/chainparams.cpp).
 
 ## Post-activation status (v9.26.5): BURIED DEPLOYMENT
 
@@ -25,7 +72,7 @@ The static gates keep their historical floors: mainnet `nDDActivationHeight = nO
 
 ## Overview
 
-DigiDollar activated on the DigiByte blockchain through **BIP9 version bit signaling** — the same proven mechanism used by Bitcoin for SegWit and other soft forks. This ensured DigiDollar only activated once a supermajority of miners explicitly signaled support, preventing chain splits and ensuring network consensus. (As of v9.26.5 the completed deployment is buried; see the section above.)
+DigiDollar activated on the DigiByte blockchain through **BIP9 version bit signaling** — the same proven mechanism used by Bitcoin for SegWit and other soft forks. The signaling threshold coordinated the original deployment. Signaling did not guarantee that every operator had upgraded or that all implementations agreed. (As of v9.26.5 the completed deployment is buried; see the section above.)
 
 **Key principle:** Nothing consensus-critical for DigiDollar works until activation. DD/oracle RPCs, DD transactions, DD opcodes, oracle price relay, oracle consensus relay, MuSig2 relay, `getoracles`, and signed oracle version heartbeats are dormant until the activation predicates below pass.
 
@@ -152,7 +199,7 @@ The DigiDollar/oracle RPC surface is split between the node-context registration
 ### Consensus Validation (all activation-gated)
 
 1. **Mempool acceptance** (`src/validation.cpp:976-989`): `DigiDollar::HasDigiDollarMarker(tx)` + `IsDigiDollarEnabled()` → rejects DD TXs with `TX_CONSENSUS "digidollar-not-active"`. After activation, mempool acceptance also requires that an oracle quote is available for any DD transaction (commit `81bf974f40`).
-2. **Block validation** (`src/validation.cpp:2816-2854`): `DeploymentActiveAt(DEPLOYMENT_DIGIDOLLAR)` during `ConnectBlock()` delegates to `DeploymentActiveAfter(index.pprev, ...)`, so the candidate block is judged by comparing the previous block's height + 1 against the buried activation height (v9.26.5). Blocks containing DD TXs before activation are rejected. After activation, `ValidateBlockOracleData` (`src/oracle/bundle_manager.cpp:2151`) requires DD mint/redeem blocks to carry exactly one v0x03 MuSig2 oracle bundle in the coinbase. DD transfer-only and non-DD blocks may omit oracle data; if any block includes one it must still be a valid v0x03 bundle (commit `1e08bd811f`).
+2. **Block validation** (`src/validation.cpp:2816-2854`): `DeploymentActiveAt(DEPLOYMENT_DIGIDOLLAR)` during `ConnectBlock()` delegates to `DeploymentActiveAfter(index.pprev, ...)`, so the candidate block is judged by comparing the previous block's height + 1 against the buried activation height (v9.26.5). Blocks containing DD TXs before activation are rejected. After activation, `OracleDataValidator::ValidateBlockOracleData` in [src/oracle/bundle_manager.cpp](src/oracle/bundle_manager.cpp) requires DD mint/redeem blocks to carry exactly one v0x03 MuSig2 oracle bundle in the coinbase. DD transfer-only and non-DD blocks may omit oracle data; if any block includes one it must still be a valid v0x03 bundle (commit `1e08bd811f`).
 3. **Script verification** (`validation.cpp` script-flag setup): `SCRIPT_VERIFY_DIGIDOLLAR` flag only set when `DeploymentActiveAt()` returns true, so the Tapscript OP_SUCCESSx-class DD opcodes are not interpreted as DigiDollar operations before activation. Once active, `OP_CHECKPRICE` is reserved and deterministically disabled (`src/script/interpreter.cpp:708-735`): it consumes one stack item and pushes false rather than reading node-local oracle state.
 4. **Mining graceful degradation** (`src/node/miner.cpp`, commit `6b5ff516c3`): `CreateNewBlock` strips price-dependent DD mint/redeem txs when no valid oracle bundle is available rather than aborting block assembly. Transfer-only DD txs are validated with oracle-price validation skipped because they do not need a block oracle price. The block is still produced; rejected DD txs remain in the mempool until either they confirm in a later attempt or are evicted.
 

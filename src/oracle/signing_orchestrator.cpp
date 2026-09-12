@@ -271,7 +271,7 @@ void OracleSigningOrchestrator::IngestRemoteNonce(const OracleMusigNonceMsg& msg
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on remote nonce arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on remote nonce arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     }
     if (it == m_signing_sessions.end() || !it->second) return;
@@ -279,7 +279,7 @@ void OracleSigningOrchestrator::IngestRemoteNonce(const OracleMusigNonceMsg& msg
 
     if (AddNonceEvidenceToSession(msg, *it->second)) {
         m_nonce_evidence[msg.epoch][msg.oracle_id] = msg;
-        LogPrintf("Oracle: Ingested remote nonce for epoch %d attempt %u from oracle %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Ingested remote nonce for epoch %d attempt %u from oracle %d\n",
                  msg.epoch, msg.attempt_id, msg.oracle_id);
     }
 }
@@ -357,7 +357,7 @@ void OracleSigningOrchestrator::IngestRemoteContext(const OracleMusigContextMsg&
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on context proposal arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on context proposal arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     } else if (have_local_seed) {
         it->second->SetEpochSelectionSeed(seed_it->second);
@@ -432,21 +432,21 @@ void OracleSigningOrchestrator::IngestRemotePartialSig(const OracleMusigPartialS
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on remote partial sig arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on remote partial sig arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     }
     if (it == m_signing_sessions.end() || !it->second) return;
     if (it->second->GetAttemptId() != msg.attempt_id) return;
 
     if (TryApplyRemotePartialSig(msg, *it->second)) {
-        LogPrintf("Oracle: Ingested remote partial sig for epoch %d from oracle %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Ingested remote partial sig for epoch %d from oracle %d\n",
                  msg.epoch, msg.oracle_id);
 
         // Auto-aggregate if threshold met
         if (it->second->HasEnoughPartialSigs()) {
             std::vector<unsigned char> final_sig;
             if (it->second->AggregateSignature(final_sig)) {
-                LogPrintf("Oracle: MuSig2 auto-aggregated for epoch %d after remote partial sig, sig size=%zu\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 auto-aggregated for epoch %d after remote partial sig, sig size=%zu\n",
                          msg.epoch, final_sig.size());
             }
         }
@@ -577,7 +577,7 @@ size_t OracleSigningOrchestrator::DrainPendingPartialSigsForEpoch(int32_t epoch,
     }
 
     if (accepted > 0) {
-        LogPrintf("Oracle: Replayed %zu pending partial sigs for epoch %d\n", accepted, epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Replayed %zu pending partial sigs for epoch %d\n", accepted, epoch);
     }
     return accepted;
 }
@@ -930,7 +930,7 @@ MuSig2SigningSession* OracleSigningOrchestrator::GetOrCreateSigningSession(int32
     MuSig2SigningSession* ptr = session.get();
     m_signing_sessions[epoch] = std::move(session);
 
-    LogPrintf("Oracle: Created MuSig2 signing session for epoch %d (creation_height=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Created MuSig2 signing session for epoch %d (creation_height=%d)\n",
              epoch, block_height);
     return ptr;
 }
@@ -1195,7 +1195,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                         m_nonce_broadcast_tracker[epoch].insert(oid8);
                         m_nonce_evidence[epoch][oid8] = nonce_msg;
 
-                        LogPrintf("Oracle: Generated and broadcast nonce for epoch %d attempt %u (oracle_id=%d)\n",
+                        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Generated and broadcast nonce for epoch %d attempt %u (oracle_id=%d)\n",
                                  epoch, nonce_msg.attempt_id, oid8);
                     }
                 } else {
@@ -1242,7 +1242,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                     BuildLocalContextProposal(epoch, block_height, *session);
                 if (local_context) {
                     BroadcastMusigContext(*local_context);
-                    LogPrintf("Oracle: Broadcast MuSig2 context proposal epoch=%d proposer=%u context=%s\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcast MuSig2 context proposal epoch=%d proposer=%u context=%s\n",
                              epoch, local_context->proposer_id,
                              local_context->session_context_id.ToString());
                     return;
@@ -1279,13 +1279,13 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                          epoch, participant_ids.size());
             } else {
                 session->SetKeyAggCache(part_cache);
-                LogPrintf("Oracle: Step 2 - recomputed keyagg for %zu participants (epoch %d)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Step 2 - recomputed keyagg for %zu participants (epoch %d)\n",
                          participant_ids.size(), epoch);
             }
 
             if (session->AggregateNonces(msg32)) {
                 const uint256 session_context = session->GetSessionContextId();
-                LogPrintf("Oracle: Nonces aggregated for epoch %d, SIGNING context=%s\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Nonces aggregated for epoch %d, SIGNING context=%s\n",
                          epoch, session_context.ToString());
                 if (session_context.IsNull()) {
                     LogPrintf("Oracle: Step 2 - refusing to broadcast partial sigs for epoch %d with null context\n",
@@ -1294,7 +1294,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                 }
 
                 if (!is_oracle) {
-                    LogPrintf("Oracle: Passive MuSig2 context selected for epoch %d context=%s\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Passive MuSig2 context selected for epoch %d context=%s\n",
                              epoch, session_context.ToString());
                 } else {
                     OracleManager& om = OracleManager::GetInstance();
@@ -1339,7 +1339,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                                 BroadcastMusigPartialSig(psig_msg);
                                 m_partialsig_broadcast_tracker[epoch].insert(oid8);
 
-                                LogPrintf("Oracle: Broadcast partial sig for epoch %d (oracle_id=%d)\n",
+                                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcast partial sig for epoch %d (oracle_id=%d)\n",
                                          epoch, oid8);
                                 continue;
                             }
@@ -1360,7 +1360,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
     if (state == MuSig2SessionState::SIGNING && session->HasEnoughPartialSigs()) {
         std::vector<unsigned char> final_sig;
         if (session->AggregateSignature(final_sig)) {
-            LogPrintf("Oracle: MuSig2 COMPLETE for epoch %d, sig size=%zu\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 COMPLETE for epoch %d, sig size=%zu\n",
                      epoch, final_sig.size());
         }
     }

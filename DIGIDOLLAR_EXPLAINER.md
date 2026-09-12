@@ -162,7 +162,12 @@ Supply chain, gaming, and other wallet-native payment flows can be explored on t
 
 DigiDollar is built natively on a UTXO (Unspent Transaction Output) blockchain. All operations occur directly in DigiByte Core wallet — users maintain complete control of their private keys throughout the entire process.
 
-**Implementation Status (V1, `feature/digidollar-v1`)**: Core transaction system, MAST collateral, DCA/ERR/Volatility protections, network-wide UTXO scanning, MuSig2 oracle bundles, Qt GUI, and RPC surface are feature-complete. The June 1, 2026 BIP9 start time has passed, but mainnet activation remains gated by the configured minimum height, threshold, continued testnet26 validation, and mainnet oracle-operator deployment. See `DIGIDOLLAR_ARCHITECTURE.md` for the complete code-to-spec mapping.
+**Implementation status:** This is v9.26.6 development documentation.
+DigiDollar's existing mainnet deployment is buried at height 23,869,440.
+The separate Thaw Day transition remains disabled on public networks in this
+source. Completed code does not establish release readiness or a successful
+network activation. See the [architecture guide](DIGIDOLLAR_ARCHITECTURE.md)
+and [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md).
 
 ### Core Technologies
 
@@ -289,16 +294,23 @@ ERR activates automatically when system health drops below 100%. New minting is 
 
 ### 4️⃣ Volatility Protection (Fourth Defense)
 
-Automatic freezes during extreme market volatility:
+The candidate block height selects the volatility rules. Before Thaw Day,
+the legacy freezes remain in effect. At and above Thaw Day, new mints use a
+price reference from ancestor blocks. Transfers and redemptions no longer use
+the old volatility checks there, but still need to satisfy their other rules.
+A large valid price move can still pause minting. There is no exact wall-clock
+thaw time or oracle override.
 
-| Timeframe | Threshold | Action |
-|-----------|-----------|--------|
-| 1-hour | 10% | Warning logged |
-| 1-hour | 20% | Freeze new minting |
-| 24-hour | 30% | Freeze all DD operations |
-| 7-day | 50% | Emergency mode |
+Thaw Day also changes health to use the original DD amounts attached to open
+vaults. Circulating tokens are counted separately. If closing a 100-DD vault
+burns 125 DD, circulating supply falls by 125 and open-vault principal falls
+by 100. With the same remaining collateral, the larger principal denominator
+can keep emergency restrictions active longer or require more DD to redeem.
+It does not create tokens or change balances at activation.
 
-Cooldown period: 8640 blocks (~36 hours at 15s blocks) after volatility subsides. There is NO oracle override of volatility freeze - the system must wait for the full cooldown period.
+Mainnet, testnet26 and signet Thaw Day heights remain disabled in this
+development source. See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md)
+and [accounting explanation](DIGIDOLLAR_ARCHITECTURE.md#layer-2-dynamic-collateral-adjustment-dca).
 
 ### 5️⃣ Supply & Demand Dynamics (Natural Defense)
 

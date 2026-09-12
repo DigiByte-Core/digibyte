@@ -486,11 +486,11 @@ void DigiDollarMintWidget::updateBalance()
 void DigiDollarMintWidget::updateOraclePrice()
 {
     if (!isVisible()) return;
-    LogPrintf("DigiDollar Mint: updateOraclePrice() called\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateOraclePrice() called\n");
 
     // Get oracle price from RPC for testnet/mainnet, MockOracleManager for regtest
     ChainType chainType = Params().GetChainType();
-    LogPrintf("DigiDollar Mint: ChainType = %d (REGTEST=%d, TESTNET=%d, MAIN=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: ChainType = %d (REGTEST=%d, TESTNET=%d, MAIN=%d)\n",
               (int)chainType, (int)ChainType::REGTEST, (int)ChainType::TESTNET, (int)ChainType::MAIN);
 
     m_mintVolatilityAllowed = true;
@@ -533,14 +533,14 @@ void DigiDollarMintWidget::updateOraclePrice()
         // BUG #6 FIX: GetCurrentPrice() returns micro-USD, not cents
         CAmount priceMicroUsd = MockOracleManager::GetInstance().GetCurrentPrice();
         m_oraclePrice = priceMicroUsd / 1000000.0;
-        LogPrintf("DigiDollar Mint: Using MockOracle, price = %f USD\n", m_oraclePrice);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Using MockOracle, price = %f USD\n", m_oraclePrice);
     } else if (m_clientModel) {
         // Get actual oracle price from RPC
-        LogPrintf("DigiDollar Mint: Using RPC (m_clientModel is valid)\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Using RPC (m_clientModel is valid)\n");
         try {
             UniValue params(UniValue::VARR);
             UniValue result = m_clientModel->node().executeRpc("getoracleprice", params, "");
-            LogPrintf("DigiDollar Mint: RPC call succeeded\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: RPC call succeeded\n");
 
             // Price is returned in micro-USD (1,000,000 = $1.00)
             const UniValue& priceVal = result.find_value("price_micro_usd");
@@ -550,7 +550,7 @@ void DigiDollarMintWidget::updateOraclePrice()
             } else {
                 int64_t priceMicroUsd = priceVal.getInt<int64_t>();
                 m_oraclePrice = priceMicroUsd / 1000000.0; // Convert micro-USD to dollars
-                LogPrintf("DigiDollar Mint: Got price_micro_usd=%ld, m_oraclePrice=%f\n", priceMicroUsd, m_oraclePrice);
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Got price_micro_usd=%ld, m_oraclePrice=%f\n", priceMicroUsd, m_oraclePrice);
             }
         } catch (const UniValue& e) {
             LogPrintf("DigiDollar Mint: updateOraclePrice RPC error - %s\n", e.write());
@@ -567,7 +567,7 @@ void DigiDollarMintWidget::updateOraclePrice()
         m_oraclePrice = 0.0;
     }
 
-    LogPrintf("DigiDollar Mint: Final m_oraclePrice = %f\n", m_oraclePrice);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Final m_oraclePrice = %f\n", m_oraclePrice);
 
     if (m_oraclePrice > 0) {
         m_oraclePriceValue->setText(formatUSDAmount(m_oraclePrice) + "/DGB");
@@ -580,7 +580,7 @@ void DigiDollarMintWidget::updateOraclePrice()
 void DigiDollarMintWidget::onAmountChanged()
 {
     QString amountText = m_amountEdit->text();
-    LogPrintf("DigiDollar Mint: onAmountChanged called - text='%s', isEnabled=%d, isReadOnly=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: onAmountChanged called - text='%s', isEnabled=%d, isReadOnly=%d\n",
               amountText.toStdString().c_str(), m_amountEdit->isEnabled(), m_amountEdit->isReadOnly());
     if (!amountText.isEmpty()) {
         m_mintAmount = amountText.toDouble();
@@ -603,7 +603,7 @@ void DigiDollarMintWidget::onAmountChanged()
 void DigiDollarMintWidget::onLockTierChanged()
 {
     int newTier = m_lockTierCombo->currentData().toInt();
-    LogPrintf("DigiDollar Qt: Lock tier changed to: %d\n", newTier);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Lock tier changed to: %d\n", newTier);
 
     // Show warning for long lock periods (1 year or more = tier 4+)
     if (newTier >= 4) {
@@ -649,7 +649,7 @@ void DigiDollarMintWidget::onLockTierChanged()
             m_lockTierCombo->setCurrentIndex(1); // 30 days
             m_lockTierCombo->blockSignals(false);
             m_selectedTier = 1;
-            LogPrintf("DigiDollar Qt: User cancelled long lock, reverting to tier 1\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User cancelled long lock, reverting to tier 1\n");
         } else {
             m_selectedTier = newTier;
         }
@@ -668,6 +668,16 @@ void DigiDollarMintWidget::onLockTierChanged()
 
 void DigiDollarMintWidget::onMintClicked()
 {
+    if (!m_walletModel) {
+        Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+        return;
+    }
+    const QString capability_error = m_walletModel->getDigiDollarMintWalletError();
+    if (!capability_error.isEmpty()) {
+        Q_EMIT message(tr("Cannot Mint DigiDollar"), capability_error, QMessageBox::Warning);
+        return;
+    }
+
     if (!validateAmount() || !validateCollateral()) {
         return;
     }
@@ -714,7 +724,7 @@ void DigiDollarMintWidget::onMintClicked()
 
         if (priceChangeBox.exec() != QMessageBox::Yes) {
             // User chose to review — form is already updated with new values
-            LogPrintf("DigiDollar Qt: User declined mint after oracle price change "
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User declined mint after oracle price change "
                       "(collateral %.8f -> %.8f)\n", previousCollateral, m_requiredCollateral);
             return;
         }
@@ -860,7 +870,7 @@ void DigiDollarMintWidget::onMintClicked()
         finalWarning.button(QMessageBox::Yes)->setStyleSheet("QPushButton { background-color: #388e3c; color: white; font-weight: bold; font-size: 11pt; padding: 8px 16px; }");
 
         if (finalWarning.exec() != QMessageBox::Yes) {
-            LogPrintf("DigiDollar Qt: User cancelled at final confirmation\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User cancelled at final confirmation\n");
             return;
         }
 
@@ -901,7 +911,7 @@ void DigiDollarMintWidget::onMintClicked()
                         .arg(collateralStr)
                         .arg(m_selectedTier);
 
-            LogPrintf("DigiDollar Qt: Showing success message dialog\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Showing success message dialog\n");
 
             // Show modal message box directly
             QMessageBox msgBox(this);
@@ -911,7 +921,7 @@ void DigiDollarMintWidget::onMintClicked()
             msgBox.setStandardButtons(QMessageBox::Ok);
             msgBox.exec();
 
-            LogPrintf("DigiDollar Qt: Success message shown\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Success message shown\n");
 
             onClearClicked();
             updateBalance(); // Refresh balance displays
@@ -961,7 +971,7 @@ void DigiDollarMintWidget::updateMintButton()
     bool amountValid = validateAmount();
     bool collateralValid = validateCollateral();
 
-    LogPrintf("DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
               amountValid, collateralValid, m_requiredCollateral, m_availableDGBBalance, m_oraclePrice);
 
     m_mintButton->setEnabled(amountValid && collateralValid && m_mintVolatilityAllowed);

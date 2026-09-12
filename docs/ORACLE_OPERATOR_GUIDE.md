@@ -7,20 +7,24 @@
 
 DigiDollar requires oracle operators to provide real-time DGB/USD price feeds. Oracle public keys are **hardcoded in `src/kernel/chainparams.cpp`** — every oracle operator must:
 
-1. Run a current DigiByte Core release (RC44 is the current testnet26 release candidate at the time of writing) and create a descriptor wallet
+1. Use the reviewed build for your network and create a descriptor wallet
 2. Run `createoraclekey` to generate their oracle keypair inside the wallet
 3. Export an offline recovery copy with `exportoracleprivkey` after unlocking encrypted wallets with `walletpassphrase`
 4. Send their **public key only** to the DigiByte Core maintainer
 5. The maintainer adds their key to `chainparams.cpp` and ships a new release
 6. The operator runs `startoracle` — the wallet provides the private key automatically
 
-For current testnet release/migration mechanics (testnet26, P2P port 12033, RPC port 14026) and retired testnet decommissioning notes, follow `DIGIDOLLAR_ORACLE_SETUP.md`.
+For current testnet release/migration mechanics (testnet26, P2P port 12033, RPC port 14026) and retired testnet decommissioning notes, follow [DIGIDOLLAR_ORACLE_SETUP.md](../DIGIDOLLAR_ORACLE_SETUP.md).
+For upgrades, two nodes behind one router, compact filters and temporary logging,
+read [node operations](../doc/digidollar-operations.md). Thaw Day remains
+unscheduled on mainnet, testnet26 and signet in this development source. No
+public-network activation or soak test is claimed.
 
 ---
 
 ## Step-by-Step: For Oracle Operators
 
-### Step 1: Compile and Run DigiByte Core (current RC)
+### Step 1: Compile and Run the Selected Build
 
 ```bash
 cd ~/Code/digibyte
@@ -50,7 +54,7 @@ Current releases create descriptor wallets by default. No special flags needed.
 
 Replace `0` with the oracle ID slot assigned to you by the maintainer.
 
-Mainnet and testnet chainparams allocate 35 oracle slots (IDs 0–34), and all 35 are part of the current RC44 consensus-active MuSig2 roster (`consensus.vOraclePublicKeys`). Slot ID 35 is outside the configured roster. Regtest has 7 slots (IDs 0–6) with 4-of-7 consensus.
+Mainnet and testnet chainparams allocate 35 oracle slots (IDs 0–34), and all 35 are part of the configured consensus-active MuSig2 roster (`consensus.vOraclePublicKeys`). Slot ID 35 is outside the configured roster. Regtest has 7 slots (IDs 0–6) with 4-of-7 consensus.
 
 **Output:**
 ```json
@@ -134,7 +138,12 @@ process listings.
 # "is_running": true    ← Price thread is active
 ```
 
-### Step 8: Monitor
+### Step 9: Monitor
+
+Routine diagnostics require `-debug=digidollar`. Enable it only while diagnosing
+a problem; useful errors and startup/recovery progress remain visible without
+it. See [logging guidance](../doc/digidollar-operations.md#routine-logs-and-temporary-diagnostics)
+for startup shrinking and disk retention.
 
 ```bash
 tail -f ~/.digibyte/testnet26/debug.log | grep -i oracle
@@ -213,7 +222,10 @@ A single broken endpoint (bad URL or quota-blocked) is non-fatal; the round logs
 
 ### 5. Recover from wallet corruption
 
-If the wallet DB is unreadable, the oracle key is gone. There is no on-chain way to rotate keys without a chainparams update.
+An unreadable wallet does not establish that its key is lost. Preserve the file
+and diagnostics before repair, and use a known-good backup or exported key if
+available. A replacement public key requires coordinated chainparams changes;
+it cannot take over the existing slot through a local setting.
 
 - Restore the wallet from `backupwallet` if one exists; the `oraclekey` record carries the private key.
 - If you exported the private key, create or load a replacement wallet, unlock it with `walletpassphrase` if encrypted, then run `importoracleprivkey <oracle_id> <private_key_hex> [replace]`. Start the oracle only after the imported public key matches the slot configured in chainparams.
@@ -248,9 +260,15 @@ Then recompile and distribute the updated binary.
 
 | Network | Total Slots | Active (in MuSig2 quorum) | Consensus | Notes |
 |---------|------------|---------------------------|-----------|-------|
-| Mainnet | 35 (IDs 0-34) | 35 (slots 0-34) | 7 signatures from active keyset | DigiDollar/MuSig2 activates at BIP9 min height 23,627,520. Slot 28 uses the DigiHash Mining Pool key; slot 31 uses the Peer2Peer / DigiRoos key. |
+| Mainnet | 35 (IDs 0-34) | 35 (slots 0-34) | 7 signatures from active keyset | DigiDollar buried activation is 23,869,440; static MuSig2 floor is 23,627,520. Slot 28 uses the DigiHash Mining Pool key; slot 31 uses the Peer2Peer / DigiRoos key. |
 | Testnet (testnet26) | 35 (IDs 0-34) | 35 (slots 0-34) | 7 signatures from active keyset | Active from height 600. Slot 28 uses the DigiHash Mining Pool key; slot 31 uses the Peer2Peer / DigiRoos key. |
 | Regtest | 7 (IDs 0–6) | 7 | 4-of-7 MuSig2 | Always active. |
+
+`getoracles` reads names from the selected network's roster. Mainnet slot 0
+is `DigiByte.Io Oracle` and slot 11 is `Crypto Corner Shop`; testnet uses `Jared`
+and `hallvardo` for those slots. These are display names. They do not change
+operator IDs, public keys or the signing quorum. Verify authorization with the
+configured ID and key, not a name alone.
 
 To confirm a slot is in the active quorum at runtime, call
 `getoracles` and inspect the `in_consensus` field, or call
@@ -305,4 +323,5 @@ To confirm a slot is in the active quorum at runtime, call
 
 ---
 
-*Verified against the DigiByte Core RC44 codebase on `feature/digidollar-v1`. Current public testnet instructions target testnet26 / P2P 12033 / RPC 14026. All RPC commands tested in regtest.*
+*Instructions target the current source and testnet26 / P2P 12033 / RPC 14026.
+Documentation checks do not establish runtime, network or release readiness.*

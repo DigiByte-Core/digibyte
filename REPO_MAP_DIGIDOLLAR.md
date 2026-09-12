@@ -563,7 +563,7 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
   - `HasConsensus(min_required)` → checks if ≥ min_required valid messages exist
   - `GetConsensusPrice(min_required)` → calculates median price from valid messages
   - `ValidateEpoch(current_epoch)` → checks epoch consistency
-- `OracleNodeInfo` (struct) → oracle node definition: id, pubkey, endpoint, is_active
+- `OracleNodeInfo` (struct) → oracle node definition: id, pubkey, endpoint, is_active; display_name is local roster metadata excluded from serialization
 - `SelectOraclesForEpoch(all_oracles, epoch)` → deterministic selection of active `OracleNodeInfo` entries across the configured 35-slot roster
 - `GetCurrentEpoch(block_height)` → calculates epoch from block height
 - `OracleP2P` (namespace) → unit-testable P2P validation helpers; production relay admission, per-peer rate limiting, stale-epoch rejection, and dedup live in `src/net_processing.cpp`
@@ -625,6 +625,9 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 ---
 
 ## Wallet Integration
+
+### src/wallet/digidollarmintcapability.h
+- `wallet::GetDigiDollarMintWalletError(wallet)` → checks mint wallet support without allocating keys or requiring unlock; descriptor/private-key/HD support, Taproot receiving and bech32 change descriptors are required. Actual owner-key derivation and signing must still succeed.
 
 ### src/wallet/digidollarwallet.h
 - `DDTransaction` (struct) → wallet-facing DD transaction: txid, amount, timestamp, confirmations, incoming, address, category (send/receive/mint/redeem), blockheight, blockhash, fee, comment, abandoned, lock_tier
@@ -885,6 +888,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ---
 
 ## Qt GUI
+
+### src/qt/walletmodel.cpp/h
+- `WalletModel::getDigiDollarMintWalletError()` → exposes the shared read-only mint capability check to Qt; the mint widget calls it before confirmation and construction checks it again.
 
 ### src/qt/digidollartab.cpp/h
 - `DigiDollarTab` → main DD tab widget containing the activation overlay and 7 tabs: DD Overview, Send DD, Receive DD, Mint DD, Redeem DD, DD Vault, DD Transactions

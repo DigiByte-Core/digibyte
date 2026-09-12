@@ -1194,7 +1194,9 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
 
     // DigiDollar: Check if this is a DD transaction and track it
     if (fInsertedNew && m_dd_wallet && DigiDollar::HasDigiDollarMarker(*tx)) {
-        WalletLogPrintf("DigiDollar: Calling ProcessIncomingTransaction for tx %s\n", hash.ToString());
+        if (LogAcceptCategory(BCLog::DIGIDOLLAR, BCLog::Level::Debug)) {
+            WalletLogPrintf("DigiDollar: Calling ProcessIncomingTransaction for tx %s\n", hash.ToString());
+        }
         m_dd_wallet->ProcessIncomingTransaction(tx, hash);
     } else if (fInsertedNew && DigiDollar::HasDigiDollarMarker(*tx)) {
         WalletLogPrintf("DigiDollar: DD tx detected but m_dd_wallet is null for tx %s\n", hash.ToString());
@@ -2795,7 +2797,7 @@ CKey CWallet::GetHDKeyForDigiDollar(const std::string& label)
 
         if (auto* taproot_dest = std::get_if<WitnessV1Taproot>(&dest)) {
             XOnlyPubKey output_key(*taproot_dest);
-            LogPrintf("DigiDollar: GetHDKeyForDigiDollar - descriptor produced output_key=%s for label '%s'\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetHDKeyForDigiDollar - descriptor produced output_key=%s for label '%s'\n",
                      HexStr(output_key), label);
 
             for (auto* spk_man : GetAllScriptPubKeyMans()) {
@@ -2804,23 +2806,23 @@ CKey CWallet::GetHDKeyForDigiDollar(const std::string& label)
                     if (provider) {
                         TaprootSpendData spenddata;
                         if (provider->GetTaprootSpendData(output_key, spenddata)) {
-                            LogPrintf("DigiDollar: GetHDKeyForDigiDollar - spenddata.internal_key=%s\n",
+                            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetHDKeyForDigiDollar - spenddata.internal_key=%s\n",
                                      HexStr(spenddata.internal_key));
                             if (spenddata.internal_key.IsFullyValid() &&
                                 provider->GetKeyByXOnly(spenddata.internal_key, key)) {
                                 XOnlyPubKey key_xonly(key.GetPubKey());
                                 auto key_tweaked = key_xonly.CreateTapTweak(nullptr);
                                 if (key_tweaked) {
-                                    LogPrintf("DigiDollar: GetHDKeyForDigiDollar - returned key pubkey_xonly=%s, tweaked=%s (matches descriptor: %s)\n",
+                                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetHDKeyForDigiDollar - returned key pubkey_xonly=%s, tweaked=%s (matches descriptor: %s)\n",
                                              HexStr(key_xonly), HexStr(key_tweaked->first),
                                              (key_tweaked->first == output_key) ? "YES" : "NO");
                                 }
-                                LogPrintf("DigiDollar: Successfully derived HD key from Taproot descriptor wallet for label '%s'\n", label);
+                                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Successfully derived HD key from Taproot descriptor wallet for label '%s'\n", label);
                                 return key;
                             }
                         }
                         if (provider->GetKeyByXOnly(output_key, key)) {
-                            LogPrintf("DigiDollar: Successfully derived HD key from Taproot output key for label '%s'\n", label);
+                            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Successfully derived HD key from Taproot output key for label '%s'\n", label);
                             return key;
                         }
                     }
@@ -2832,7 +2834,7 @@ CKey CWallet::GetHDKeyForDigiDollar(const std::string& label)
                 if (auto* legacy_spk = dynamic_cast<LegacyScriptPubKeyMan*>(spk_man)) {
                     CKeyID keyid = GetKeyForDestination(*legacy_spk, dest);
                     if (!keyid.IsNull() && legacy_spk->GetKey(keyid, key)) {
-                        LogPrintf("DigiDollar: Successfully derived HD key from legacy wallet for label '%s'\n", label);
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Successfully derived HD key from legacy wallet for label '%s'\n", label);
                         return key;
                     }
                 }
@@ -2842,7 +2844,7 @@ CKey CWallet::GetHDKeyForDigiDollar(const std::string& label)
                     if (provider) {
                         CKeyID keyid = GetKeyForDestination(*provider, dest);
                         if (!keyid.IsNull() && provider->GetKey(keyid, key)) {
-                            LogPrintf("DigiDollar: Successfully derived HD key from descriptor wallet for label '%s'\n", label);
+                            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Successfully derived HD key from descriptor wallet for label '%s'\n", label);
                             return key;
                         }
                     }

@@ -402,7 +402,7 @@ void MuSig2SigningSession::TrimNoncesToThreshold()
     }
 
     m_participants_frozen = true;
-    LogPrintf("Oracle: Trimmed nonces from %zu to %zu deterministic participants (threshold=%zu, epoch=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Trimmed nonces from %zu to %zu deterministic participants (threshold=%zu, epoch=%d)\n",
              before, m_pubnonces.size(), m_min_signers, m_epoch);
 }
 
@@ -440,7 +440,7 @@ bool MuSig2SigningSession::TrimNoncesToParticipants(const std::vector<uint8_t>& 
     }
 
     m_participants_frozen = true;
-    LogPrintf("Oracle: Trimmed nonces from %zu to %zu proposed participants (threshold=%zu, epoch=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Trimmed nonces from %zu to %zu proposed participants (threshold=%zu, epoch=%d)\n",
              before, m_pubnonces.size(), m_min_signers, m_epoch);
     return m_pubnonces.size() == keep.size();
 }

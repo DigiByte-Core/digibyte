@@ -49,6 +49,7 @@ class DigiDollarDescriptorTest(DigiByteTestFramework):
         self.setup_digidollar_test()
 
         # Run test scenarios
+        self.test_mint_wallet_capabilities()
         self.test_export_dd_descriptors()
         self.test_import_dd_descriptors()
         self.test_descriptor_wallet_dd_operations()
@@ -85,6 +86,31 @@ class DigiDollarDescriptorTest(DigiByteTestFramework):
         for index in indices:
             result = self.nodes[index].setmockoracleprice(price)
             assert_equal(result["price_micro_usd"], price)
+
+    def test_mint_wallet_capabilities(self):
+        """Reject incomplete wallets before oracle, balance, or key allocation work."""
+        private_descriptors = self.source_wallet.listdescriptors(True)["descriptors"]
+        owner = next(d for d in private_descriptors if d["desc"].startswith("tr(") and not d["internal"])
+        change = next(d for d in private_descriptors if d["desc"].startswith("wpkh(") and d["internal"])
+        cases = [
+            ("blank", [], "cannot generate DigiDollar owner keys"),
+            ("no_taproot", [change], "cannot generate DigiDollar owner keys"),
+            ("no_change", [owner], "cannot generate the change addresses"),
+            ("inactive_taproot", [change, dict(owner, active=False)], "cannot generate DigiDollar owner keys"),
+        ]
+        for name, descriptors, reason in cases:
+            self.nodes[0].createwallet(wallet_name=f"mint_{name}", descriptors=True, blank=True)
+            wallet = self.nodes[0].get_wallet_rpc(f"mint_{name}")
+            for descriptor in descriptors:
+                request = {key: descriptor[key] for key in ("desc", "active", "internal", "range")}
+                request["timestamp"] = "now"
+                result = wallet.importdescriptors([request])
+                assert_equal(result[0]["success"], True)
+            before = wallet.listdescriptors()
+            for _ in range(2):
+                assert_raises_rpc_error(-4, reason, wallet.mintdigidollar, 10000, 0)
+            assert_equal(wallet.listdescriptors(), before)
+            assert_equal(wallet.getwalletinfo()["txcount"], 0)
 
     def test_export_dd_descriptors(self):
         """Test exporting DD-related descriptors from a wallet."""
@@ -317,7 +343,7 @@ class DigiDollarDescriptorTest(DigiByteTestFramework):
         self.refresh_oracle_quotes(0)
         assert_raises_rpc_error(
             -4,
-            "descriptor/bech32m HD wallet",
+            "legacy wallet cannot mint DigiDollar",
             legacy_wallet.mintdigidollar,
             legacy_mint_amount,
             dca_tier,
@@ -418,11 +444,9 @@ class DigiDollarDescriptorTest(DigiByteTestFramework):
         )
 
         # Verify watch-only CANNOT mint (requires signing)
-        try:
-            watchonly_wallet.mintdigidollar(1000, 1)  # 10.00 DD, tier 1
-            self.log.warning("Watch-only wallet should not be able to mint")
-        except Exception as e:
-            self.log.info(f"Watch-only correctly prevented minting: {type(e).__name__}")
+        assert_raises_rpc_error(
+            -4, "Private keys are disabled", watchonly_wallet.mintdigidollar, 1000, 1,
+        )
 
         # Verify watch-only can list positions for monitoring, but every
         # position is clearly non-spendable.

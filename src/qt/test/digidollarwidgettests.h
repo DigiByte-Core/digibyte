@@ -112,6 +112,9 @@ private Q_SLOTS:
     void positionsWidgetPendingRedeemButtonNotRedeemed();
     void redeemWidgetKeepsTimelockedPositionDisabled();
     void mintDigiDollarRejectsPrivateKeyDisabledWallet();
+    void mintWidgetRejectsUnsupportedWalletBeforeConfirmation_data();
+    void mintWidgetRejectsUnsupportedWalletBeforeConfirmation();
+    void mintWidgetPreservesEncryptedWalletUnlockFlow();
 };
 
 #endif // DIGIBYTE_QT_TEST_DIGIDOLLARWIDGETTESTS_H

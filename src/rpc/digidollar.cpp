@@ -48,6 +48,7 @@
 #include <wallet/coincontrol.h>
 #include <wallet/coinselection.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/digidollarmintcapability.h>
 #include <wallet/walletdb.h>
 #include <wallet/scriptpubkeyman.h>
 #include <interfaces/wallet.h>
@@ -249,26 +250,10 @@ namespace {
     }
 #endif
 
-    const std::vector<std::string>& OracleDisplayNames()
-    {
-        static const std::vector<std::string> names = {
-            "Jared", "Green Candle", "Bastian", "DanGB", "Shenger",
-            "Ycagel", "Aussie", "LookInto", "JohnnyLawDGB", "Ogilvie",
-            "ChopperBrian", "hallvardo", "DaPunzy", "DigiByteForce",
-            "Neel", "DigiSwarm", "GTO90", "digibyte-maxi", "Anthony",
-            "mbah_jambon", "Camden", "Twoface123", "LivingTheLife",
-            "ChozenOne43", "ckunchained", "JMag", "HashedMax",
-            "DennisPitallano", "DigiHash Mining Pool", "medgboracle3452",
-            "DigibyteDaily", "Peer2Peer", "3DogsKanab",
-            "LiberatedLark", "Manu_DGB_oracle"
-        };
-        return names;
-    }
-
     std::string OracleDisplayName(uint32_t oracle_id)
     {
-        const auto& names = OracleDisplayNames();
-        return oracle_id < names.size() ? names[oracle_id] : strprintf("Oracle %u", oracle_id);
+        const auto* oracle = Params().GetOracleNode(oracle_id);
+        return oracle && !oracle->display_name.empty() ? oracle->display_name : strprintf("Oracle %u", oracle_id);
     }
 
 #ifdef ENABLE_WALLET
@@ -1061,9 +1046,9 @@ RPCHelpMan getdigidollarstats()
                 Chainstate& active_chainstate = chainman.ActiveChainstate();
 
                 // Step 1: Force flush all cached coins to disk (like gettxoutsetinfo does)
-                LogPrintf("DigiDollar: getdigidollarstats - About to ForceFlushStateToDisk...\n");
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: getdigidollarstats - About to ForceFlushStateToDisk...\n");
                 active_chainstate.ForceFlushStateToDisk();
-                LogPrintf("DigiDollar: getdigidollarstats - ForceFlushStateToDisk completed\n");
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: getdigidollarstats - ForceFlushStateToDisk completed\n");
 
                 // Step 2: Now acquire lock and access the flushed CoinsDB
                 // CRITICAL: Hold cs_main lock during ScanUTXOSet to prevent race conditions
@@ -1078,12 +1063,12 @@ RPCHelpMan getdigidollarstats()
                     // Scan UTXO set to find ALL DigiDollar vaults network-wide
                     // Pass BlockManager for full transaction access
                     // Pass both CoinsDB (for iteration) and CoinsTip (for validation)
-                    LogPrintf("DigiDollar: getdigidollarstats - About to call ScanUTXOSet...\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: getdigidollarstats - About to call ScanUTXOSet...\n");
                     if (!DigiDollar::SystemHealthMonitor::ScanUTXOSet(coins_view, &active_chainstate.CoinsTip(), blockman, mempool, &active_chainstate.m_chain, &Params().GetConsensus())) {
                         throw JSONRPCError(RPC_MISC_ERROR,
                             "DigiDollar-era block data is incomplete or unreadable; restart with -reindex");
                     }
-                    LogPrintf("DigiDollar: getdigidollarstats - ScanUTXOSet completed\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: getdigidollarstats - ScanUTXOSet completed\n");
                 }
 
                 // Get metrics from scanner
@@ -1726,6 +1711,11 @@ RPCHelpMan mintdigidollar()
                 currentHeight = tip ? tip->nHeight : 0;
             }
 
+            const bilingual_str capability_error = wallet::GetDigiDollarMintWalletError(*pwallet);
+            if (!capability_error.empty()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, capability_error.original);
+            }
+
             // DD-FA-FUNC-028 (Wave 18 Agent C): surface a DigiDollar-flavored
             // locked-wallet hint that explicitly cites walletpassphrase so
             // wallet UIs can disambiguate this rejection from any other
@@ -1738,10 +1728,6 @@ RPCHelpMan mintdigidollar()
                     "DigiDollar mint requires the wallet to be unlocked. "
                     "Error: Please enter the wallet passphrase with walletpassphrase first.");
             }
-            if (pwallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
-            }
-
             // Parse parameters
             CAmount ddAmount = request.params[0].getInt<int64_t>();
             int lockTier = request.params[1].getInt<int>();
@@ -1883,7 +1869,7 @@ RPCHelpMan mintdigidollar()
                 LOCK(pwallet->cs_wallet);
                 ownerKey = pwallet->GetHDKeyForDigiDollar("dd-owner");
                 if (!ownerKey.IsValid()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar mint requires a descriptor/bech32m HD wallet with private keys enabled");
+                    throw JSONRPCError(RPC_WALLET_ERROR, "The wallet could not generate a DigiDollar owner key. Check that it is unlocked and that its receiving addresses have the required private keys.");
                 }
             }
 
@@ -1927,7 +1913,7 @@ RPCHelpMan mintdigidollar()
                 auto op_dest = pwallet->GetNewChangeDestination(OutputType::BECH32);
                 if (op_dest) {
                     params.dgbChangeDest = *op_dest;
-                    LogPrintf("DigiDollar RPC Mint: Using wallet change address for DGB change output\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC Mint: Using wallet change address for DGB change output\n");
                 } else {
                     LogPrintf("DigiDollar RPC Mint: WARNING - Could not get change destination!\n");
                 }
@@ -2106,7 +2092,7 @@ RPCHelpMan mintdigidollar()
                                   persist_error));
                 }
             }
-            LogPrintf("DigiDollar RPC: Saved position %s (%d DD cents) and its owner key before broadcast\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Saved position %s (%d DD cents) and its owner key before broadcast\n",
                       positionId.ToString(), ddAmount);
 
             const bool should_broadcast = pwallet->GetBroadcastTransactions();
@@ -2239,7 +2225,7 @@ RPCHelpMan senddigidollar()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
-            LogPrintf("DigiDollar RPC: senddigidollar called\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: senddigidollar called\n");
 
             // Get wallet first (wallet RPCs have WalletContext, not NodeContext)
             std::shared_ptr<wallet::CWallet> const pwallet = wallet::GetWalletForJSONRPCRequest(request);
@@ -2270,14 +2256,14 @@ RPCHelpMan senddigidollar()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
             }
 
-            LogPrintf("DigiDollar RPC: Got wallet\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Got wallet\n");
 
             // Get DigiDollar wallet
             DigiDollarWallet* dd_wallet = pwallet->GetDDWallet();
             if (!dd_wallet) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not initialized");
             }
-            LogPrintf("DigiDollar RPC: Got DD wallet\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Got DD wallet\n");
 
             // Parse parameters
             std::string addressStr = request.params[0].get_str();
@@ -2293,7 +2279,7 @@ RPCHelpMan senddigidollar()
                 selected_inputs = ParseDigiDollarSelectedInputs(request.params[4]);
                 preset_dd_inputs = &selected_inputs;
             }
-            LogPrintf("DigiDollar RPC: Parsed params - address=%s, amount=%d\n", addressStr, amount);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Parsed params - address=%s, amount=%d\n", addressStr, amount);
 
             // Validate amount
             if (amount <= 0) {
@@ -2313,12 +2299,12 @@ RPCHelpMan senddigidollar()
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, address_error);
             }
             CDigiDollarAddress dd_address(addressStr);
-            LogPrintf("DigiDollar RPC: DD address validated\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: DD address validated\n");
 
             // Check balance
-            LogPrintf("DigiDollar RPC: Calling GetTotalDDBalance()...\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Calling GetTotalDDBalance()...\n");
             CAmount balance = dd_wallet->GetTotalDDBalance();
-            LogPrintf("DigiDollar RPC: GetTotalDDBalance() returned %d\n", balance);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: GetTotalDDBalance() returned %d\n", balance);
             if (amount > balance) {
                 const CAmount pending_balance = dd_wallet->GetPendingDDBalance();
                 if (amount <= balance + pending_balance) {
@@ -2336,9 +2322,9 @@ RPCHelpMan senddigidollar()
             std::string txid;
             std::string error;
             CAmount dd_change = 0;
-            LogPrintf("DigiDollar RPC: Calling TransferDigiDollar()...\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Calling TransferDigiDollar()...\n");
             bool success = dd_wallet->TransferDigiDollar(dd_address, amount, txid, error, &dd_change, preset_dd_inputs, comment);
-            LogPrintf("DigiDollar RPC: TransferDigiDollar() returned success=%d\n", success);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: TransferDigiDollar() returned success=%d\n", success);
 
             if (!success) {
                 // Bug #10: Provide user-friendly message for unconfirmed DD input errors
@@ -2433,7 +2419,7 @@ RPCHelpMan sendmanydigidollar()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
-            LogPrintf("DigiDollar RPC: sendmanydigidollar called\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: sendmanydigidollar called\n");
 
             std::shared_ptr<wallet::CWallet> const pwallet = wallet::GetWalletForJSONRPCRequest(request);
             if (!pwallet) {
@@ -2684,9 +2670,9 @@ RPCHelpMan redeemdigidollar()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid position ID");
             }
 
-            LogPrintf("DigiDollar: ====== REDEMPTION REQUEST ======\n");
-            LogPrintf("DigiDollar: Position ID (mint txid): %s\n", positionId.ToString());
-            LogPrintf("DigiDollar: Resolving mint collateral and DD token outpoints from wallet metadata\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ====== REDEMPTION REQUEST ======\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Position ID (mint txid): %s\n", positionId.ToString());
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Resolving mint collateral and DD token outpoints from wallet metadata\n");
 
             // Get position from wallet
             node::NodeContext* candidate_node = pwallet->chain().context();
@@ -2733,7 +2719,7 @@ RPCHelpMan redeemdigidollar()
                     "Cannot resolve DigiDollar collateral output for this position. "
                     "Rescan or restore the wallet before redeeming.");
             }
-            LogPrintf("DigiDollar: Will try to spend collateral %s:%u\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Will try to spend collateral %s:%u\n",
                       collateralOutpoint.hash.ToString(), collateralOutpoint.n);
 
             // The owner key is settled before anything else is decided. The
@@ -2819,9 +2805,9 @@ RPCHelpMan redeemdigidollar()
                               "You can use DD from any source to redeem a vault.",
                               requiredDDBurn, walletBalance));
             }
-            LogPrintf("DigiDollar: Selected %zu DD UTXOs totaling %d cents for redemption of %d cents\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Selected %zu DD UTXOs totaling %d cents for redemption of %d cents\n",
                       selectedDDUtxos.size(), selectedDDTotal, requiredDDBurn);
-            LogPrintf("DigiDollar: selectedDDAmounts.size() = %zu\n", selectedDDAmounts.size());
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: selectedDDAmounts.size() = %zu\n", selectedDDAmounts.size());
 
             // Get oracle price - use real oracle, fall back to mock only in regtest
             CAmount oraclePrice = OracleIntegration::GetCurrentOraclePriceMicroUSD();
@@ -2870,18 +2856,18 @@ RPCHelpMan redeemdigidollar()
                     redeemParams.collateralDest = requestedDest;
                     actualUnlockAddress = redeemAddress;
                     collateralAddressFromCaller = true;
-                    LogPrintf("DigiDollar: Using requested destination for returned collateral\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using requested destination for returned collateral\n");
                 } else {
                     auto op_dest = pwallet->GetNewDestination(OutputType::BECH32M, label);
                     if (!op_dest) {
                         // Legacy wallet fallback: try BECH32 (SegWit v0)
-                        LogPrintf("DigiDollar: BECH32M not available, trying BECH32 for legacy wallet\n");
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: BECH32M not available, trying BECH32 for legacy wallet\n");
                         op_dest = pwallet->GetNewDestination(OutputType::BECH32, label);
                     }
                     if (op_dest) {
                         redeemParams.collateralDest = *op_dest;
                         actualUnlockAddress = EncodeDestination(*op_dest);
-                        LogPrintf("DigiDollar: Using wallet destination for returned collateral\n");
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using wallet destination for returned collateral\n");
                     } else {
                         CTxDestination ownerFallback{WitnessV1Taproot(XOnlyPubKey(ownerKey.GetPubKey()))};
                         actualUnlockAddress = EncodeDestination(ownerFallback);
@@ -2895,12 +2881,12 @@ RPCHelpMan redeemdigidollar()
                 auto op_change = pwallet->GetNewDestination(OutputType::BECH32M, label);
                 if (!op_change) {
                     // Legacy wallet fallback: try BECH32 (SegWit v0)
-                    LogPrintf("DigiDollar: BECH32M not available for change, trying BECH32 for legacy wallet\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: BECH32M not available for change, trying BECH32 for legacy wallet\n");
                     op_change = pwallet->GetNewDestination(OutputType::BECH32, label);
                 }
                 if (op_change) {
                     redeemParams.dgbChangeDest = *op_change;
-                    LogPrintf("DigiDollar: Using separate wallet destination for DGB change\n");
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using separate wallet destination for DGB change\n");
                 } else if (collateralAddressFromCaller) {
                     // Without a change address the transaction would send the
                     // DGB left over after the fee to the collateral address,
@@ -2927,10 +2913,10 @@ RPCHelpMan redeemdigidollar()
             redeemParams.ddMinted = foundPosition.dd_minted;
             redeemParams.unlockHeight = static_cast<uint32_t>(foundPosition.unlock_height);
 
-            LogPrintf("DigiDollar: Using verified position metadata:\n");
-            LogPrintf("  - Collateral: %d sats (%.8f DGB)\n", foundPosition.dgb_collateral, foundPosition.dgb_collateral / 100000000.0);
-            LogPrintf("  - DD Minted: %d cents\n", foundPosition.dd_minted);
-            LogPrintf("  - Unlock Height: %d\n", foundPosition.unlock_height);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using verified position metadata:\n");
+            LogPrint(BCLog::DIGIDOLLAR, "  - Collateral: %d sats (%.8f DGB)\n", foundPosition.dgb_collateral, foundPosition.dgb_collateral / 100000000.0);
+            LogPrint(BCLog::DIGIDOLLAR, "  - DD Minted: %d cents\n", foundPosition.dd_minted);
+            LogPrint(BCLog::DIGIDOLLAR, "  - Unlock Height: %d\n", foundPosition.unlock_height);
 
             // Select fee UTXOs from wallet
             // CRITICAL: Build exclude list to prevent selecting collateral or DD UTXOs as fee inputs
@@ -2938,7 +2924,7 @@ RPCHelpMan redeemdigidollar()
             exclude_utxos.push_back(redeemParams.collateralOutpoint);  // Don't select collateral
             exclude_utxos.insert(exclude_utxos.end(), redeemParams.ddUtxos.begin(), redeemParams.ddUtxos.end());  // Don't select DD UTXOs
 
-            LogPrintf("DigiDollar: Building exclude list with %d UTXOs (1 collateral + %d DD)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Building exclude list with %d UTXOs (1 collateral + %d DD)\n",
                       exclude_utxos.size(), redeemParams.ddUtxos.size());
 
             // Choose the DGB coins that pay the fee. Every coin added to pay
@@ -2963,7 +2949,7 @@ RPCHelpMan redeemdigidollar()
 
             CAmount selectedFeeTotal = 0;
             for (const CAmount feeAmount : redeemParams.feeAmounts) selectedFeeTotal += feeAmount;
-            LogPrintf("DigiDollar: Selected %d sats in fees from %d UTXOs for redemption\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Selected %d sats in fees from %d UTXOs for redemption\n",
                      selectedFeeTotal, redeemParams.feeUtxos.size());
 
             // Last line of defence. The coins above were chosen against a
@@ -2990,9 +2976,9 @@ RPCHelpMan redeemdigidollar()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to build redemption transaction: " + redeemResult.error);
             }
 
-            LogPrintf("DigiDollar: Redemption transaction built with %d inputs:\n", redeemResult.tx.vin.size());
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Redemption transaction built with %d inputs:\n", redeemResult.tx.vin.size());
             for (size_t i = 0; i < redeemResult.tx.vin.size(); i++) {
-                LogPrintf("DigiDollar:   Input %d: %s:%d\n", i,
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar:   Input %d: %s:%d\n", i,
                          redeemResult.tx.vin[i].prevout.hash.ToString(),
                          redeemResult.tx.vin[i].prevout.n);
             }
@@ -3056,11 +3042,11 @@ RPCHelpMan redeemdigidollar()
                     LogPrintf("DigiDollar: ERROR - could not save the owner key for DD change of redemption %s\n",
                               redeemTx->GetHash().ToString());
                 }
-                LogPrintf("DigiDollar: Deferred DD change tracking for pending redemption %s (%d cents)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Deferred DD change tracking for pending redemption %s (%d cents)\n",
                           redeemTx->GetHash().ToString(), redeemResult.ddChange);
             }
             for (const auto& spentUtxo : selectedDDUtxos) {
-                LogPrintf("DigiDollar: DD UTXO %s:%d pending redemption spend (will be erased on block confirm)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD UTXO %s:%d pending redemption spend (will be erased on block confirm)\n",
                           spentUtxo.hash.ToString(), spentUtxo.n);
             }
 
@@ -3076,7 +3062,7 @@ RPCHelpMan redeemdigidollar()
                 // Keep collateral and DD token outpoints locked while the redeem
                 // is unconfirmed. They are spent if the redeem confirms, and they
                 // must remain protected if the redeem leaves mempool or is reorged.
-                LogPrintf("DigiDollar: Position %s pending redemption; collateral+DD-token locks remain until chain state resolves\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Position %s pending redemption; collateral+DD-token locks remain until chain state resolves\n",
                           positionIdStr);
             } else {
                 // Update position with remaining amounts
@@ -3441,7 +3427,7 @@ RPCHelpMan getdigidollaraddress()
 
             // Generate an HD-derived key for DD addresses
             // This allows the key to be recovered from wallet seed
-            LogPrintf("DigiDollar: getdigidollaraddress - generating HD key for DD address\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: getdigidollaraddress - generating HD key for DD address\n");
 
             CKey dd_key = pwallet->GetHDKeyForDigiDollar(label);
             if (!dd_key.IsValid()) {
@@ -3460,7 +3446,7 @@ RPCHelpMan getdigidollaraddress()
             XOnlyPubKey output_key = tweaked->first;
             bool output_parity = tweaked->second;
 
-            LogPrintf("DigiDollar: Generated internal_key=%s, output_key=%s, parity=%d\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Generated internal_key=%s, output_key=%s, parity=%d\n",
                      HexStr(Span<const unsigned char>(internal_key.begin(), internal_key.end())),
                      HexStr(Span<const unsigned char>(output_key.begin(), output_key.end())),
                      output_parity);
@@ -3482,7 +3468,7 @@ RPCHelpMan getdigidollaraddress()
                         "Could not save the key for this DigiDollar address to the wallet file, so no address was created. "
                         "Check the wallet file and free disk space, then try again.");
                 }
-                LogPrintf("DigiDollar: Stored DD address key (output_key=%s)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Stored DD address key (output_key=%s)\n",
                          HexStr(Span<const unsigned char>(output_key.begin(), output_key.end())));
             } else {
                 LogPrintf("DigiDollar: ERROR - GetDDWallet returned nullptr\n");
@@ -3512,7 +3498,7 @@ RPCHelpMan getdigidollaraddress()
                     provider.keys[dd_pubkey.GetID()] = dd_key;
                     provider.pubkeys[dd_pubkey.GetID()] = dd_pubkey;
 
-                    LogPrintf("DigiDollar: Added private key to provider, keyid=%s\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added private key to provider, keyid=%s\n",
                              dd_pubkey.GetID().ToString());
 
                     // Create import request
@@ -3521,7 +3507,7 @@ RPCHelpMan getdigidollaraddress()
                     // Import as active (non-internal) for receiving
                     LOCK(pwallet->cs_wallet);
                     if (pwallet->AddWalletDescriptor(wallet_desc, provider, "", /*internal=*/false)) {
-                        LogPrintf("DigiDollar: Imported DD address as tr() descriptor WITH private key\n");
+                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Imported DD address as tr() descriptor WITH private key\n");
                     } else {
                         LogPrintf("DigiDollar: WARNING - Failed to import DD address descriptor (may already exist)\n");
                     }
@@ -6086,7 +6072,7 @@ RPCHelpMan createoraclekey()
             // Get x-only pubkey (32 bytes, strip the 02/03 prefix)
             XOnlyPubKey xonly(pubkey);
 
-            LogPrintf("Oracle: Generated oracle key for oracle_id %u, pubkey=%s\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: Generated oracle key for oracle_id %u, pubkey=%s\n",
                      oracle_id, HexStr(pubkey));
 
             UniValue result(UniValue::VOBJ);

@@ -25,14 +25,14 @@ If you already run a DigiByte node, you're most of the way there.
 | Fee unit | DGB/kB (DigiByte uses kB, not vB) |
 | Block time | 15 seconds (same as DGB) |
 | Confirmations | Same security model as DGB |
-| Backend required | DigiByte Core v9.26.2+ with DigiDollar built in; features remain BIP9-gated until activation |
+| Backend required | The reviewed release for the target network and coordinated activation height |
 | Wallet | Spend-capable descriptor wallet required for generated deposit addresses and withdrawals |
 
 ---
 
 ## 1. Node Setup
 
-Upgrade your existing DigiByte node to v9.26.2+ and enable DigiDollar:
+Use the reviewed build for your network. Follow the [backup and upgrade instructions](doc/digidollar-operations.md) before replacing an existing backend. DigiDollar configuration:
 
 ```ini
 # digibyte.conf
@@ -180,7 +180,7 @@ digibyte-cli getbalance
 - Per-output dust floor: $1 (100 cents) — see `src/consensus/digidollar.h:73`
 - Maximum single transfer: **$100,000** (10,000,000 cents) per `maxMintAmount`-aligned policy in `src/consensus/digidollar.h:72`
 - DD inputs must be **confirmed** (≥1 confirmation) before they can be re-spent. The wallet does not chain unconfirmed DigiDollar UTXOs, and consensus rejects DD transfer/redeem inputs that resolve from `MEMPOOL_HEIGHT` (commit `0b4959f563`). Plan withdrawal cadence around the 15-second block time, or batch with `sendmanydigidollar`.
-- Integration code should pass integer cents with no decimal point. The send/redeem RPCs accept decimal-dollar input for CLI compatibility, so `25000` means $250.00 but `25000.00` means $25,000.00.
+- Integration code can keep passing integer cents without an `amount_unit`: `25000` means $250.00. A decimal amount without a unit is rejected. To send dollar amounts, explicitly set `amount_unit` to `dollars`; then `250.00` means $250.00. The send, batch-send, and redeem RPCs share this rule. Explicit `cents` values must be integers; `dollars` values allow at most two decimal places.
 - DD transfer withdrawals do not need a fresh oracle quote for mempool admission. Mint and redeem paths require recent valid MuSig2 oracle data; transfer-only exchange withdrawals are price-independent, but still require confirmed DD and DGB fee inputs.
 
 ### Batch withdrawals
@@ -247,9 +247,28 @@ digibyte-cli getdigidollarstats
 ```
 
 Returns system-wide metrics:
-- **Total DD supply** — all DigiDollars in circulation
-- **Total collateral** — all DGB locked as backing
-- **System health ratio** — collateral value / DD supply (should be >100%)
+- **`total_dd_supply`** — circulating-supply field in cents: accepted issuance minus actual burns, subject to the legacy fallback limit below.
+- **`canonical_health.open_vault_principal`** — original DD attached to unspent vaults; use only when `canonical_health.ready` is true.
+- **`canonical_health.collateral`** — DGB satoshis locked in those vaults, with `active_vaults` and the matching `block_hash`.
+- **`selected_health_denominator` / `health_rule_height`** — the liability definition and height used for tip-rule health.
+- **`next_block_health`** — separate candidate height, readiness, health denominator and quote for next-block construction.
+
+Before Thaw Day, the legacy fallback used when `digidollarstatsindex` is
+disabled scans vault amounts. Do not treat that fallback's `total_dd_supply`
+as a verified circulating token count. Use a synchronized stats index for
+circulation reporting below the transition. At and above Thaw Day, the
+fallback reconstructs tokens separately from vault principal.
+
+At and above Thaw Day, health divides collateral value by open-vault principal.
+It keeps circulating tokens separate. Closing a 100-DD vault while burning
+125 DD reduces principal by 100 and circulation by 125. Their difference is
+expected and does not itself show corruption. This health change can prolong
+emergency mint restrictions or increase required redemption burn. It does not
+alter customer balances at activation.
+
+At tip H-1, tip health can still use legacy rules while the next candidate
+uses the new rules. Unknown or unready values are not zero. A later quote or
+chain change can change a construction estimate.
 
 This is useful for risk monitoring. It is not a customer-deposit index. For custody, use wallet-local `listdigidollartxs`, `getdigidollarbalance`, and `listdigidollarunspent`, or build a raw indexer using the parsing rules below. If system health drops significantly, new minting gets more expensive (Dynamic Collateral Adjustment / DCA) and the Emergency Redemption Ratio (ERR) may activate (`src/consensus/err.cpp`).
 
@@ -357,6 +376,16 @@ Exchanges typically handle deposits and withdrawals — not minting or redeeming
 
 ---
 
+### Address encoding in external systems
+
+DGB witness version 0 addresses use Bech32. Witness version 1 Taproot addresses
+use Bech32m. Decode the output script and witness version before labeling its
+address; a display label alone is not evidence of its encoding. Core enforces
+this distinction in [src/key_io.cpp](src/key_io.cpp). DD/TD/RD addresses use a
+separate Base58Check encoding of the Taproot key, as described above. Record
+the network, transaction ID, output index and exact displayed address when
+investigating an explorer disagreement.
+
 ## 12. Common Pitfalls
 
 | Pitfall | Solution |
@@ -364,7 +393,7 @@ Exchanges typically handle deposits and withdrawals — not minting or redeeming
 | Sending to a DGB address instead of DD | Use `validateddaddress`; prefix-only checks are not enough |
 | Running out of DGB for fees | Monitor DGB balance, auto-top-up from exchange reserves |
 | Filtering out 0-sat outputs as dust | DD token outputs are 0-sat by design — don't discard them |
-| Using wrong amount units | Backend code should send integer cents; any decimal point is interpreted as dollars |
+| Using wrong amount units | Keep integer cents, or explicitly set `amount_unit=dollars`; decimal amounts without a unit are rejected |
 | Not checking activation status | Call `getdigidollardeploymentinfo` — DD RPCs error before activation |
 | Crediting deposits without reorg checks | Track `blockhash`, confirmations, `in_mempool`, and `wallet_state`; reverse or hold credits on conflicts |
 | Ignoring system health | Monitor `getdigidollarstats` — ERR state affects the broader ecosystem |
@@ -373,11 +402,11 @@ Exchanges typically handle deposits and withdrawals — not minting or redeeming
 
 ## 13. Test on Testnet Now!
 
-The current public testnet in this source tree is **testnet26**. DigiDollar activation is BIP9-gated at/after block 600 once 140 of 200 blocks signal; verify status with `getdigidollardeploymentinfo`.
+The public testnet configured in this source is **testnet26**, with buried DigiDollar activation at 600. Thaw Day remains disabled here. Check `getdigidollardeploymentinfo` on the installed build. No public Thaw Day activation or soak test is claimed.
 
 ### Testnet Quick Start
 
-1. **Download** the latest DigiByte Core v9.26.2 release build from this branch
+1. **Obtain** the reviewed test build and network instructions from the release owner
 2. **Configure:**
    ```ini
    testnet=1
@@ -402,14 +431,24 @@ The current public testnet in this source tree is **testnet26**. DigiDollar acti
 | Testnet name | testnet26 |
 | P2P Port | 12033 |
 | DD Address Prefix | `TD` |
-| Status | BIP9 bit 23, min activation height 600; check `getdigidollardeploymentinfo` for current status |
+| Status | DigiDollar buried at 600; Thaw Day separately reported by `getdigidollardeploymentinfo` |
 | Oracle | 35 active slots, 7 MuSig2 signatures required, 6 exchange sources |
 
 ---
 
 ## 14. Mainnet Activation
 
-Activation parameters are branch/network-specific. On mainnet, DigiDollar is gated by BIP9 bit 23 with a start time of 2026-06-01, a 40,320-block signaling window, a 70% threshold (28,224 of 40,320), and a minimum activation height of 23,627,520 (`src/kernel/chainparams.cpp:177-180,307`). Always confirm the live state by calling `getdigidollardeploymentinfo` on the target release and network as the source of truth for status, window size, threshold, timeout, and minimum activation height.
+DigiDollar's buried mainnet activation height is 23,869,440. Thaw Day is a
+separate consensus transition and remains disabled in this development source.
+Use `getdigidollardeploymentinfo.thaw_day` to distinguish scheduled, active at
+tip and active next block. There are no current DigiDollar BIP9 signaling
+statistics in that RPC.
+
+Upgrade custody nodes before a future coordinated height. Older nodes may
+disagree under the new rules. Agree on how deposits and withdrawals will be
+held if chain agreement becomes uncertain. Installation alone is not proof of
+activation or readiness. See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md)
+and [node operations](doc/digidollar-operations.md).
 
 ---
 
