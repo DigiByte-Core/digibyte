@@ -187,6 +187,12 @@ public:
         consensus.DigiDollarHeight = 23869440;
         consensus.AlgoLockHeight = 23869440;
 
+        // Thaw Day (the one height at which every consensus change of the
+        // DigiDollar Thaw Day release takes effect) is not scheduled here yet.
+        // The release owner sets the exact height in the tagged source, about
+        // November 1 2026, at least 14 days ahead of the block itself.
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+
         // The best chain should have at least this much work.
         // NOTE: must stay reachable by the headers pre-sync, which measures *contextless*
         // work (~28% of real chainwork in DigiByte's multi-algo model). The 2026-06-26
@@ -531,6 +537,10 @@ public:
         consensus.TaprootHeight = 0;
         consensus.DigiDollarHeight = 600;
         consensus.AlgoLockHeight = 0;
+
+        // Thaw Day is not scheduled on testnet yet. It is set when the testnet
+        // rehearsal candidate is built for the September 21 2026 activation.
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
 
         consensus.nMinimumChainWork = uint256S("0x00");
         consensus.defaultAssumeValid = uint256S("0x00"); //1079274
@@ -978,6 +988,11 @@ public:
         consensus.DigiDollarHeight = 0;
         consensus.AlgoLockHeight = 0;
 
+        // Thaw Day is not scheduled on signet. Set a height here only if a
+        // coordinated signet test is chosen; it must never be left to activate
+        // at height zero by accident.
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
         h << consensus.signet_challenge;
@@ -1247,6 +1262,13 @@ public:
             // semantics ("everything activates together at N") are preserved.
             // Takes precedence over -testactivationheight=digidollar@H.
             consensus.DigiDollarHeight = *opts.digidollar_activation_height;
+        }
+        // Thaw Day is not scheduled on regtest unless -ddthawdayheight=N is
+        // given; then it is exactly N, independent of the DigiDollar height
+        // (DigiDollar::IsThawDayActive handles either order).
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+        if (opts.dd_thaw_day_height) {
+            consensus.nDDThawDayHeight = *opts.dd_thaw_day_height;
         }
         consensus.nOracleEpochLength = 40;         // 10 minutes (40 blocks * 15 seconds)
         consensus.nOracleRequiredMessages = 4;     // 4-of-7 off-chain price quorum (matches testnet)

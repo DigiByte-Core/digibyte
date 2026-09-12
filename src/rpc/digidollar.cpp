@@ -1116,7 +1116,9 @@ static RPCHelpMan getdigidollardeploymentinfo()
                 "\nGet DigiDollar deployment activation status and information.\n"
                 "DigiDollar is a buried deployment (BIP90): it activated via BIP9 bit-23\n"
                 "signaling and its activation height is now hardcoded per network\n"
-                "(mainnet 23869440, testnet 600, default regtest 0).\n",
+                "(mainnet 23869440, testnet 600, default regtest 0).\n"
+                "Also reports Thaw Day, the single block height at which every consensus\n"
+                "change of this release takes effect once it is scheduled for the network.\n",
                 {},
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1142,6 +1144,16 @@ static RPCHelpMan getdigidollardeploymentinfo()
                                 {RPCResult::Type::NUM, "nonce_count", "Number of pubnonces collected for the current epoch's session"},
                                 {RPCResult::Type::NUM, "partial_sig_count", "Number of partial signatures collected"},
                                 {RPCResult::Type::NUM, "creation_height", /*optional=*/true, "Block height at which the current session was created (omitted when state=none)"}
+                            }
+                        },
+                        {RPCResult::Type::OBJ, "thaw_day", "Thaw Day status. Thaw Day is the one block height at which every consensus change of this release takes effect. This release step only schedules and reports the height; the rules themselves arrive in a later release step",
+                            {
+                                {RPCResult::Type::BOOL, "scheduled", "Whether a Thaw Day height is configured for this network in this build (false means the new rules never apply on this network with this build)"},
+                                {RPCResult::Type::NUM, "height", /*optional=*/true, "The Thaw Day block height (present only when scheduled)"},
+                                {RPCResult::Type::NUM, "tip_height", "Height of the active chain tip"},
+                                {RPCResult::Type::NUM, "next_block_height", "Height of the next block on the active chain (tip_height + 1)"},
+                                {RPCResult::Type::BOOL, "active_at_tip", "Whether the Thaw Day rules apply to the block at the tip: Thaw Day is scheduled, DigiDollar is active at that height, and tip_height is at or above the Thaw Day height"},
+                                {RPCResult::Type::BOOL, "active_next_block", "Whether the Thaw Day rules apply to the next block (the same test at next_block_height). This turns true one block before active_at_tip; that means the next block may use the new rules, it is not early activation"}
                             }
                         }
                     }
@@ -1231,6 +1243,29 @@ static RPCHelpMan getdigidollardeploymentinfo()
                 session_obj.pushKV("creation_height", *creation_height);
             }
             result.pushKV("musig2_session", session_obj);
+
+            // Thaw Day is the one block height at which every consensus change
+            // of this release takes effect. The tip and the next block are
+            // reported separately on purpose: when the tip is one block below
+            // Thaw Day the next block may already use the new rules, and that
+            // is not early activation. Only the shared predicate decides
+            // "active" here, so this RPC can never disagree with validation,
+            // mining or the mempool once those start calling it.
+            UniValue thaw_day(UniValue::VOBJ);
+            const bool thaw_day_scheduled = DigiDollar::IsThawDayScheduled(consensusParams);
+            thaw_day.pushKV("scheduled", thaw_day_scheduled);
+            if (thaw_day_scheduled) {
+                thaw_day.pushKV("height", consensusParams.nDDThawDayHeight);
+            }
+            // With no tip there is no block yet: the next block is genesis at
+            // height 0, and the predicate answers false for the negative tip.
+            const int thaw_day_tip_height = tip ? tip->nHeight : -1;
+            const int thaw_day_next_block_height = thaw_day_tip_height + 1;
+            thaw_day.pushKV("tip_height", thaw_day_tip_height);
+            thaw_day.pushKV("next_block_height", thaw_day_next_block_height);
+            thaw_day.pushKV("active_at_tip", DigiDollar::IsThawDayActive(consensusParams, thaw_day_tip_height));
+            thaw_day.pushKV("active_next_block", DigiDollar::IsThawDayActive(consensusParams, thaw_day_next_block_height));
+            result.pushKV("thaw_day", thaw_day);
 
             return result;
         },

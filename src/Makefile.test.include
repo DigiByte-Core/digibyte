@@ -74,7 +74,10 @@ DIGIBYTE_TESTS =\
   test/base58_tests.cpp \
   test/base64_tests.cpp \
   test/digidollar_activation_tests.cpp \
+  test/digidollar_thawday_tests.cpp \
   test/digidollar_activation_wave12_tests.cpp \
+  test/digidollar_thawday_chainparams_tests.cpp \
+  test/digidollar_thawday_selection_tests.cpp \
   test/digidollar_oracle_startup_tests.cpp \
   test/digidollar_wave26_compat_tests.cpp \
   test/digidollar_wave13_parity_tests.cpp \

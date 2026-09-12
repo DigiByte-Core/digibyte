@@ -128,6 +128,16 @@ struct Params {
      * blocks) becomes active. Buried BIP9 deployment (bit 0); enforcement is
      * OR'd with the static nGroestlDeactivationHeight backstop. */
     int AlgoLockHeight{std::numeric_limits<int>::max()};
+    /** Block height at which every consensus change of the DigiDollar
+     * "Thaw Day" release takes effect at once: the new mint-only volatility
+     * rule, open-vault health accounting, and canonical vault identity.
+     * The maximum int value means "not scheduled on this network". Blocks
+     * below this height keep the old rules for ever, including during a
+     * reindex and across reorgs: which rules a block gets depends only on
+     * that block's own height, never on where the node's tip is now.
+     * Read it through DigiDollar::IsThawDayActive(), and never add to it:
+     * the "not scheduled" value is the largest int and would overflow. */
+    int nDDThawDayHeight{std::numeric_limits<int>::max()};
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and segwit activations. */
     int MinBIP9WarningHeight;

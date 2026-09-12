@@ -125,6 +125,25 @@ namespace DigiDollar {
      */
     bool IsDigiDollarEnabled(const CBlockIndex* pindexPrev, const ChainstateManager& chainman);
     bool IsDigiDollarEnabled(const CBlockIndex* pindexPrev, const Consensus::Params& params);
+
+    /**
+     * Is Thaw Day scheduled on this network at all? False while
+     * Consensus::Params::nDDThawDayHeight holds its "not scheduled" value.
+     */
+    bool IsThawDayScheduled(const Consensus::Params& params);
+
+    /**
+     * Do the Thaw Day rules apply to a block at this height? True only when
+     * Thaw Day is scheduled, DigiDollar is active at that height
+     * (candidate_height >= params.DigiDollarHeight), and
+     * candidate_height >= params.nDDThawDayHeight.
+     *
+     * Callers pass the height of the block being checked (validation,
+     * replay), the intended height (mining: parent height + 1), or the next
+     * block height on the active chain (mempool, wallet). A negative height
+     * is never active. Pure: no chain state, no globals.
+     */
+    bool IsThawDayActive(const Consensus::Params& params, int candidate_height);
 }
 
 #endif // DIGIBYTE_DIGIDOLLAR_DIGIDOLLAR_H

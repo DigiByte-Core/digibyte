@@ -315,6 +315,7 @@ BASE_SCRIPTS = [
     'digidollar_rpc_collateral.py',
     'digidollar_rpc_dca.py',
     'digidollar_rpc_deployment.py',
+    'digidollar_thawday_height.py',
     'digidollar_rpc_display_bugs.py',
     'digidollar_rpc_estimate.py',
     'digidollar_rpc_gating.py',

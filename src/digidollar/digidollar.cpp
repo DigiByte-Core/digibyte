@@ -8,6 +8,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 // =====================================
@@ -185,6 +186,30 @@ bool IsDigiDollarEnabled(const CBlockIndex* pindexPrev, const Consensus::Params&
     // DeploymentActiveAfter semantics in deploymentstatus.h exactly.
     return (pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1) >=
            params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR);
+}
+
+bool IsThawDayScheduled(const Consensus::Params& params)
+{
+    return params.nDDThawDayHeight != std::numeric_limits<int>::max();
+}
+
+bool IsThawDayActive(const Consensus::Params& params, int candidate_height)
+{
+    // Only ever compare against the configured height; never add to it,
+    // because the "not scheduled" value is the largest int and would overflow.
+    if (candidate_height < 0) return false;
+    if (!IsThawDayScheduled(params)) return false;
+    // A network with the DigiDollar deployment switched off can never have
+    // Thaw Day rules, at any height. Checking this explicitly keeps the
+    // predicate false even at the largest int height, where a bare height
+    // compare against the "disabled" value (also the largest int) would
+    // otherwise read as active.
+    if (!DeploymentEnabled(params, Consensus::DEPLOYMENT_DIGIDOLLAR)) return false;
+    // The Thaw Day rules are DigiDollar rules, so they cannot apply to a block
+    // where DigiDollar itself is not yet active. This is the same buried
+    // height that IsDigiDollarEnabled() compares against.
+    if (candidate_height < params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR)) return false;
+    return candidate_height >= params.nDDThawDayHeight;
 }
 
 } // namespace DigiDollar

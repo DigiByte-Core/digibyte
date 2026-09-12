@@ -109,6 +109,21 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.digidollar_activation_height = static_cast<int>(*digidollar_height);
         LogPrintf("Setting DigiDollar activation height for regtest to %d (buried deployment)\n", *digidollar_height);
     }
+
+    // Thaw Day height for regtest: the one height at which every consensus
+    // change of the DigiDollar Thaw Day release takes effect. Independent of
+    // -digidollaractivationheight (it may lie before, at, or after DigiDollar
+    // activation; DigiDollar::IsThawDayActive handles the order). Parsed
+    // strictly: anything that is not a whole number in [0, int max) is a
+    // startup error rather than a silent zero.
+    if (const auto thaw_day_height = args.GetArg("-ddthawdayheight")) {
+        int32_t height;
+        if (!ParseInt32(*thaw_day_height, &height) || height < 0 || height >= std::numeric_limits<int>::max()) {
+            throw std::runtime_error(strprintf("Invalid height value (%s) for -ddthawdayheight: expected a whole number from 0 up to, but not including, %d.", *thaw_day_height, std::numeric_limits<int>::max()));
+        }
+        options.dd_thaw_day_height = int{height};
+        LogPrintf("Setting DigiDollar Thaw Day height for regtest to %d\n", height);
+    }
 }
 
 static std::unique_ptr<const CChainParams> globalChainParams;
@@ -120,6 +135,15 @@ const CChainParams &Params() {
 
 std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
 {
+    // The Thaw Day height of a public network is fixed in the release and
+    // cannot be moved from the command line or the config file; only regtest
+    // accepts the knob. Refusing to start is safer than quietly ignoring the
+    // option, which could leave an operator believing a different height is
+    // in force.
+    if (chain != ChainType::REGTEST && args.IsArgSet("-ddthawdayheight")) {
+        throw std::runtime_error(strprintf("-ddthawdayheight is only accepted on regtest; the Thaw Day height of the %s network is fixed in the release.", ChainTypeToString(chain)));
+    }
+
     switch (chain) {
     case ChainType::MAIN:
         return CChainParams::Main();
