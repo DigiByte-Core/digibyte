@@ -4,9 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """senddigidollar and redeemdigidollar reject amounts above $100,000 at the RPC boundary.
 
-The DigiDollar amount parser reads ``10000`` as 10,000 cents ($100.00) and
-``10000.00`` as $10,000.00, so a habitual decimal point asks for 100x the
-intended amount. ``sendmanydigidollar`` already refuses a per-recipient amount
+The DigiDollar amount parser reads ``10000`` as 10,000 cents ($100.00) and,
+with ``amount_unit="dollars"``, ``10000.00`` as $10,000.00 (a decimal without
+a unit is refused, see digidollar_rpc_amount_units.py), so a habitual decimal
+point can still ask for 100x the intended amount when the unit is given.
+``sendmanydigidollar`` already refuses a per-recipient amount
 above 10,000,000 cents ($100,000) before touching the wallet; ``senddigidollar``
 and ``redeemdigidollar`` did not, so an over-cap request reached the wallet's
 balance query, coin selection, or position lookup first and surfaced as a
@@ -14,7 +16,7 @@ misleading later error.
 
 This test asserts, for both RPCs:
 
-* 10,000,001 cents (integer form and ``"100000.01"`` decimal-dollar form) is
+* 10,000,001 cents (integer form and ``"100000.01"`` with ``amount_unit="dollars"``) is
   rejected with the cap error, error code -8 (RPC_INVALID_PARAMETER), and no
   wallet state changes: DD balance, DD history, DD UTXOs and the mempool are
   all unchanged.
@@ -93,16 +95,16 @@ class DigiDollarRPCAmountCapTest(DigiByteTestFramework):
         self.log.info("senddigidollar: 10,000,001 cents is rejected at the boundary with no wallet side effects")
         before = self.dd_state(node0)
         assert_raises_rpc_error(-8, SEND_CAP_MESSAGE, node0.senddigidollar, recv_addr, CAP_CENTS + 1)
-        assert_raises_rpc_error(-8, SEND_CAP_MESSAGE, node0.senddigidollar, recv_addr, "100000.01")
+        assert_raises_rpc_error(-8, SEND_CAP_MESSAGE, node0.senddigidollar, address=recv_addr, amount="100000.01", amount_unit="dollars")
         # A wildly over-cap amount (the 100x typo the issue describes) is caught the same way.
-        assert_raises_rpc_error(-8, SEND_CAP_MESSAGE, node0.senddigidollar, recv_addr, "10000000.00")
+        assert_raises_rpc_error(-8, SEND_CAP_MESSAGE, node0.senddigidollar, address=recv_addr, amount="10000000.00", amount_unit="dollars")
         assert_equal(self.dd_state(node0), before)
 
         self.log.info("senddigidollar: exactly 10,000,000 cents passes the cap and fails on balance instead")
         # Regtest cannot hold $100,000 of DD, so the request must get past the cap
         # and reach the ordinary balance check (-6, RPC_WALLET_INSUFFICIENT_FUNDS).
         assert_raises_rpc_error(-6, "Insufficient DD balance", node0.senddigidollar, recv_addr, CAP_CENTS)
-        assert_raises_rpc_error(-6, "Insufficient DD balance", node0.senddigidollar, recv_addr, "100000.00")
+        assert_raises_rpc_error(-6, "Insufficient DD balance", node0.senddigidollar, address=recv_addr, amount="100000.00", amount_unit="dollars")
         assert_equal(self.dd_state(node0), before)
 
         self.log.info("senddigidollar: an ordinary send still succeeds with the cap in place")
@@ -120,8 +122,8 @@ class DigiDollarRPCAmountCapTest(DigiByteTestFramework):
         # before the wallet is consulted at all.
         assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, UNKNOWN_POSITION_ID, CAP_CENTS + 1)
         assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, position_a, CAP_CENTS + 1)
-        assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, position_a, "100000.01")
-        assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, position_a, "1000000.00")
+        assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, position_id=position_a, dd_amount="100000.01", amount_unit="dollars")
+        assert_raises_rpc_error(-8, REDEEM_CAP_MESSAGE, node0.redeemdigidollar, position_id=position_a, dd_amount="1000000.00", amount_unit="dollars")
         assert_equal(self.dd_state(node0), before)
 
         self.log.info("redeemdigidollar: exactly 10,000,000 cents passes the cap and reaches the position logic")

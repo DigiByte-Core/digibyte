@@ -1402,7 +1402,12 @@ bool CWallet::AbandonTransaction(const uint256& hashTx)
     RecursiveUpdateTxState(hashTx, try_updating_state);
 
     if (m_dd_wallet) {
-        const size_t dd_utxos = m_dd_wallet->ScanForDDUTXOs();
+        // The wallet lock is held for the whole of this function, so only the
+        // wallet-local rebuild runs here. The check that asks the chain which
+        // collateral coins still exist must not run under a wallet lock; the
+        // rebuild records that it is owed and the wallet runs it when the
+        // chain tip next moves.
+        const size_t dd_utxos = m_dd_wallet->RebuildDDUTXOs();
         WalletLogPrintf("DigiDollar: Rebuilt DD UTXOs after abandoning %s - %d tracked\n",
                         hashTx.ToString(), dd_utxos);
     }
@@ -1651,6 +1656,15 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
         // NOTE: We no longer call UpdateDDConfirmations() on every block!
         // Confirmations are calculated on-demand when GetDDTransactionHistory() is called.
         // This avoids O(n) database writes per block during sync.
+
+        // Every new block moves the height that decides whether an unconfirmed
+        // mint can still be included. Give up attempts that missed their lock
+        // window so their DGB inputs and coin locks do not stay reserved.
+        const size_t released = m_dd_wallet->ReconcileExpiredMintAttempts();
+        if (released > 0) {
+            WalletLogPrintf("DigiDollar: Released %zu mint attempt(s) that can no longer confirm at height %d\n",
+                            released, block.height);
+        }
     }
 }
 
@@ -1728,7 +1742,12 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
     }
 
     if (dd_wallet) {
-        const size_t dd_utxos = dd_wallet->ScanForDDUTXOs();
+        // The wallet lock is held for the whole of a block disconnect, so only
+        // the wallet-local rebuild runs here. The check that asks the chain
+        // which collateral coins still exist must not run under a wallet lock;
+        // the rebuild records that it is owed and the wallet runs it when the
+        // chain tip next moves, which happens as soon as the reorg finishes.
+        const size_t dd_utxos = dd_wallet->RebuildDDUTXOs();
         WalletLogPrintf("DigiDollar: Rebuilt DD UTXOs after block disconnect at height %d - %d tracked\n",
                         block.height, dd_utxos);
     }
@@ -2181,26 +2200,30 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
         WalletLogPrintf("Rescan completed in %15dms\n", Ticks<std::chrono::milliseconds>(reserver.now() - start_time));
     }
 
-    // BUG FIX: Validate DigiDollar position states after rescans.
+    // A rescan changes which DigiDollar positions look live, so they have to be
+    // checked against the coins the chain actually has. That check asks the
+    // chain which collateral coins still exist, and the chain must not be asked
+    // that while a wallet lock is held: a rescan run while the wallet is being
+    // attached to the chain holds the wallet lock for the whole rescan. So the
+    // check is recorded as owed here and runs at the first moment with no wallet
+    // lock held. At startup that is postInitProcess, a few steps later.
+    // Otherwise it is the next chain tip update, and in any case every command
+    // and wallet screen that reports positions checks them itself first.
     //
-    // ScanForDDUTXOs() -> ValidatePositionStates() cross-checks every active position
-    // against the actual UTXO set. If a collateral output was spent (redeemed), the
-    // position is marked is_active=false. This is critical for wallet restore via
-    // importdescriptors where ProcessDDTxForRescan may miss REDEEM transactions
-    // (e.g., full redemptions with no OP_RETURN, or blocks skipped by the fast filter).
-    //
-    // Previously this only ran at wallet startup (postInitProcess), so importdescriptors
-    // and rescanblockchain never got this validation — causing Bug #8 where restored
-    // wallets show active "Redeem" buttons for already-redeemed positions.
+    // The check matters for a wallet restored with importdescriptors, where the
+    // rescan can miss a redemption (a full redemption has no OP_RETURN, and the
+    // fast filter can skip blocks) and leave a position looking live when its
+    // collateral is long gone. That is what used to leave a working Redeem
+    // button on a position that had already been redeemed.
     if (result.status == ScanResult::SUCCESS && m_dd_wallet) {
         if (max_height) {
-            WalletLogPrintf("DigiDollar: Running bounded post-rescan position reconciliation...\n");
-            const size_t corrected = m_dd_wallet->ReconcilePositionStates();
-            WalletLogPrintf("DigiDollar: Bounded post-rescan reconciliation complete - %d position(s) corrected\n", corrected);
+            // A bounded rescan covered only part of the chain, so the recorded
+            // positions need the chain check rather than a fresh rebuild.
+            m_dd_wallet->RequestPositionStateCheck();
+            WalletLogPrintf("DigiDollar: bounded rescan finished; position check against the chain is owed\n");
         } else {
-            WalletLogPrintf("DigiDollar: Running post-rescan position validation...\n");
-            size_t dd_utxo_count = m_dd_wallet->ScanForDDUTXOs();
-            WalletLogPrintf("DigiDollar: Post-rescan validation complete - %d DD UTXOs\n", dd_utxo_count);
+            const size_t dd_utxos = m_dd_wallet->RebuildDDUTXOs();
+            WalletLogPrintf("DigiDollar: rebuilt DigiDollar state after rescan - %d DD UTXOs; position check against the chain is owed\n", dd_utxos);
         }
     }
 
@@ -3691,6 +3714,12 @@ void CWallet::postInitProcess()
         LogPrintf("Wallet: Scanning for DigiDollar UTXOs...\n");
         size_t dd_utxo_count = m_dd_wallet->ScanForDDUTXOs();
         LogPrintf("Wallet: DigiDollar scan complete - Found %d DD UTXOs\n", dd_utxo_count);
+        // A mint may have missed its lock window while this wallet was not
+        // running; release such attempts before the wallet is used.
+        const size_t released = m_dd_wallet->ReconcileExpiredMintAttempts();
+        if (released > 0) {
+            LogPrintf("Wallet: Released %zu DigiDollar mint attempt(s) that can no longer confirm\n", released);
+        }
     }
 }
 

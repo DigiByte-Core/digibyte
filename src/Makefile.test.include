@@ -209,6 +209,7 @@ DIGIBYTE_TESTS =\
   test/digidollar_structures_tests.cpp \
   test/digidollar_transaction_tests.cpp \
   test/digidollar_transfer_tests.cpp \
+  test/digidollar_amount_tests.cpp \
   test/digidollar_change_tests.cpp \
   test/digidollar_txbuilder_tests.cpp \
   test/digidollar_validation_tests.cpp \
@@ -343,6 +344,7 @@ DIGIBYTE_TESTS += \
   wallet/test/walletload_tests.cpp \
   wallet/test/group_outputs_tests.cpp \
   wallet/test/digidollar_persistence_wallet_tests.cpp \
+  wallet/test/digidollar_wallet_lock_safety_tests.cpp \
   wallet/test/digidollar_wallet_security_tests.cpp \
   wallet/test/rh59_coincontrol_dd_lock_bypass_tests.cpp \
   wallet/test/digidollar_wave16_persistence_tests.cpp \
@@ -455,6 +457,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/fuzz_odocrypt_cipher.cpp \
  test/fuzz/fuzz_odocrypt_keccak.cpp \
  test/fuzz/fuzz_odocrypt_keygen.cpp \
+ test/fuzz/digidollar_amount.cpp \
  test/fuzz/digidollar_consensus.cpp \
  test/fuzz/digidollar_integer_math.cpp \
  test/fuzz/digidollar_logic.cpp \

@@ -17,6 +17,7 @@
 #include <array>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -42,6 +43,7 @@ struct DDTransaction {
     int lock_tier;          // Lock tier for mints (0-9), -1 for non-mint transactions
     bool in_mempool;        // Transient display state, not serialized
     bool is_local;          // Transient display state for unconfirmed, unrelayed wallet txs
+    bool is_expired_mint;   // Transient: an unconfirmed mint whose lock window has passed
 
     DDTransaction();
 
@@ -204,17 +206,24 @@ private:
 
     bool m_position_state_validation_pending GUARDED_BY(cs_dd_wallet){false};
 
-    /** Null-safe dual lock: acquires cs_wallet (if m_wallet != nullptr) then cs_dd_wallet. */
-    [[nodiscard]] std::pair<std::unique_lock<RecursiveMutex>,
-                            std::unique_lock<RecursiveMutex>> LockDDWallet() const
+    /**
+     * Take the main wallet lock, when there is a wallet, and then the
+     * DigiDollar one, always in that order.
+     *
+     * The two locks are taken the same way the LOCK macro takes a lock, so a
+     * build with lock checking turned on knows they are held. Without that,
+     * every main-wallet function called from here stops the program with
+     * "lock cs_wallet not held", and nothing notices a thread taking the two
+     * locks the other way round, which is how a node hangs.
+     */
+    [[nodiscard]] std::pair<UniqueLock<RecursiveMutex>,
+                            UniqueLock<RecursiveMutex>> LockDDWallet() const
     {
-        if (m_wallet) {
-            std::unique_lock<RecursiveMutex> wl(m_wallet->cs_wallet);
-            std::unique_lock<RecursiveMutex> dl(cs_dd_wallet);
-            return {std::move(wl), std::move(dl)};
-        }
-        return {std::unique_lock<RecursiveMutex>(),
-                std::unique_lock<RecursiveMutex>(cs_dd_wallet)};
+        return std::pair<UniqueLock<RecursiveMutex>, UniqueLock<RecursiveMutex>>(
+            std::piecewise_construct,
+            std::forward_as_tuple(m_wallet ? &m_wallet->cs_wallet : nullptr,
+                                  "cs_wallet", __FILE__, __LINE__),
+            std::forward_as_tuple(&cs_dd_wallet, "cs_dd_wallet", __FILE__, __LINE__));
     }
 
 public:
@@ -244,10 +253,13 @@ public:
      * Store DD owner key for a time-lock position
      * @param dd_timelock_id The time-lock position ID (mint tx hash)
      * @param key The owner private key
+     * @return true only when the key is cached in memory and written to the
+     *         wallet database. On failure nothing is cached, so a caller that
+     *         must not proceed without a persisted key (a mint about to be
+     *         broadcast) can stop.
      * @note If wallet is encrypted, key is encrypted before storage.
-     *       Persists the key to the wallet database for survival across restarts.
      */
-    void StoreOwnerKey(const uint256& dd_timelock_id, const CKey& key);
+    bool StoreOwnerKey(const uint256& dd_timelock_id, const CKey& key);
 
     /**
      * Load DD owner keys from wallet database
@@ -266,6 +278,31 @@ public:
      */
     bool GetOwnerKey(const uint256& dd_timelock_id, CKey& key) const;
 
+    /** Outcome of looking for the owner key of a vault. */
+    enum class OwnerKeyRecovery {
+        Found,               // the side table already had it
+        Recovered,           // found among the wallet's own keys, verified against the vault, and saved
+        PositionNotFound,    // no position record for this id
+        MintTxMissing,       // the mint transaction is not in this wallet
+        WalletLocked,        // the wallet is encrypted and locked
+        NoPrivateKeys,       // watch-only wallet
+        NoMatchingKey,       // none of this wallet's keys is the vault owner
+        DatabaseWriteFailed  // the key was found but could not be saved
+    };
+
+    /**
+     * Find the owner key of a minted position when the wallet's own record of
+     * it has gone missing.
+     *
+     * The mint built the DigiDollar token output from the owner's public key
+     * by a fixed calculation. Redoing that calculation on a candidate key and
+     * comparing the result to the output says whether that key owns this
+     * collateral. Candidates are the wallet's own keys, including the ones it
+     * keeps ready beyond the last address it has used. A key that matches is
+     * saved before it is returned. A new key is never made up.
+     */
+    OwnerKeyRecovery RecoverOwnerKey(const uint256& dd_timelock_id, CKey& key);
+
     // ====================================================================
     // DD ADDRESS KEY MANAGEMENT (for received DD tokens)
     // ====================================================================
@@ -275,10 +312,10 @@ public:
      * Called when getdigidollaraddress generates a new address
      * @param output_key The XOnlyPubKey (output key) from the P2TR address
      * @param key The private key that can sign for this address
+     * @return true only when the key is cached and written to the wallet database
      * @note If wallet is encrypted, key is encrypted before storage.
-     *       Persists the key to the wallet database for survival across restarts.
      */
-    void StoreAddressKey(const XOnlyPubKey& output_key, const CKey& key);
+    bool StoreAddressKey(const XOnlyPubKey& output_key, const CKey& key);
 
     /**
      * Load DD address keys from wallet database
@@ -385,11 +422,35 @@ public:
     CAmount GetPendingDDBalance() const;
 
     /**
-     * Scan wallet UTXOs for DigiDollar outputs and populate dd_balances map
+     * Scan wallet UTXOs for DigiDollar outputs and populate dd_balances map,
+     * then check the recorded positions against the chain.
      * Should be called ONLY at wallet startup, not on every block!
+     *
+     * Must be called with no wallet lock held, because the position check asks
+     * the chain which collateral coins still exist. Callers that already hold
+     * the wallet lock call RebuildDDUTXOs() instead.
      * @return Number of DD UTXOs found
      */
     size_t ScanForDDUTXOs();
+
+    /**
+     * Rebuild the DigiDollar UTXO map and balances from the wallet's own
+     * transactions, and nothing more. This asks the chain nothing, so it is
+     * safe to call while the wallet lock is held. It records that the position
+     * check is still owed; the wallet runs that check when the chain tip next
+     * moves, at a point where no wallet lock is held.
+     * @return Number of DD UTXOs found
+     */
+    size_t RebuildDDUTXOs();
+
+    /**
+     * Note that the recorded positions need checking against the chain,
+     * without doing the check here. Safe to call while the wallet lock is
+     * held. The wallet runs the check when the chain tip next moves, and the
+     * commands and wallet screens that report positions check them before
+     * they answer.
+     */
+    void RequestPositionStateCheck();
 
     /**
      * Post-rescan validation: check every active position against the UTXO set.
@@ -400,7 +461,9 @@ public:
      * ProcessDDTxForRescan fails to detect REDEEM transactions (e.g., custom
      * Taproot MAST scripts not recognized as "ours" during rescan).
      *
-     * Called automatically at the end of ScanForDDUTXOs().
+     * Called at the end of ScanForDDUTXOs(). Must be called with no wallet
+     * lock held: it asks the chain which collateral coins still exist, and the
+     * chain takes its own lock before it calls back into the wallet.
      * @return Number of positions corrected (marked inactive)
      */
     size_t ValidatePositionStates();
@@ -410,6 +473,8 @@ public:
      *
      * This lightweight wrapper is safe for RPC/Qt/read paths that need a
      * current position view without forcing a full wallet DD UTXO rescan.
+     * Must be called with no wallet lock held, for the same reason as
+     * ValidatePositionStates().
      * @return Number of positions corrected
      */
     size_t ReconcilePositionStates();
@@ -490,10 +555,69 @@ public:
     bool IsDDTokenUnspent(const uint256& dd_timelock_id) const;
 
     /**
-     * Add a collateral position to the wallet
+     * Add a collateral position to the wallet: the position record, its DD
+     * token output and a mint history row.
      * @param position The position to add
+     * @return true only when every record was written to the wallet database
      */
-    void AddCollateralPosition(const WalletCollateralPosition& position);
+    bool AddCollateralPosition(const WalletCollateralPosition& position);
+
+    // ====================================================================
+    // MINT ATTEMPT LIFECYCLE
+    // ====================================================================
+
+    /**
+     * Save everything needed to recover a mint before it is broadcast: the
+     * owner key, the position record, the DD token output and the history
+     * row. The transaction is not in the wallet yet, so the output indexes
+     * are read from the transaction itself.
+     * @return true only when every write succeeded; error explains a failure
+     */
+    bool RecordPendingMint(const CTransaction& mint_tx,
+                           const WalletCollateralPosition& position,
+                           const CKey& owner_key,
+                           std::string& error);
+
+    /** What the wallet currently knows about the transaction of a mint attempt. */
+    enum class MintAttemptState {
+        NotInWallet,   // no wallet transaction for this position id
+        Confirmed,     // the mint is in the active chain
+        InMempool,     // unconfirmed, but this node's mempool still holds it
+        Local,         // unconfirmed, not in the mempool, lock window still open
+        Expired,       // unconfirmed, not in the mempool, lock window has passed
+        Abandoned,     // marked abandoned in the wallet while the window is still open
+        Conflicted     // a conflicting transaction confirmed instead
+    };
+
+    MintAttemptState GetMintAttemptState(const uint256& dd_timelock_id) const;
+
+    /**
+     * Whether a block at next_block_height could still include a mint with
+     * this position's tier and unlock height. This is the same rule the chain
+     * applies: when a block includes a mint, the lock still left to run must
+     * be at least the full length of the tier the mint claims.
+     */
+    static bool MintLockWindowHasPassed(const WalletCollateralPosition& position, int next_block_height);
+
+    /**
+     * Give up on a mint attempt that can no longer confirm here and release
+     * only what this attempt reserved: the wallet transaction is abandoned so
+     * its DGB inputs are spendable again, the collateral and DD token coin
+     * locks are removed, the DD token output is no longer tracked, and the
+     * position is marked inactive. The owner key, the transaction and the
+     * position record stay, so a reorg or a late confirmation can bring the
+     * vault back. Refuses (returns false) while the mint is confirmed or still
+     * in the mempool.
+     */
+    bool ReleaseMintAttempt(const uint256& dd_timelock_id, std::string& error);
+
+    /**
+     * Release every active position whose mint attempt is expired, abandoned
+     * or conflicted on the current chain. Called when a block connects and
+     * when position state is reconciled for RPC readers.
+     * @return number of attempts released
+     */
+    size_t ReconcileExpiredMintAttempts();
 
     // ====================================================================
     // PHASE 5 TASK 5.3: TRANSACTION CREATION FUNCTIONS
@@ -936,6 +1060,18 @@ private:
      * Recalculate totals from loaded data
      */
     void RecalculateTotals();
+
+    /**
+     * Write the position record, DD token output and mint history row. When
+     * the mint transaction is not in the wallet yet, mint_tx supplies the
+     * output indexes. Every write is checked.
+     */
+    bool RecordCollateralPosition(const WalletCollateralPosition& position,
+                                  const CTransaction* mint_tx,
+                                  std::string& error);
+
+    /** Recompute the cached locked-collateral total from active positions. */
+    void RefreshLockedCollateral();
 
 public:
     /**

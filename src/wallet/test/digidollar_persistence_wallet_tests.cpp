@@ -10,6 +10,9 @@
 #include <wallet/test/wallet_test_fixture.h>
 #include <base58.h>
 #include <hash.h>
+#include <key.h>
+#include <random.h>
+#include <script/script.h>
 #include <util/time.h>
 #include <util/strencodings.h>
 #include <streams.h>
@@ -486,6 +489,226 @@ BOOST_AUTO_TEST_CASE(digidollarwallet_persistence_integration_test)
     BOOST_CHECK_EQUAL(positions[0].dd_timelock_id, pos_id);
     BOOST_CHECK_EQUAL(positions[0].dd_minted, 10000);
     BOOST_CHECK_EQUAL(positions[0].dgb_collateral, 500000);
+}
+
+// =============================================================================
+// Mint attempt records: writes report failure, and a released attempt frees
+// only what it reserved while keeping its key and history.
+// =============================================================================
+
+namespace {
+
+/** A transaction shaped like a mint: DD version, one funded P2TR collateral
+ *  output and one zero-value P2TR token output tweaked from owner_key. */
+CTransactionRef MakeMintShapedTx(const CKey& owner_key)
+{
+    CKey collateral_key;
+    collateral_key.MakeNewKey(true);
+    const XOnlyPubKey collateral_xonly(collateral_key.GetPubKey());
+    const XOnlyPubKey owner_xonly(owner_key.GetPubKey());
+    const auto tweaked = owner_xonly.CreateTapTweak(nullptr);
+    BOOST_REQUIRE(tweaked.has_value());
+
+    CMutableTransaction mtx;
+    mtx.SetDigiDollarType(::DD_TX_MINT);
+    uint256 prev;
+    GetRandBytes(prev);
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(prev, 0);
+    mtx.vout.resize(2);
+    mtx.vout[0].nValue = 5 * COIN;
+    mtx.vout[0].scriptPubKey << OP_1 << ToByteVector(collateral_xonly);
+    mtx.vout[1].nValue = 0;
+    mtx.vout[1].scriptPubKey << OP_1 << ToByteVector(tweaked->first);
+    return MakeTransactionRef(std::move(mtx));
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(mint_records_are_not_cached_when_the_database_refuses_them)
+{
+    // A position or key that only exists in memory looks fine until the next
+    // restart and then vanishes; a refused write must leave no trace so the
+    // caller (a mint about to be broadcast) can stop.
+    DigiDollarWallet dd_wallet(&m_wallet);
+    const uint256 pos_id = uint256S("0x1111111111111111111111111111111111111111111111111111111111111111");
+    WalletCollateralPosition pos(pos_id, 10000, 500000, 0, 1000);
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+
+    GetMockableDatabase(m_wallet).m_pass = false;
+
+    BOOST_CHECK(!dd_wallet.WriteDDTimeLock(pos));
+    BOOST_CHECK_EQUAL(dd_wallet.GetPositionCount(), 0);
+    BOOST_CHECK_EQUAL(dd_wallet.GetLockedCollateral(), 0);
+
+    dd_wallet.StoreOwnerKey(pos_id, owner_key);
+    CKey reloaded;
+    BOOST_CHECK(!dd_wallet.GetOwnerKey(pos_id, reloaded));
+
+    dd_wallet.AddCollateralPosition(pos);
+    BOOST_CHECK_EQUAL(dd_wallet.GetPositionCount(), 0);
+    BOOST_CHECK(!dd_wallet.HasDDUTXO(COutPoint(pos_id, 1)));
+
+    // Once the database accepts writes again everything is saved and visible.
+    GetMockableDatabase(m_wallet).m_pass = true;
+    BOOST_CHECK(dd_wallet.WriteDDTimeLock(pos));
+    BOOST_CHECK_EQUAL(dd_wallet.GetPositionCount(), 1);
+    BOOST_CHECK(dd_wallet.StoreOwnerKey(pos_id, owner_key));
+    BOOST_CHECK(dd_wallet.GetOwnerKey(pos_id, reloaded));
+    BOOST_CHECK(reloaded.GetPubKey() == owner_key.GetPubKey());
+
+    DigiDollarWallet fresh(&m_wallet);
+    BOOST_CHECK_EQUAL(fresh.GetPositionCount(), 1);
+    BOOST_CHECK(fresh.GetOwnerKey(pos_id, reloaded));
+}
+
+BOOST_AUTO_TEST_CASE(pending_mint_record_reports_failure_and_release_keeps_recovery_data)
+{
+    DigiDollarWallet dd_wallet(&m_wallet);
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    const CTransactionRef mint_tx = MakeMintShapedTx(owner_key);
+    const uint256 pos_id = mint_tx->GetHash();
+    const COutPoint collateral(pos_id, 0);
+    const COutPoint token(pos_id, 1);
+    WalletCollateralPosition pos(pos_id, 10000, 5 * COIN, 0, 1000);
+    pos.owner_keyid = owner_key.GetPubKey().GetID();
+    std::string error;
+
+    // A refused database leaves nothing behind and says so.
+    GetMockableDatabase(m_wallet).m_pass = false;
+    BOOST_CHECK(!dd_wallet.RecordPendingMint(*mint_tx, pos, owner_key, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK_EQUAL(dd_wallet.GetPositionCount(), 0);
+    CKey reloaded;
+    BOOST_CHECK(!dd_wallet.GetOwnerKey(pos_id, reloaded));
+    GetMockableDatabase(m_wallet).m_pass = true;
+
+    // A working database records key, position, token output and history
+    // before the transaction exists anywhere in the wallet.
+    BOOST_REQUIRE(dd_wallet.RecordPendingMint(*mint_tx, pos, owner_key, error));
+    BOOST_CHECK(dd_wallet.GetOwnerKey(pos_id, reloaded));
+    BOOST_CHECK_EQUAL(dd_wallet.GetPositionCount(), 1);
+    BOOST_CHECK(dd_wallet.HasDDUTXO(token));
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::NotInWallet);
+
+    // The transaction is committed locally and, as a restart would, its
+    // collateral and token outputs get locked. The wallet is told it is at
+    // height 500, which a wallet on a running node always knows; tier 0 locks
+    // 240 blocks and the unlock height is 1000, so the window is still open.
+    uint256 chain_tip;
+    GetRandBytes(chain_tip);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(500, chain_tip);
+        BOOST_REQUIRE(m_wallet.AddToWallet(mint_tx, TxStateInactive{}));
+        BOOST_CHECK(m_wallet.LockCoin(collateral));
+        BOOST_CHECK(m_wallet.LockCoin(token));
+    }
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Local);
+
+    // Releasing the attempt frees the reservations but keeps the key, the
+    // transaction and the (now inactive) position record.
+    BOOST_CHECK(dd_wallet.ReleaseMintAttempt(pos_id, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsLockedCoin(collateral));
+        BOOST_CHECK(!m_wallet.IsLockedCoin(token));
+        const CWalletTx* wtx = m_wallet.GetWalletTx(pos_id);
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(wtx->isAbandoned());
+    }
+    BOOST_CHECK(!dd_wallet.HasDDUTXO(token));
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDTimeLocks(/*active_only=*/true).size(), 0);
+    const auto all = dd_wallet.GetDDTimeLocks(/*active_only=*/false);
+    BOOST_REQUIRE_EQUAL(all.size(), 1);
+    BOOST_CHECK(!all[0].is_active);
+    BOOST_CHECK_EQUAL(dd_wallet.GetLockedCollateral(), 0);
+    BOOST_CHECK(dd_wallet.GetOwnerKey(pos_id, reloaded));
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Abandoned);
+
+    // The released state is what a reload sees.
+    DigiDollarWallet fresh(&m_wallet);
+    const auto reloaded_positions = fresh.GetDDTimeLocks(/*active_only=*/false);
+    BOOST_REQUIRE_EQUAL(reloaded_positions.size(), 1);
+    BOOST_CHECK(!reloaded_positions[0].is_active);
+    BOOST_CHECK(!fresh.HasDDUTXO(token));
+    BOOST_CHECK(fresh.GetOwnerKey(pos_id, reloaded));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsLockedCoin(collateral));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(mint_attempt_state_follows_the_lock_window)
+{
+    DigiDollarWallet dd_wallet(&m_wallet);
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    const CTransactionRef mint_tx = MakeMintShapedTx(owner_key);
+    const uint256 pos_id = mint_tx->GetHash();
+    // Tier 0 locks 240 blocks; with unlock height 1000 a block may include
+    // the mint only while at least 240 blocks remain, i.e. up to height 760.
+    WalletCollateralPosition pos(pos_id, 10000, 5 * COIN, 0, 1000);
+    std::string error;
+    BOOST_REQUIRE(dd_wallet.RecordPendingMint(*mint_tx, pos, owner_key, error));
+
+    BOOST_CHECK(!DigiDollarWallet::MintLockWindowHasPassed(pos, 760));
+    BOOST_CHECK(DigiDollarWallet::MintLockWindowHasPassed(pos, 761));
+
+    uint256 block_hash;
+    GetRandBytes(block_hash);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(mint_tx, TxStateInactive{}));
+        m_wallet.SetLastBlockProcessed(759, block_hash);
+    }
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Local);
+    BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 0);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDTimeLocks(/*active_only=*/true).size(), 1);
+
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(760, block_hash);
+    }
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Expired);
+    BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 1);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDTimeLocks(/*active_only=*/true).size(), 0);
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Expired);
+    {
+        LOCK(m_wallet.cs_wallet);
+        const CWalletTx* wtx = m_wallet.GetWalletTx(pos_id);
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(wtx->isAbandoned());
+    }
+    // Nothing more to release on a second pass.
+    BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 0);
+
+    // A shorter chain reopens the window: the attempt stays abandoned, but it
+    // is no longer reported as expired.
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(700, block_hash);
+    }
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Abandoned);
+
+    // A confirmed mint is never released.
+    CKey other_owner;
+    other_owner.MakeNewKey(true);
+    const CTransactionRef confirmed_tx = MakeMintShapedTx(other_owner);
+    const uint256 confirmed_id = confirmed_tx->GetHash();
+    WalletCollateralPosition confirmed_pos(confirmed_id, 10000, 5 * COIN, 0, 1000);
+    BOOST_REQUIRE(dd_wallet.RecordPendingMint(*confirmed_tx, confirmed_pos, other_owner, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(confirmed_tx, TxStateConfirmed{block_hash, 650, /*index=*/1}));
+    }
+    BOOST_CHECK(dd_wallet.GetMintAttemptState(confirmed_id) == DigiDollarWallet::MintAttemptState::Confirmed);
+    BOOST_CHECK(!dd_wallet.ReleaseMintAttempt(confirmed_id, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 0);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDTimeLocks(/*active_only=*/true).size(), 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

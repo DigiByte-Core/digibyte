@@ -193,11 +193,43 @@ The mint transaction creates:
 
 Sending DD is straightforward — it works like sending any UTXO.
 
-For automated integrations, pass integer cents without a decimal point. `senddigidollar`, `sendmanydigidollar`, and `redeemdigidollar` also accept decimal-dollar input for CLI compatibility: `5000` means $50.00, but `5000.00` means $5,000.00.
+### Amount units: cents by default, `amount_unit` to say otherwise
+
+DigiDollar amounts are integer **cents** inside the node. `senddigidollar`,
+`sendmanydigidollar`, `redeemdigidollar` and `getredemptioninfo` take an
+optional trailing `amount_unit` argument, `"cents"` or `"dollars"`, and follow
+one contract (`src/digidollar/amount.cpp`):
+
+| Request | Result |
+|---------|--------|
+| `5000` or `"5000"`, no unit | 5,000 cents = $50.00 (unchanged for existing callers) |
+| `"50.00"` or `50.5`, no unit | **rejected**, error `-8`: `ambiguous amount: pass amount_unit=cents or amount_unit=dollars ...`; nothing is sent |
+| `"50.00"`, `amount_unit="dollars"` | 5,000 cents; at most two decimals (`"12.345"` is rejected) |
+| `5000`, `amount_unit="cents"` | 5,000 cents; must be an integer (`"50.00"` with `cents` is rejected) |
+| `"1e3"`, `"+5"`, `" 5"`, `"5,000"`, `-5` | rejected: only a plain decimal number (digits, optional `.digits`) is accepted |
+| more than 10,000,000 cents ($100,000) | rejected at the RPC boundary, under either unit |
+
+Before v9.26.6 a decimal point silently meant dollars, so `5000.00` sent
+$5,000.00 when the caller meant 5,000 cents. That guess is gone: pass integer
+cents, or say `amount_unit="dollars"` explicitly. Named arguments work with
+`digibyte-cli -named` and JSON-RPC named parameters.
+
+The `min_amount` filter of `listdigidollarpositions` and the `min_balance`
+filter of `listdigidollaraddresses` read their amounts the same way and take
+the same `amount_unit`. One other change there: a negative `min_amount` or
+`min_balance` used to be accepted and then ignored, so the call returned
+everything and the caller never learned its filter had been dropped. It is now
+rejected like any other negative amount.
 
 ```bash
 digibyte-cli senddigidollar "DDrecipientAddress..." 5000
-# Sends $50.00 worth of DD
+# Sends $50.00 worth of DD (integer cents, no unit needed)
+
+digibyte-cli -named senddigidollar address="DDrecipientAddress..." amount="50.00" amount_unit="dollars"
+# Also $50.00; the unit makes the decimal unambiguous
+
+digibyte-cli senddigidollar "DDrecipientAddress..." 50.00
+# error code -8: ambiguous amount: pass amount_unit=cents or amount_unit=dollars ...
 ```
 
 **With optional comment:**
@@ -227,6 +259,44 @@ digibyte-cli senddigidollar "DDrecipientAddress..." 5000 "Payment for services"
 - Transfers are **confirmed-only**: a DD UTXO must have at least one confirmation before it can be spent in a subsequent transfer or redeem. Consensus refuses to resolve DD amounts from `MEMPOOL_HEIGHT` inputs for transfer/redeem, and the wallet no longer chains unconfirmed DigiDollar outputs (commit `0b4959f563`). Plan throughput around the 15-second block time, or batch with `sendmanydigidollar`.
 - Advanced wallet coin control can pass `selected_inputs` matching `listdigidollarunspent` rows. The deprecated `fee_rate` argument on send/redeem RPCs is ignored by the fixed DD fee policy.
 
+### Which fee settings DigiDollar transactions actually use
+
+DigiDollar mint, send and redeem do **not** use the wallet's general fee
+settings. None of `-mintxfee`, `-paytxfee`, `-fallbackfee`, `-minrelaytxfee`
+or `estimatesmartfee` is read anywhere in `src/rpc/digidollar.cpp`,
+`src/wallet/digidollarwallet.cpp`, `src/digidollar/txbuilder.cpp` or the Qt
+DigiDollar widgets. Changing them cannot fix or cause a DigiDollar fee
+failure. What the code does use:
+
+| Path | Fee rate | Where |
+|------|----------|-------|
+| `mintdigidollar` | 0.35 DGB/kB (`MIN_DD_FEE_RATE` = 35,000,000 sat/kB); the optional `fee_rate` argument is floored to it | `src/rpc/digidollar.cpp` (`MIN_DD_FEE_RATE`, the `fee_rate` floor) |
+| `senddigidollar`, `sendmanydigidollar`, Qt Send $DD | 0.35 DGB/kB, fixed (`MIN_DD_TRANSFER_FEE_RATE`); the `fee_rate` argument is ignored | `src/wallet/digidollarwallet.cpp` (`TransferDigiDollarMany`, `PreflightDDTransferCapacity`) |
+| `redeemdigidollar`, Qt Redeem (which calls the RPC) | 0.35 DGB/kB, fixed (`MIN_DD_FEE_RATE`); the `fee_rate` argument is ignored | `src/rpc/digidollar.cpp` (`redeemdigidollar`), `src/qt/walletmodel.cpp` (`executeRpc("redeemdigidollar")`) |
+| Qt Mint | requests 500,000 sat/kB, but the builder's floor below applies | `src/qt/walletmodel.cpp` (`params.feeRate = 500000`) |
+
+On top of the rate, every DigiDollar transaction pays at least the absolute
+floor `MIN_DD_TX_FEE` = 0.1 DGB (`src/digidollar/txbuilder.cpp`, applied in
+the mint, transfer and redeem builders and in the redemption fee estimate).
+The size the rate is applied to comes from `EstimateTransactionVSize` in the
+same file, which counts 110 witness bytes per input and adds a 35% safety
+margin, so a one-fee-input redemption is about 400 vB and pays about 0.14 DGB;
+each additional DGB fee coin adds roughly 90 vB, about 0.03 DGB.
+
+The one DigiDollar-related transaction that *does* follow the wallet's
+general fee settings is the automatic DGB consolidation sweep a mint performs
+first when the collateral would need more inputs than one transaction may
+carry: that is an ordinary DGB transaction built by `wallet::CreateTransaction`
+(`src/rpc/digidollar.cpp` and `src/qt/walletmodel.cpp` mint paths), so
+`-paytxfee`, fee estimation, `-fallbackfee` and `-mintxfee` apply to it as to
+any DGB send.
+
+The 0.1 DGB DigiDollar floor happens to equal the wallet's default
+`-mintxfee` of 0.1 DGB/kB, which is why the two were confused in reports of
+failed redemptions; those failures came from the old fixed-size fee-coin
+guess described under "Fee coins for a redemption" in section 9, not from any
+fee setting.
+
 ### Sending to many recipients in one transaction
 
 Use `sendmanydigidollar` to fan out DD to many addresses with a single fee:
@@ -234,9 +304,12 @@ Use `sendmanydigidollar` to fan out DD to many addresses with a single fee:
 ```bash
 digibyte-cli -rpcwallet=hot sendmanydigidollar "" '{"DDaddr1...":1500,"DDaddr2...":2500}'
 # amounts in cents
+
+digibyte-cli -rpcwallet=hot -named sendmanydigidollar dummy="" amounts='{"DDaddr1...":"15.00","DDaddr2...":"25.00"}' amount_unit="dollars"
+# one amount_unit applies to every recipient
 ```
 
-This is the DigiDollar analogue of `sendmany`; the first argument must be the compatibility dummy string `""`. Like `senddigidollar`, it requires confirmed DD inputs and pays the fee in DGB. Large batches are limited by standard OP_RETURN relay size because one amount is committed for every DD output plus possible change; split large withdrawal batches and handle the RPC's "Too many DigiDollar recipients" error.
+This is the DigiDollar analogue of `sendmany`; the first argument must be the compatibility dummy string `""`. Every recipient amount follows the unit contract above, and the $100,000 cap applies per recipient. Like `senddigidollar`, it requires confirmed DD inputs and pays the fee in DGB. Large batches are limited by standard OP_RETURN relay size because one amount is committed for every DD output plus possible change; split large withdrawal batches and handle the RPC's "Too many DigiDollar recipients" error.
 
 ---
 
@@ -357,6 +430,58 @@ key import" step. The rescan reconstructs positions from mint metadata after
 wallet ownership of the zero-value DD token output is proven, then recovers the
 Taproot spending key from the imported descriptors when available.
 
+### If redeeming reports a missing owner key
+
+The owner key of a mint comes from the wallet's own chain of keys. The wallet
+also writes that key down against the position, so redeeming can find it
+straight away. That row can go missing: a database write failed, a restore
+skipped it, or the node stopped at the wrong moment.
+
+When it is missing, `redeemdigidollar` now searches the wallet's own keys for
+the one that matches the DigiDollar token output of the mint. It includes the
+unused addresses the wallet keeps ready beyond the last one it handed out. When
+it finds the key it writes it down again and carries on with the redemption. It
+never makes up a new key: only the key the collateral was locked with can
+release it. The message you get tells you what is needed:
+
+| Error | Meaning | What to do |
+|-------|---------|------------|
+| `DigiDollar redemption requires the wallet to be unlocked ... walletpassphrase` | The wallet is encrypted and locked. | `walletpassphrase "<passphrase>" 600`, then redeem again. |
+| `Private keys are disabled for this wallet` | This is a watch-only wallet. It can show positions but cannot sign. | Redeem from the wallet that holds the private keys. |
+| `This wallet does not hold the mint transaction of this position` | The position record exists but the mint transaction was never scanned into this wallet. | `rescanblockchain <height before the first mint>`, then redeem again. |
+| `No key in this wallet matches the owner of this DigiDollar vault` | None of this wallet's keys locked this collateral. A different wallet or a different seed minted it. | Restore the wallet that minted it **with its private keys** (the wallet file itself, or `importdescriptors` with the private descriptors from `listdescriptors true`), run `rescanblockchain` from a height before the first mint, then redeem from that wallet. |
+| `... could not be written to the wallet database` | The key was found but the wallet file refused the write. | Check free disk space and the wallet file, then try again. |
+
+Restoring with public descriptors alone gives you a wallet that can watch but
+cannot sign. Moving a wallet to a new machine needs the wallet file, or the
+private descriptors, plus a rescan that starts before the first mint.
+
+### Mint attempts that can no longer confirm
+
+A mint names the exact height at which its collateral unlocks. A block can only
+include that mint while the lock still left to run is at least the full length
+of the tier the mint claims. That leaves about 100 blocks after the wallet built
+it. Once the chain is past that, a mint that never confirmed and is in no
+mempool can never be mined.
+
+The wallet now gives such an attempt up by itself. It marks the transaction
+abandoned, so the DGB it spent can be spent again. It removes the coin locks on
+the collateral and token outputs. `listdigidollarpositions false` then shows the
+position as `expired_mint`, and `listdigidollartxs` shows `wallet_state` as
+`expired_mint`. A mint the network refused when it was sent shows as
+`abandoned_mint`. One pushed out by a conflicting transaction shows as
+`conflicted_mint`.
+
+The owner key, the transaction and the position record are all kept. If a reorg
+or a late block does confirm the mint after all, the position becomes active
+again and its outputs are locked again as usual. A mint still sitting in the
+mempool is never treated as expired.
+
+From v9.26.6 `mintdigidollar` writes the owner key and the position record
+**before** it sends the transaction, and every wallet write reports whether it
+worked. If a write fails, the mint is not sent and the RPC returns
+`Mint not broadcast: ...`.
+
 ### Recovering from a lost wallet file
 
 If the wallet file is lost but the BIP39 seed / extended private key is
@@ -397,7 +522,38 @@ Redeeming burns DD tokens and unlocks your DGB collateral. The timelock must hav
 digibyte-cli redeemdigidollar "position_id" 10000
 # position_id = the mint transaction hash
 # amount = DD cents to redeem (must match full vault amount)
+
+# The same, stated in dollars
+digibyte-cli -named redeemdigidollar position_id="position_id" dd_amount="100.00" amount_unit="dollars"
+# "100.00" without amount_unit is rejected as ambiguous (see section 5)
 ```
+
+The amount names the vault principal and must equal it exactly; it is capped at
+$100,000 like a send. During an emergency (ERR) the wallet computes the extra
+DD it must burn from the vault itself, and that computed burn is not limited by
+the cap.
+
+### Fee coins for a redemption
+
+A redemption pays its DGB fee from separate DGB coins in the wallet, never from
+the collateral. The wallet chooses those coins from the projected size of the
+transaction they produce and re-selects, a bounded number of times, when adding
+a coin raises the fee past what the coins cover (`RedeemTxBuilder::EstimateRedemptionFee`
+and `SelectRedemptionFeeInputs`, `src/digidollar/txbuilder.cpp`). A wallet
+whose DGB is split into many small coins therefore redeems normally, using more
+of them. If every coin is so small that it adds more fee than value, the RPC
+fails with `Insufficient DGB fee inputs ... Consolidate small DGB coins into one
+larger coin and retry`; send yourself one larger DGB payment first.
+
+### Where the returned collateral and the leftover DGB go
+
+The returned collateral goes to `redemption_address` when you pass one, and to
+a new address of the redeeming wallet when you do not. The DGB left over after
+the fee always goes to a separate change address of the redeeming wallet. If
+the wallet cannot produce a change address, a redemption that names a
+`redemption_address` now fails with a clear error instead of sending the
+leftover to that address: the address you supply may be an exchange deposit
+address or otherwise not yours, and money sent there does not come back.
 
 ### Two Redemption Paths
 
@@ -475,17 +631,17 @@ Registered in `GetWalletRPCCommands()` at `src/wallet/rpc/wallet.cpp`:
 | Command | Description |
 |---------|-------------|
 | `getdigidollaraddress [label]` | Generate new DD deposit address |
-| `listdigidollaraddresses [include_watchonly] [min_balance] [include_empty]` | List DD addresses; empty generated addresses are hidden unless `include_empty=true` |
+| `listdigidollaraddresses [include_watchonly] [min_balance] [include_empty] [amount_unit]` | List DD addresses; empty generated addresses are hidden unless `include_empty=true`; `min_balance` follows the amount-unit contract |
 | `getdigidollarbalance [addr] [minconf] [include_watchonly]` | Get DD balance (`confirmed`, `unconfirmed`, `total`) |
 | `mintdigidollar <cents> <tier> [fee_rate]` | Mint DD by locking DGB collateral; amount is integer cents |
-| `senddigidollar <addr> <amount> [comment] [fee_rate_ignored] [selected_inputs]` | Send DD to a DD address; integer means cents, decimal means dollars |
-| `sendmanydigidollar "" <amounts_obj> [comment] [selected_inputs]` | Send DD to multiple DD addresses in one tx |
+| `senddigidollar <addr> <amount> [comment] [fee_rate_ignored] [selected_inputs] [amount_unit]` | Send DD to a DD address; integer cents by default, `amount_unit` = `cents` or `dollars`, a decimal without a unit is rejected |
+| `sendmanydigidollar "" <amounts_obj> [comment] [selected_inputs] [amount_unit]` | Send DD to multiple DD addresses in one tx; one `amount_unit` for all recipients |
 | `listdigidollartxs [count] [skip] [addr] [category]` | List DD transaction history; categories include `mint`, `send`, `receive`, `redeem`, `redeem_change` |
 | `listdigidollarunspent [minconf] [maxconf] [addresses] [include_unsafe]` | List DD UTXOs with `spendable` and `safe` flags |
 | `listdigidollarutxos [minconf] [maxconf] [addresses] [include_unsafe]` | Alias for DD UTXO listing |
-| `listdigidollarpositions [active_only] [tier_filter] [min_amount] [count] [skip]` | List collateral positions |
-| `getredemptioninfo <position_id> [amount]` | Check redemption status; optional amount must equal the full vault amount |
-| `redeemdigidollar <position_id> <amount> [redemption_address] [fee_rate_ignored]` | Redeem DD -> unlock DGB collateral; integer means cents, decimal means dollars |
+| `listdigidollarpositions [active_only] [tier_filter] [min_amount] [count] [skip] [amount_unit]` | List collateral positions; `min_amount` follows the amount-unit contract |
+| `getredemptioninfo <position_id> [amount] [amount_unit]` | Check redemption status; optional amount must equal the full vault amount |
+| `redeemdigidollar <position_id> <amount> [redemption_address] [fee_rate_ignored] [amount_unit]` | Redeem DD -> unlock DGB collateral; integer cents by default, `amount_unit` = `cents` or `dollars`, a decimal without a unit is rejected |
 | `validateddaddress <address>` | Validate a DD address |
 | `createoraclekey <oracle_id>` | Wallet-scoped oracle key generation |
 | `exportoracleprivkey <oracle_id>` | Export a wallet-stored oracle private key for backup/migration |

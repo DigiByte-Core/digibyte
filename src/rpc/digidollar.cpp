@@ -23,6 +23,7 @@
 #include <consensus/merkle.h>
 #include <consensus/err.h>
 #include <consensus/volatility.h>
+#include <digidollar/amount.h>
 #include <digidollar/digidollar.h>
 #include <digidollar/health.h>
 #include <index/digidollarstatsindex.h>
@@ -688,37 +689,69 @@ namespace {
             totals.total_collateral, totals.total_dd, oracle_price_millicents);
     }
 
-#ifdef ENABLE_WALLET
-    // The largest DigiDollar amount a single senddigidollar or
-    // redeemdigidollar request may name: 10,000,000 cents = $100,000.00.
-    // Checked before any coin selection or transaction construction. It is
-    // the same limit sendmanydigidollar
-    // applies per recipient, the per-output transfer consensus limit, and the
-    // mainnet maximum mint, so no legitimate send or full vault redemption is
-    // ever blocked by it. It exists to stop a typo (a decimal point turns
-    // "10000" cents into $10,000) from moving far more than intended.
-    constexpr CAmount MAX_DD_RPC_AMOUNT_CENTS{10000000};
-
-    CAmount ParseDigiDollarRpcAmount(const UniValue& amount_param)
-    {
-        if (!amount_param.isStr() && !amount_param.isNum()) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be a number (integer cents or decimal dollars)");
-        }
-
-        const std::string amount_str = amount_param.getValStr();
-        const bool decimal_dollars = amount_str.find('.') != std::string::npos;
-        int64_t amount = 0;
-        if (!ParseFixedPoint(amount_str, decimal_dollars ? 2 : 0, &amount)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount is not a valid number");
-        }
-        return static_cast<CAmount>(amount);
-    }
-#endif
-
     bool OptionalParamIsSet(const JSONRPCRequest& request, size_t index)
     {
         return request.params.size() > index && !request.params[index].isNull();
     }
+
+#ifdef ENABLE_WALLET
+    // The largest DigiDollar amount a single senddigidollar request, a single
+    // sendmanydigidollar recipient, or a redeemdigidollar principal may name:
+    // 10,000,000 cents = $100,000.00. Checked before any coin selection or
+    // transaction construction. It is the per-output transfer consensus limit
+    // and the mainnet maximum mint, so no legitimate send or full vault
+    // redemption is ever blocked by it. It exists to stop a typo from moving
+    // far more than intended.
+    using DigiDollar::MAX_DD_RPC_AMOUNT_CENTS;
+
+    /** Help text for the amount_unit argument, identical on every RPC that takes one. */
+    const char* const DD_AMOUNT_UNIT_HELP{
+        "How to read the amount: \"cents\" (an integer, 10000 = $100.00) or \"dollars\" "
+        "(at most two decimals, 100.00 = $100.00). If omitted, the amount must be a whole "
+        "number of cents; an amount written with a decimal point is refused rather than guessed."};
+
+    const char* const DD_AMOUNT_UNIT_BAD{"amount_unit must be \"cents\" or \"dollars\""};
+
+    // Reads the optional amount_unit argument at the given position. An
+    // absent argument means the caller said nothing, and then only a whole
+    // number of cents is accepted.
+    DigiDollar::DDAmountUnit ParseDigiDollarRpcAmountUnit(const JSONRPCRequest& request, size_t index)
+    {
+        if (!OptionalParamIsSet(request, index)) return DigiDollar::DDAmountUnit::UNSPECIFIED;
+        if (!request.params[index].isStr()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, DD_AMOUNT_UNIT_BAD);
+        }
+        const std::optional<DigiDollar::DDAmountUnit> unit =
+            DigiDollar::ParseDDAmountUnit(request.params[index].get_str());
+        if (!unit.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, DD_AMOUNT_UNIT_BAD);
+        }
+        return unit.value();
+    }
+
+    // Turns a caller's amount into cents. The unit is never guessed from the
+    // shape of the number: "10000" is 10,000 cents, and "10000.00" is only
+    // read as $10,000.00 when the caller passed amount_unit=dollars.
+    // `context` is appended to any refusal so a caller with many amounts in
+    // one request (sendmanydigidollar) is told which one was wrong. The
+    // parser itself is not given the $100,000 cap, so an over-cap amount
+    // still reaches each RPC's own cap message.
+    CAmount ParseDigiDollarRpcAmount(const UniValue& amount_param,
+                                     DigiDollar::DDAmountUnit unit,
+                                     const std::string& context = "")
+    {
+        if (!amount_param.isStr() && !amount_param.isNum()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Amount must be a number (integer cents, or dollars with amount_unit=dollars)" + context);
+        }
+        const DigiDollar::DDAmountParseResult parsed =
+            DigiDollar::ParseDDAmount(amount_param.getValStr(), unit, DigiDollar::DD_AMOUNT_NO_CAP);
+        if (!parsed.ok()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, parsed.message + context);
+        }
+        return parsed.cents;
+    }
+#endif
 
     bool IsFreshOracleTimestamp(int64_t timestamp, int64_t now)
     {
@@ -2042,6 +2075,40 @@ RPCHelpMan mintdigidollar()
             CTransactionRef tx = MakeTransactionRef(result.tx);
             const uint256 positionId = tx->GetHash();
 
+            // Calculate unlock height using consensus function (handles tier 0 special case)
+            int64_t lockBlocks = DigiDollar::LockDaysToBlocks(lockDays);
+            int unlockHeight = mintHeight + lockBlocks + DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
+
+            // Save the owner key and the pending position BEFORE the transaction
+            // leaves this node. Once it is broadcast it can confirm whether or
+            // not this process survives, so the record that makes the vault
+            // redeemable has to be on disk first. Every write reports failure,
+            // and a failure stops the mint here: nothing has been sent yet.
+            WalletCollateralPosition position;
+            position.dd_timelock_id = positionId;
+            position.dgb_collateral = result.collateralRequired;
+            position.dd_minted = ddAmount;
+            position.lock_tier = lockTier;
+            position.unlock_height = unlockHeight;
+            position.is_active = true;
+            position.owner_keyid = ownerKey.GetPubKey().GetID();
+            {
+                std::string persist_error;
+                if (!dd_wallet->RecordPendingMint(*tx, position, ownerKey, persist_error)) {
+                    // Drop whatever partial record was written; the owner key is kept.
+                    std::string cleanup_error;
+                    if (!dd_wallet->ReleaseMintAttempt(positionId, cleanup_error)) {
+                        LogPrintf("DigiDollar RPC Mint: cleanup after failed save of %s: %s\n",
+                                  positionId.ToString(), cleanup_error);
+                    }
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                        strprintf("Mint not broadcast: %s. Nothing was sent; check the wallet file and free disk space, then try again.",
+                                  persist_error));
+                }
+            }
+            LogPrintf("DigiDollar RPC: Saved position %s (%d DD cents) and its owner key before broadcast\n",
+                      positionId.ToString(), ddAmount);
+
             const bool should_broadcast = pwallet->GetBroadcastTransactions();
             if (should_broadcast) {
                 RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
@@ -2052,70 +2119,33 @@ RPCHelpMan mintdigidollar()
             // wallet state transition and mempool submission stay in sync.
             // If wallet broadcasting is disabled (for example -blocksonly
             // soft-sets -walletbroadcast=0), CommitTransaction still records a
-            // wallet-local transaction. Keep DD metadata for that local tx so
-            // RPC/Qt can show it as confirming instead of losing the vault.
+            // wallet-local transaction; the DD records saved above describe
+            // that local tx so RPC/Qt show it as confirming instead of losing
+            // the vault.
             std::string commit_error;
             bool commit_success = false;
             {
                 LOCK(pwallet->cs_wallet);
                 commit_success = pwallet->CommitTransaction(tx, {}, {}, &commit_error);
             }
-            if (should_broadcast && !commit_success) {
-                if (pwallet->TransactionCanBeAbandoned(positionId)) {
-                    pwallet->AbandonTransaction(positionId);
-                    LogPrintf("DigiDollar RPC Mint: Abandoned rejected local mint transaction %s\n",
+            if (!commit_success) {
+                // The mempool (or the wallet itself) refused the transaction.
+                // Release what this attempt reserved: its inputs, coin locks and
+                // active status. The owner key and the record of the attempt stay.
+                std::string cleanup_error;
+                if (!dd_wallet->ReleaseMintAttempt(positionId, cleanup_error)) {
+                    LogPrintf("DigiDollar RPC Mint: could not release rejected mint %s: %s\n",
+                              positionId.ToString(), cleanup_error);
+                } else {
+                    LogPrintf("DigiDollar RPC Mint: Released rejected mint transaction %s\n",
                               positionId.ToString());
                 }
-                throw JSONRPCError(RPC_TRANSACTION_REJECTED,
-                    strprintf("Mint transaction rejected by mempool: %s", commit_error));
-            }
-            if (!commit_success) {
+                if (should_broadcast) {
+                    throw JSONRPCError(RPC_TRANSACTION_REJECTED,
+                        strprintf("Mint transaction rejected by mempool: %s", commit_error));
+                }
                 throw JSONRPCError(RPC_WALLET_ERROR,
                     strprintf("Mint transaction was not committed to the wallet: %s", commit_error));
-            }
-
-            // Calculate unlock height using consensus function (handles tier 0 special case)
-            int64_t lockBlocks = DigiDollar::LockDaysToBlocks(lockDays);
-            int unlockHeight = mintHeight + lockBlocks + DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
-
-            // CRITICAL FIX: Persist DD position to DigiDollarWallet after the
-            // wallet accepts the transaction, even when the mint is local-only
-            // and waiting for manual broadcast/rebroadcast.
-            if (commit_success && dd_wallet) {
-                WalletCollateralPosition position;
-                position.dd_timelock_id = positionId;
-                position.dgb_collateral = result.collateralRequired;
-                position.dd_minted = ddAmount;
-                position.lock_tier = lockTier;
-                position.unlock_height = unlockHeight;
-                position.is_active = true;
-                position.owner_keyid = ownerKey.GetPubKey().GetID();
-
-                LOCK(pwallet->cs_wallet);
-                dd_wallet->StoreOwnerKey(positionId, ownerKey);
-                dd_wallet->AddCollateralPosition(position);
-
-                // CRITICAL FIX: Track the DD UTXO so it can be found by GetDDUTXOs().
-                COutPoint ddOutpoint(positionId, 1);
-                dd_wallet->GetMintDDTokenOutpoint(positionId, ddOutpoint);
-                dd_wallet->AddDDUTXO(ddOutpoint, ddAmount);
-
-                // CRITICAL FIX #2: Persist DD UTXO to wallet database so it survives daemon restart
-                {
-                    wallet::WalletBatch batch(pwallet->GetDatabase());
-                    if (batch.WriteDDUTXO(ddOutpoint, ddAmount)) {
-                        LogPrintf("DigiDollar RPC: Persisted DD UTXO %s:%d to database (amount=%d)\n",
-                                 ddOutpoint.hash.ToString(), ddOutpoint.n, ddAmount);
-                    } else {
-                        LogPrintf("DigiDollar RPC: WARNING - Failed to persist DD UTXO to database\n");
-                    }
-                }
-
-                LogPrintf("DigiDollar RPC: Added position %s with %d DD cents, stored owner key, and tracked DD UTXO at vout %u\n",
-                         position.dd_timelock_id.ToString(), ddAmount, ddOutpoint.n);
-            } else {
-                LogPrintf("DigiDollar RPC: DD position not persisted (committed=%d, broadcast=%d, ddwallet=%d)\n",
-                          commit_success ? 1 : 0, should_broadcast ? 1 : 0, dd_wallet ? 1 : 0);
             }
 
             const int baseRatio = DigiDollar::GetCollateralRatioForLockTime(
@@ -2166,12 +2196,14 @@ RPCHelpMan senddigidollar()
     return RPCHelpMan{"senddigidollar",
                 "\nSend DigiDollar to another DigiDollar address.\n"
                 "Creates a transaction that transfers DigiDollar from your wallet to the specified address.\n"
-                "Amounts may be integer cents (for example 10000 = $100.00) or decimal dollars (for example 100.00 = $100.00).\n"
-                "A value written with a decimal point is always interpreted as dollars, so 10000.00 means $10,000.00, not $100.00.\n"
+                "The amount is a whole number of cents unless amount_unit says otherwise: 10000 is $100.00.\n"
+                "With amount_unit=\"dollars\" the amount is dollars with at most two decimals: 100.00 is $100.00.\n"
+                "An amount written with a decimal point and no amount_unit is refused, because 10000.00 could mean\n"
+                "$100.00 or $10,000.00 and the wrong reading sends one hundred times too much.\n"
                 "This is the primary RPC command for Phase 7.7 - DD transfers via API.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "DigiDollar address to send to (DD/TD/RD prefix)"},
-                    {"amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "Amount to send: integer cents (e.g. 10000 = $100.00) OR decimal dollars (e.g. 100.00 = $100.00). A decimal point means dollars, so 10000.00 = $10,000.00. Maximum 10000000 cents ($100,000.00) per request.", RPCArgOptions{.skip_type_check = true}},
+                    {"amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "Amount to send, read according to amount_unit. Maximum 10000000 cents ($100,000.00) per request.", RPCArgOptions{.skip_type_check = true}},
                     {"comment", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional comment for the transaction"},
                     {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Deprecated compatibility argument; ignored because DigiDollar sends use the fixed DD fee policy", RPCArgOptions{.skip_type_check = true}},
                     {"selected_inputs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional DigiDollar inputs to spend, matching listdigidollarunspent output",
@@ -2184,6 +2216,7 @@ RPCHelpMan senddigidollar()
                             },
                         },
                     },
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -2249,11 +2282,10 @@ RPCHelpMan senddigidollar()
             // Parse parameters
             std::string addressStr = request.params[0].get_str();
 
-            // Bug #18 fix: Accept both integer cents and decimal dollars.
-            // Integer values (e.g. 5000) are treated as cents.
-            // Fractional values (e.g. 50.00) are treated as dollars and converted to cents.
-            // String values are also handled gracefully.
-            CAmount amount = ParseDigiDollarRpcAmount(request.params[1]);
+            // The amount is cents unless amount_unit says dollars. A decimal
+            // amount with no unit is refused rather than guessed, because the
+            // two readings differ by a factor of one hundred.
+            CAmount amount = ParseDigiDollarRpcAmount(request.params[1], ParseDigiDollarRpcAmountUnit(request, 5));
             std::string comment = OptionalParamIsSet(request, 2) ? request.params[2].get_str() : "";
             std::vector<COutPoint> selected_inputs;
             const std::vector<COutPoint>* preset_dd_inputs = nullptr;
@@ -2268,10 +2300,9 @@ RPCHelpMan senddigidollar()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be positive");
             }
             // Reject an over-cap amount here, before the balance query and the
-            // transfer build. The parser reads "10000.00" as $10,000 (not $100),
-            // so a habitual decimal point asks for 100 times the intended
-            // amount. Such a request used to reach the wallet first and come
-            // back as a misleading balance or transfer error.
+            // transfer build, so a typed mistake comes back as a clear limit
+            // error instead of a misleading balance or transfer error from
+            // deep inside the wallet.
             if (amount > MAX_DD_RPC_AMOUNT_CENTS) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum transfer limit ($100,000)");
             }
@@ -2360,12 +2391,13 @@ RPCHelpMan sendmanydigidollar()
 {
     return RPCHelpMan{"sendmanydigidollar",
                 "\nSend DigiDollar to multiple DigiDollar addresses in one transaction.\n"
-                "Amounts may be integer cents (for example 5000 = $50.00) or decimal dollars (for example 50.25).\n",
+                "Every amount is a whole number of cents unless amount_unit says otherwise: 5000 is $50.00.\n"
+                "One amount_unit applies to every recipient in the request.\n",
                 {
                     {"dummy", RPCArg::Type::STR, RPCArg::Default{"\"\""}, "Must be set to \"\" for compatibility with sendmany."},
                     {"amounts", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "DigiDollar addresses and amounts",
                         {
-                            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "The DigiDollar address is the key; the amount is integer cents or decimal dollars", RPCArgOptions{.skip_type_check = true}},
+                            {"address", RPCArg::Type::NUM, RPCArg::Optional::NO, "The DigiDollar address is the key; the amount is read according to amount_unit", RPCArgOptions{.skip_type_check = true}},
                         },
                     },
                     {"comment", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional comment for the transaction"},
@@ -2379,6 +2411,7 @@ RPCHelpMan sendmanydigidollar()
                             },
                         },
                     },
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -2446,6 +2479,11 @@ RPCHelpMan sendmanydigidollar()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "No recipients specified");
             }
 
+            // One unit for the whole request. Each refusal names the
+            // recipient it came from, because a request can carry many
+            // amounts and the caller needs to know which one to correct.
+            const DigiDollar::DDAmountUnit amount_unit = ParseDigiDollarRpcAmountUnit(request, 4);
+
             std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
             UniValue result_amounts(UniValue::VOBJ);
             CAmount total_amount = 0;
@@ -2463,12 +2501,13 @@ RPCHelpMan sendmanydigidollar()
                 }
                 CDigiDollarAddress dd_address(keys[i]);
 
-                CAmount amount = ParseDigiDollarRpcAmount(values[i]);
+                const std::string amount_context = " (recipient " + keys[i] + ")";
+                CAmount amount = ParseDigiDollarRpcAmount(values[i], amount_unit, amount_context);
                 if (amount <= 0) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be positive");
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be positive" + amount_context);
                 }
-                if (amount > 10000000) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum transfer limit ($100,000)");
+                if (amount > MAX_DD_RPC_AMOUNT_CENTS) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum transfer limit ($100,000)" + amount_context);
                 }
                 if (total_amount > std::numeric_limits<CAmount>::max() - amount) {
                     throw JSONRPCError(RPC_INVALID_PARAMETER, "Total amount overflow");
@@ -2547,12 +2586,14 @@ RPCHelpMan redeemdigidollar()
     return RPCHelpMan{"redeemdigidollar",
                 "\nRedeem DigiDollar and unlock DGB collateral.\n"
                 "Burns DigiDollar tokens and unlocks the corresponding DGB collateral.\n"
-                "Only positions that have reached maturity can be redeemed.\n",
+                "Only positions that have reached maturity can be redeemed.\n"
+                "The amount is a whole number of cents unless amount_unit says otherwise.\n",
                 {
                     {"position_id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Position ID (transaction hash of mint)"},
-                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of DD to redeem (in cents); must equal the vault's full minted amount. Maximum 10000000 cents ($100,000.00)."},
+                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount of DD to redeem, read according to amount_unit; must equal the vault's full minted amount. Maximum 10000000 cents ($100,000.00)."},
                     {"redemption_address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "DGB address to receive unlocked collateral (default: new address)"},
-                    {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Deprecated compatibility argument; ignored because DigiDollar redemptions use the fixed DD fee policy", RPCArgOptions{.skip_type_check = true}}
+                    {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Deprecated compatibility argument; ignored because DigiDollar redemptions use the fixed DD fee policy", RPCArgOptions{.skip_type_check = true}},
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP}
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -2581,7 +2622,7 @@ RPCHelpMan redeemdigidollar()
         {
             // Parse parameters
             std::string positionIdStr = request.params[0].get_str();
-            CAmount ddAmount = ParseDigiDollarRpcAmount(request.params[1]);
+            CAmount ddAmount = ParseDigiDollarRpcAmount(request.params[1], ParseDigiDollarRpcAmountUnit(request, 4));
             std::string redeemAddress = OptionalParamIsSet(request, 2) ? request.params[2].get_str() : "";
 
             // Validate parameters
@@ -2695,6 +2736,45 @@ RPCHelpMan redeemdigidollar()
             LogPrintf("DigiDollar: Will try to spend collateral %s:%u\n",
                       collateralOutpoint.hash.ToString(), collateralOutpoint.n);
 
+            // The owner key is settled before anything else is decided. The
+            // wallet normally has it written down against this position. When
+            // that record is missing, the wallet searches its own keys for the
+            // one this collateral was locked with and writes it down again.
+            // Each way this can fail gets its own message, because each needs
+            // a different action from the person running the wallet.
+            CKey ownerKey;
+            switch (dd_wallet->RecoverOwnerKey(positionId, ownerKey)) {
+            case DigiDollarWallet::OwnerKeyRecovery::Found:
+                break;
+            case DigiDollarWallet::OwnerKeyRecovery::Recovered:
+                LogPrintf("DigiDollar: Owner key for position %s was missing and has been recovered from the wallet's own keys\n",
+                          positionIdStr);
+                break;
+            case DigiDollarWallet::OwnerKeyRecovery::WalletLocked:
+                throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
+                    "DigiDollar redemption requires the wallet to be unlocked. "
+                    "Please enter the wallet passphrase with walletpassphrase first.");
+            case DigiDollarWallet::OwnerKeyRecovery::NoPrivateKeys:
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                    "Error: Private keys are disabled for this wallet, so it cannot sign a DigiDollar redemption. "
+                    "Redeem from the wallet that holds the private keys.");
+            case DigiDollarWallet::OwnerKeyRecovery::PositionNotFound:
+            case DigiDollarWallet::OwnerKeyRecovery::MintTxMissing:
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                    "This wallet does not hold the mint transaction of this position. "
+                    "Run rescanblockchain from a height before the first mint, then redeem again.");
+            case DigiDollarWallet::OwnerKeyRecovery::NoMatchingKey:
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                    "No key in this wallet matches the owner of this DigiDollar vault. "
+                    "Restore the wallet that minted it with its private keys (the wallet file, or "
+                    "importdescriptors with the private descriptors) and run rescanblockchain from a "
+                    "height before the first mint, then redeem again.");
+            case DigiDollarWallet::OwnerKeyRecovery::DatabaseWriteFailed:
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                    "The owner key of this vault was found but could not be written to the wallet database. "
+                    "Check the wallet file and free disk space, then try again.");
+            }
+
             // Check if redeemable
             int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
             if (foundPosition.unlock_height > currentHeight) {
@@ -2758,12 +2838,6 @@ RPCHelpMan redeemdigidollar()
             DigiDollar::RedeemTxBuilder redeemBuilder(Params(), currentHeight, oraclePrice);
             if (candidateHealth.active) redeemBuilder.SetCandidateHealth(candidateHealth.health);
 
-            // Get the owner key for this position
-            CKey ownerKey;
-            if (!dd_wallet->GetOwnerKey(positionId, ownerKey)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Owner key not found for position");
-            }
-
             DigiDollar::TxBuilderRedeemParams redeemParams;
             redeemParams.collateralOutpoint = collateralOutpoint;
             redeemParams.ddUtxos = selectedDDUtxos;  // Use any DD from wallet (fungible)
@@ -2779,6 +2853,11 @@ RPCHelpMan redeemdigidollar()
             // address is supplied, create a wallet destination so the returned
             // collateral remains visible to this wallet.
             std::string actualUnlockAddress;
+            // True when the collateral goes to an address the caller typed in
+            // rather than one this wallet made. Such an address may belong to
+            // someone else, for example an exchange deposit address, so the
+            // leftover DGB must never be allowed to follow it.
+            bool collateralAddressFromCaller = false;
             {
                 LOCK(pwallet->cs_wallet);
                 std::string label = "";  // Empty label
@@ -2790,6 +2869,7 @@ RPCHelpMan redeemdigidollar()
                     }
                     redeemParams.collateralDest = requestedDest;
                     actualUnlockAddress = redeemAddress;
+                    collateralAddressFromCaller = true;
                     LogPrintf("DigiDollar: Using requested destination for returned collateral\n");
                 } else {
                     auto op_dest = pwallet->GetNewDestination(OutputType::BECH32M, label);
@@ -2821,6 +2901,19 @@ RPCHelpMan redeemdigidollar()
                 if (op_change) {
                     redeemParams.dgbChangeDest = *op_change;
                     LogPrintf("DigiDollar: Using separate wallet destination for DGB change\n");
+                } else if (collateralAddressFromCaller) {
+                    // Without a change address the transaction would send the
+                    // DGB left over after the fee to the collateral address,
+                    // and here that address is the one the caller typed in.
+                    // That money would leave this wallet for good, so stop
+                    // instead and say how to get a redemption that works.
+                    LogPrintf("DigiDollar: Error: %s\n", util::ErrorString(op_change).original);
+                    throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
+                        "This wallet could not create an address for the DGB left over after the fee. "
+                        "That money will not be sent to the redemption address you supplied, because that "
+                        "address may not be yours. Refill this wallet's addresses (keypoolrefill) and try "
+                        "again, or leave redemption_address out so the collateral and the leftover both "
+                        "come back to this wallet.");
                 } else {
                     LogPrintf("DigiDollar: WARNING - Could not get wallet address for DGB change, will use collateralDest (may merge outputs)\n");
                     LogPrintf("DigiDollar: Error: %s\n", util::ErrorString(op_change).original);
@@ -2848,34 +2941,44 @@ RPCHelpMan redeemdigidollar()
             LogPrintf("DigiDollar: Building exclude list with %d UTXOs (1 collateral + %d DD)\n",
                       exclude_utxos.size(), redeemParams.ddUtxos.size());
 
-            // Bug #9 fix: Calculate fee from feeRate and estimated tx size instead of hardcoding.
-            // Redemption tx: ~3 inputs (collateral + DD + fee), ~2-3 outputs → ~400 vbytes.
-            // Apply 50% safety margin for script-path spending variance.
-            CAmount estimatedFee = (400 * redeemParams.feeRate) / 1000; // vsize * feeRate / 1000
-            estimatedFee = estimatedFee + (estimatedFee / 2); // 50% safety margin
-            if (estimatedFee < 10000000) estimatedFee = 10000000; // Floor at 0.1 DGB
-            LogPrintf("DigiDollar: Estimated redemption fee: %lld sats (%.8f DGB)\n",
-                      static_cast<long long>(estimatedFee), estimatedFee / 100000000.0);
-            CAmount selectedFeeTotal = 0;
-            std::vector<CAmount> feeAmounts;
-
-            if (!dd_wallet->SelectFeeCoins(estimatedFee, redeemParams.feeUtxos, selectedFeeTotal, &feeAmounts, &exclude_utxos)) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient DGB balance for transaction fees");
+            // Choose the DGB coins that pay the fee. Every coin added to pay
+            // the fee is another input, which makes the transaction bigger
+            // and the fee higher, so coins chosen once against a fixed size
+            // guess can be worth less than the transaction they produce
+            // costs. That is what used to happen to a wallet holding only
+            // small DGB coins: the build then failed and nothing tried
+            // again. The builder now measures the transaction each candidate
+            // set of coins would produce and asks the wallet for more coins
+            // until they cover that transaction's fee.
+            const auto select_fee_coins = [&dd_wallet, &exclude_utxos](CAmount target,
+                                                                       std::vector<COutPoint>& utxos,
+                                                                       std::vector<CAmount>& amounts,
+                                                                       CAmount& total) {
+                return dd_wallet->SelectFeeCoins(target, utxos, total, &amounts, &exclude_utxos);
+            };
+            std::string feeSelectionError;
+            if (!redeemBuilder.SelectRedemptionFeeInputs(redeemParams, select_fee_coins, feeSelectionError)) {
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, feeSelectionError);
             }
 
-            redeemParams.feeAmounts = feeAmounts;
+            CAmount selectedFeeTotal = 0;
+            for (const CAmount feeAmount : redeemParams.feeAmounts) selectedFeeTotal += feeAmount;
             LogPrintf("DigiDollar: Selected %d sats in fees from %d UTXOs for redemption\n",
                      selectedFeeTotal, redeemParams.feeUtxos.size());
 
+            // Last line of defence. The coins above were chosen against a
+            // measurement of the transaction they produce, so the build should
+            // already be funded. If a build still comes out needing more than
+            // the coins are worth, ask the wallet for coins covering that
+            // exact fee and build again.
             auto buildFundedRedemption = [&]() {
                 DigiDollar::TxBuilderResult attempt = redeemBuilder.BuildRedemptionTransaction(redeemParams);
                 while (candidateHealth.active && !attempt.success && attempt.totalFees > selectedFeeTotal) {
                     const CAmount target = attempt.totalFees;
                     redeemParams.feeUtxos.clear();
-                    feeAmounts.clear();
-                    if (!dd_wallet->SelectFeeCoins(target, redeemParams.feeUtxos, selectedFeeTotal, &feeAmounts, &exclude_utxos))
+                    redeemParams.feeAmounts.clear();
+                    if (!dd_wallet->SelectFeeCoins(target, redeemParams.feeUtxos, selectedFeeTotal, &redeemParams.feeAmounts, &exclude_utxos))
                         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient DGB for the selected redemption inputs and fee");
-                    redeemParams.feeAmounts = feeAmounts;
                     attempt = redeemBuilder.BuildRedemptionTransaction(redeemParams);
                 }
 
@@ -2946,7 +3049,13 @@ RPCHelpMan redeemdigidollar()
             // change creation are applied by ProcessTransactionForDD when the
             // redeem is mined. This keeps restart/abandon/retry paths safe.
             if (redeemResult.ddChange > 0) {
-                dd_wallet->StoreOwnerKey(redeemTx->GetHash(), ownerKey);
+                if (!dd_wallet->StoreOwnerKey(redeemTx->GetHash(), ownerKey)) {
+                    // The redemption has already been sent. If this write fails
+                    // the wallet can work the change key out again from its own
+                    // keys when it comes to spend that change.
+                    LogPrintf("DigiDollar: ERROR - could not save the owner key for DD change of redemption %s\n",
+                              redeemTx->GetHash().ToString());
+                }
                 LogPrintf("DigiDollar: Deferred DD change tracking for pending redemption %s (%d cents)\n",
                           redeemTx->GetHash().ToString(), redeemResult.ddChange);
             }
@@ -3028,7 +3137,8 @@ RPCHelpMan listdigidollarpositions()
                     // with thousands of positions. Default 0 keeps the
                     // historical "return all matching positions" body.
                     {"count", RPCArg::Type::NUM, RPCArg::Default{0}, "Maximum positions to return (0 = no limit, max 1000)"},
-                    {"skip", RPCArg::Type::NUM, RPCArg::Default{0}, "Number of matching positions to skip before returning results"}
+                    {"skip", RPCArg::Type::NUM, RPCArg::Default{0}, "Number of matching positions to skip before returning results"},
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP}
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "",
@@ -3043,7 +3153,10 @@ RPCHelpMan listdigidollarpositions()
                                 {RPCResult::Type::NUM, "unlock_height", "Block height when unlockable"},
                                 {RPCResult::Type::NUM, "blocks_remaining", "Blocks until unlock (0 if unlocked)"},
                                 {RPCResult::Type::NUM, "confirmations", "Number of confirmations for the mint transaction"},
-                                {RPCResult::Type::STR, "status", "Position status (pending/active/unlocked/redeemed)"},
+                                {RPCResult::Type::STR, "status", "Position status: pending, active, unlocked, pending_redeem, redeemed, "
+                                                                  "expired_mint (unconfirmed mint that missed its lock window and was given up), "
+                                                                  "abandoned_mint (mint attempt abandoned before it confirmed), or "
+                                                                  "conflicted_mint (a conflicting transaction confirmed instead)"},
                                 {RPCResult::Type::NUM, "health_ratio", "Current collateral health ratio (%)"},
                                 {RPCResult::Type::BOOL, "can_redeem", "Whether position can be redeemed now"},
                                 {RPCResult::Type::BOOL, "spendable", "Whether this wallet can spend the position"},
@@ -3084,7 +3197,7 @@ RPCHelpMan listdigidollarpositions()
             int tierFilter = OptionalParamIsSet(request, 1) ?
                             request.params[1].getInt<int>() : -1;
             CAmount minAmount = OptionalParamIsSet(request, 2) ?
-                               ParseDigiDollarRpcAmount(request.params[2]) : 0;
+                               ParseDigiDollarRpcAmount(request.params[2], ParseDigiDollarRpcAmountUnit(request, 5)) : 0;
             // DD-FA-FUNC-034 (Wave 21 Agent C): bound the response body so a
             // wallet with thousands of positions cannot trivially DoS its own
             // RPC clients. The default count=0 preserves the historical
@@ -3171,7 +3284,30 @@ RPCHelpMan listdigidollarpositions()
                 // Status
                 std::string status;
                 if (!pos.is_active) {
-                    status = has_pending_redeem(pos) ? "pending_redeem" : "redeemed";
+                    if (has_pending_redeem(pos)) {
+                        status = "pending_redeem";
+                    } else {
+                        // An inactive vault whose mint never confirmed is a failed
+                        // attempt, not a redeemed vault; say which kind it is.
+                        const auto attempt = pos.dgb_collateral > 0
+                            ? dd_wallet->GetMintAttemptState(pos.dd_timelock_id)
+                            : DigiDollarWallet::MintAttemptState::Confirmed;
+                        switch (attempt) {
+                        case DigiDollarWallet::MintAttemptState::Expired:
+                            status = "expired_mint";
+                            break;
+                        case DigiDollarWallet::MintAttemptState::Abandoned:
+                        case DigiDollarWallet::MintAttemptState::Local:
+                            status = "abandoned_mint";
+                            break;
+                        case DigiDollarWallet::MintAttemptState::Conflicted:
+                            status = "conflicted_mint";
+                            break;
+                        default:
+                            status = "redeemed";
+                            break;
+                        }
+                    }
                 } else if (confirmations <= 0) {
                     status = "pending";
                 } else {
@@ -3336,8 +3472,16 @@ RPCHelpMan getdigidollaraddress()
             DigiDollarWallet* dd_wallet = pwallet->GetDDWallet();
             if (dd_wallet) {
                 // Store by output_key (what we'll see in the UTXO) with the internal key
-                // The signing code will handle the taproot tweak adjustment
-                dd_wallet->StoreAddressKey(output_key, dd_key);
+                // The signing code will handle the taproot tweak adjustment.
+                // If the key cannot be written to the wallet file, the address
+                // would stop working at the next restart and anything sent to
+                // it would be unspendable, so hand back an error instead of
+                // an address.
+                if (!dd_wallet->StoreAddressKey(output_key, dd_key)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                        "Could not save the key for this DigiDollar address to the wallet file, so no address was created. "
+                        "Check the wallet file and free disk space, then try again.");
+                }
                 LogPrintf("DigiDollar: Stored DD address key (output_key=%s)\n",
                          HexStr(Span<const unsigned char>(output_key.begin(), output_key.end())));
             } else {
@@ -3523,8 +3667,9 @@ RPCHelpMan listdigidollaraddresses()
                 "Returns both owned and watch-only DD addresses with their balances and labels.\n",
                 {
                     {"include_watchonly", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include watch-only addresses"},
-                    {"min_balance", RPCArg::Type::AMOUNT, RPCArg::Default{0}, "Minimum balance filter (in cents)"},
-                    {"include_empty", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include wallet-generated DD addresses with zero balance (DD-FA-FUNC-024 default-false to avoid leaking the size of the keypool)"}
+                    {"min_balance", RPCArg::Type::AMOUNT, RPCArg::Default{0}, "Minimum balance filter, read according to amount_unit"},
+                    {"include_empty", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include wallet-generated DD addresses with zero balance (DD-FA-FUNC-024 default-false to avoid leaking the size of the keypool)"},
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP}
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "",
@@ -3577,7 +3722,7 @@ RPCHelpMan listdigidollaraddresses()
 
             // Parse parameters
             bool includeWatchOnly = OptionalParamIsSet(request, 0) ? request.params[0].get_bool() : false;
-            CAmount minBalance = OptionalParamIsSet(request, 1) ? ParseDigiDollarRpcAmount(request.params[1]) : 0;
+            CAmount minBalance = OptionalParamIsSet(request, 1) ? ParseDigiDollarRpcAmount(request.params[1], ParseDigiDollarRpcAmountUnit(request, 3)) : 0;
             // DD-FA-FUNC-024 (Wave 17 Agent C): omit empty addresses by
             // default to avoid leaking the keypool size to RPC observers.
             // include_empty=true preserves the prior default behaviour for
@@ -3777,6 +3922,16 @@ RPCHelpMan getdigidollarbalance()
             if (!dd_wallet) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not initialized");
             }
+
+            // A new block is handed to the wallet on another thread, so the
+            // wallet can still be working through the newest block when this
+            // command runs. Until it has, the DigiDollars in that block still
+            // count as unconfirmed here and would be left out of the answer,
+            // so a caller who mines or waits for a block and then asks for the
+            // balance could be told zero. Wait for the wallet to catch up
+            // first, the same as every other DigiDollar command that reports
+            // confirmed state.
+            pwallet->BlockUntilSyncedToCurrentChain();
 
             // Parse parameters
             std::string addressStr = OptionalParamIsSet(request, 0) ?
@@ -4201,7 +4356,8 @@ RPCHelpMan getredemptioninfo()
                 "Shows whether position can be redeemed and potential return amounts.\n",
                 {
                     {"position_id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Position ID (transaction hash of mint)"},
-                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of DD to redeem. If provided, it must equal the full position amount because partial redemption is not supported."}
+                    {"dd_amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Amount of DD to redeem, read according to amount_unit. If provided, it must equal the full position amount because partial redemption is not supported. Maximum 10000000 cents ($100,000.00)."},
+                    {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP}
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -4249,7 +4405,13 @@ RPCHelpMan getredemptioninfo()
             // Parse parameters
             std::string positionIdStr = request.params[0].get_str();
             CAmount ddAmount = OptionalParamIsSet(request, 1) ?
-                              ParseDigiDollarRpcAmount(request.params[1]) : 0;
+                              ParseDigiDollarRpcAmount(request.params[1], ParseDigiDollarRpcAmountUnit(request, 2)) : 0;
+            // Same limit redeemdigidollar applies to the principal, so a
+            // caller checking a redemption first gets the same answer as the
+            // redemption itself.
+            if (ddAmount > MAX_DD_RPC_AMOUNT_CENTS) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount exceeds maximum redemption limit ($100,000)");
+            }
 
             // Validate position ID format
             if (!IsHex(positionIdStr) || positionIdStr.length() != 64) {
@@ -4414,7 +4576,8 @@ RPCHelpMan listdigidollartxs()
                                 {RPCResult::Type::BOOL, "abandoned", "Whether transaction was abandoned"},
                                 {RPCResult::Type::NUM, "lock_tier", "Collateral lock tier for mint transactions (0-9)"},
                                 {RPCResult::Type::BOOL, "in_mempool", "Whether the wallet currently sees the transaction in mempool/stempool"},
-                                {RPCResult::Type::STR, "wallet_state", "DD wallet display state: local, pending, confirmed, conflicted, or abandoned"}
+                                {RPCResult::Type::STR, "wallet_state", "DD wallet display state: local, pending, confirmed, conflicted, abandoned, "
+                                                                        "or expired_mint (an unconfirmed mint that missed its lock window)"}
                             }
                         }
                     }
@@ -4508,10 +4671,11 @@ RPCHelpMan listdigidollartxs()
                 txInfo.pushKV("abandoned", tx.abandoned);
                 txInfo.pushKV("lock_tier", tx.lock_tier);
                 txInfo.pushKV("in_mempool", tx.in_mempool);
-                txInfo.pushKV("wallet_state", tx.is_local ? "local" :
-                    (tx.abandoned ? "abandoned" :
-                     (tx.confirmations < 0 ? "conflicted" :
-                      (tx.confirmations > 0 ? "confirmed" : "pending"))));
+                txInfo.pushKV("wallet_state", tx.is_expired_mint ? "expired_mint" :
+                    (tx.is_local ? "local" :
+                     (tx.abandoned ? "abandoned" :
+                      (tx.confirmations < 0 ? "conflicted" :
+                       (tx.confirmations > 0 ? "confirmed" : "pending")))));
 
                 result.push_back(txInfo);
                 processed++;

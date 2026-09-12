@@ -1379,6 +1379,162 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
     return result;
 }
 
+RedeemTxBuilder::FeeEstimate RedeemTxBuilder::EstimateRedemptionFee(const TxBuilderRedeemParams& params) const
+{
+    FeeEstimate estimate;
+
+    // Whether the transaction carries DD change decides two of its outputs,
+    // so resolve the burn amount the same way BuildRedemptionTransaction
+    // does: the caller's amount on the normal path, the health-derived
+    // amount on the emergency path.
+    CAmount ddMinted = params.ddMinted;
+    if (params.collateralAmount <= 0) {
+        ddMinted = GetCollateralPosition(params.collateralOutpoint).ddMinted;
+    }
+    CAmount ddToBurn = params.ddToRedeem;
+    if (params.path == RedemptionPath::ERR) {
+        const int systemHealth = GetCurrentSystemCollateral();
+        if (systemHealth < 0) {
+            estimate.error = "ERR system health unavailable";
+            return estimate;
+        }
+        if (ddMinted <= 0) {
+            estimate.error = "Original DD minted amount unavailable for ERR redemption";
+            return estimate;
+        }
+        ddToBurn = ERR::EmergencyRedemptionRatio::GetRequiredDDBurn(ddMinted, systemHealth);
+    }
+    CAmount totalDDInput = 0;
+    for (const CAmount amount : params.ddAmounts) totalDDInput += amount;
+    const CAmount ddChange = totalDDInput - ddToBurn;
+    if (ddChange < 0) {
+        estimate.error = strprintf("Insufficient DD selected (input: %d, need: %d)", totalDDInput, ddToBurn);
+        return estimate;
+    }
+
+    // Only sizes matter here, not values or keys. Every input and output
+    // below has the same serialized length as the one the build creates.
+    CMutableTransaction skeleton;
+    skeleton.SetDigiDollarType(::DD_TX_REDEEM);
+    skeleton.vin.push_back(CTxIn(params.collateralOutpoint, CScript(), 0xFFFFFFFE));
+    for (const auto& utxo : params.ddUtxos) {
+        skeleton.vin.push_back(CTxIn(utxo, CScript(), 0xFFFFFFFE));
+    }
+    for (const auto& utxo : params.feeUtxos) {
+        skeleton.vin.push_back(CTxIn(utxo));
+    }
+
+    // The collateral return goes to the caller's destination, and a legacy
+    // or SegWit v0 address has a different script length than Taproot.
+    CScript collateralReturnScript;
+    if (params.collateralDest.has_value()) {
+        collateralReturnScript = GetScriptForDestination(params.collateralDest.value());
+    } else if (params.ownerKey.IsValid()) {
+        collateralReturnScript = GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey(params.ownerKey.GetPubKey())));
+    } else {
+        collateralReturnScript = CScript() << OP_1 << std::vector<unsigned char>(32, 0);
+    }
+    skeleton.vout.push_back(CTxOut(1, collateralReturnScript));
+
+    if (ddChange > 0) {
+        // A Taproot token output of the same length as the real DD change
+        // output, without registering anything in the script registry.
+        skeleton.vout.push_back(CTxOut(0, CScript() << OP_1 << std::vector<unsigned char>(32, 0)));
+        CScript metadataScript;
+        metadataScript << OP_RETURN
+                       << std::vector<unsigned char>{'D', 'D'}
+                       << CScriptNum(3)
+                       << CScriptNum(ddChange);
+        skeleton.vout.push_back(CTxOut(0, metadataScript));
+    }
+
+    estimate.vsize = EstimateTransactionVSize(skeleton);
+    const int64_t weight = static_cast<int64_t>(estimate.vsize) * WITNESS_SCALE_FACTOR;
+    if (weight > MAX_STANDARD_TX_WEIGHT) {
+        estimate.error = strprintf("Projected redemption transaction is too large: %d weight units (%u vB), standard limit is %d WU. Consolidate DGB fee coins first.",
+                                   weight, static_cast<unsigned>(estimate.vsize), MAX_STANDARD_TX_WEIGHT);
+        return estimate;
+    }
+    estimate.fee = std::max<CAmount>(CalculateFee(skeleton, params.feeRate), MIN_DD_TX_FEE);
+    estimate.ok = true;
+    return estimate;
+}
+
+bool RedeemTxBuilder::SelectRedemptionFeeInputs(TxBuilderRedeemParams& params,
+                                                const FeeCoinSelector& select_coins,
+                                                std::string& error,
+                                                int max_attempts) const
+{
+    error.clear();
+    if (!select_coins) {
+        error = "No DGB fee coin selector provided";
+        return false;
+    }
+    if (max_attempts < 1) max_attempts = 1;
+
+    const auto give_up = [&params](std::string& out, std::string message) {
+        params.feeUtxos.clear();
+        params.feeAmounts.clear();
+        out = std::move(message);
+        return false;
+    };
+
+    // The first target is the fee of the smallest redemption that can
+    // exist: the collateral input, the DD inputs and exactly one fee coin.
+    CAmount target = 0;
+    {
+        TxBuilderRedeemParams smallest = params;
+        smallest.feeUtxos.assign(1, COutPoint());
+        smallest.feeAmounts.clear();
+        const FeeEstimate first = EstimateRedemptionFee(smallest);
+        if (!first.ok) return give_up(error, first.error);
+        target = first.fee;
+    }
+
+    CAmount lastTotal = -1;
+    size_t lastCount = 0;
+    FeeEstimate estimate;
+    CAmount total = 0;
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        std::vector<COutPoint> utxos;
+        std::vector<CAmount> amounts;
+        total = 0;
+        if (!select_coins(target, utxos, amounts, total)) {
+            return give_up(error, strprintf("Insufficient DGB balance for the redemption fee: need at least %d sats (%.8f DGB) in spendable DGB coins other than the collateral and DD token outputs",
+                                            target, target / 100000000.0));
+        }
+        if (utxos.empty() || utxos.size() != amounts.size()) {
+            return give_up(error, "DGB fee coin selection returned no usable coins");
+        }
+        params.feeUtxos = utxos;
+        params.feeAmounts = amounts;
+
+        estimate = EstimateRedemptionFee(params);
+        if (!estimate.ok) return give_up(error, estimate.error);
+
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: redemption fee selection attempt %d - %zu fee inputs worth %d sats, projected %u vB, fee %d sats\n",
+                 attempt, utxos.size(), total, static_cast<unsigned>(estimate.vsize), estimate.fee);
+
+        if (total >= estimate.fee) return true;
+
+        if (total <= lastTotal && utxos.size() <= lastCount) {
+            // The selector returned nothing more than last time: the wallet
+            // has no further coin to add, so more attempts cannot help.
+            break;
+        }
+        lastTotal = total;
+        lastCount = utxos.size();
+
+        // Cover the fee of the transaction this attempt would produce, and
+        // ask for strictly more than was just selected so the next
+        // selection cannot be the same set of coins.
+        target = std::max<CAmount>(estimate.fee, total + 1);
+    }
+
+    return give_up(error, strprintf("Insufficient DGB fee inputs: %zu DGB coins worth %d sats cannot pay the %d sat fee of the %u vB redemption they would produce, because each additional small coin adds more fee than value. Consolidate small DGB coins into one larger coin and retry.",
+                                    lastCount, lastTotal, estimate.fee, static_cast<unsigned>(estimate.vsize)));
+}
+
 RedemptionPath RedeemTxBuilder::DetermineRedemptionPath(const TxBuilderRedeemParams& params) const {
     // Determine redemption path based on system health
     // NOTE: Only 2 paths exist - NORMAL and ERR

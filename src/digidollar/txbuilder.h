@@ -15,6 +15,7 @@
 #include <kernel/chainparams.h>
 #include <base58.h>
 
+#include <functional>
 #include <vector>
 #include <string>
 #include <utility>
@@ -254,6 +255,59 @@ public:
      * @return Transaction builder result with success/error and transaction data
      */
     TxBuilderResult BuildRedemptionTransaction(const TxBuilderRedeemParams& params);
+
+    /**
+     * The size and fee BuildRedemptionTransaction arrives at for exactly
+     * these parameters. It lays out the same inputs (collateral, every DD
+     * token, every fee coin) and the same outputs that exist at the moment
+     * the build fixes its fee (the collateral return, plus the DD change
+     * token and its OP_RETURN record when the DD inputs exceed the burn),
+     * runs them through the same size estimator and applies the same
+     * absolute DD minimum fee. The DGB change output is added after the fee
+     * is fixed and therefore does not count, in the build or here.
+     *
+     * Callers use it to choose fee coins that the build will accept, instead
+     * of guessing a size in advance. A unit test pins it to the build.
+     */
+    struct FeeEstimate {
+        bool ok{false};
+        size_t vsize{0};   // Projected virtual size, safety margin included.
+        CAmount fee{0};    // The fee the build will charge, in satoshis.
+        std::string error; // Why no estimate could be made, when !ok.
+    };
+    FeeEstimate EstimateRedemptionFee(const TxBuilderRedeemParams& params) const;
+
+    /**
+     * Selects DGB coins worth at least `target` satoshis. On success it
+     * fills the coins and their amounts (same order, same length) and their
+     * total; it returns false when the wallet cannot reach the target. The
+     * wallet's own coin selection is passed in this shape so the builder
+     * never needs to know about wallets.
+     */
+    using FeeCoinSelector = std::function<bool(CAmount target,
+                                               std::vector<COutPoint>& utxos,
+                                               std::vector<CAmount>& amounts,
+                                               CAmount& total)>;
+
+    static constexpr int DEFAULT_FEE_SELECTION_ATTEMPTS{12};
+
+    /**
+     * Choose fee coins for a redemption so that the coins actually cover the
+     * fee of the transaction they produce. Every fee coin makes the
+     * transaction bigger and so raises the fee, which is why a single
+     * selection against a guessed size can come up short when a wallet
+     * holds only small DGB coins. Each attempt asks the selector for at
+     * least the fee the previous attempt's real size needs, and for
+     * strictly more than the previous attempt selected, so every attempt
+     * changes the input set until the coins cover the fee or the attempt
+     * budget is spent. On success params.feeUtxos and params.feeAmounts
+     * hold the chosen coins; on failure they are cleared and `error` says
+     * what the caller can do about it.
+     */
+    bool SelectRedemptionFeeInputs(TxBuilderRedeemParams& params,
+                                   const FeeCoinSelector& select_coins,
+                                   std::string& error,
+                                   int max_attempts = DEFAULT_FEE_SELECTION_ATTEMPTS) const;
 
     /**
      * Determine the appropriate redemption path based on current conditions

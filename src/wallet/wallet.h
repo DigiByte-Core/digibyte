@@ -966,6 +966,15 @@ public:
     const CKeyingMaterial& GetEncryptionKey() const override;
     bool HasEncryptionKeys() const override;
 
+    /** True once the wallet has been told which block it last processed.
+     *  Until then the height is unknown and GetLastBlockHeight() must not be
+     *  called, because it asserts. Callers that only want to know the height
+     *  when it is available ask this first. */
+    bool HasLastBlockHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_last_block_processed_height >= 0;
+    }
     /** Get last block processed height */
     int GetLastBlockHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {

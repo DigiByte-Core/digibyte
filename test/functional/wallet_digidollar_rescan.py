@@ -934,9 +934,12 @@ class DigiDollarRescanTest(DigiByteTestFramework):
         bounded_wallet = self.nodes[0].get_wallet_rpc("bounded_rescan")
         tip = self.nodes[0].getblockcount()
 
+        # A rescan bounded to one block only records that the positions still
+        # need checking against the chain. A rescan of the whole chain rebuilds
+        # the wallet's DigiDollar state, which is the expensive part.
         with self.nodes[0].assert_debug_log(
-            expected_msgs=[],
-            unexpected_msgs=["DigiDollar: Running post-rescan position validation"],
+            expected_msgs=["DigiDollar: bounded rescan finished"],
+            unexpected_msgs=["DigiDollar: rebuilt DigiDollar state after rescan"],
             timeout=1):
             rescan_result = bounded_wallet.rescanblockchain(tip, tip)
 
@@ -944,7 +947,7 @@ class DigiDollarRescanTest(DigiByteTestFramework):
         assert_equal(rescan_result["stop_height"], tip)
 
         with self.nodes[0].assert_debug_log(
-            expected_msgs=["DigiDollar: Running post-rescan position validation"],
+            expected_msgs=["DigiDollar: rebuilt DigiDollar state after rescan"],
             unexpected_msgs=[],
             timeout=5):
             bounded_wallet.rescanblockchain()

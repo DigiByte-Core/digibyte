@@ -415,6 +415,242 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_requires_fee_inputs)
     BOOST_CHECK(result.error.find("Insufficient fee inputs") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Redemption fee estimate and fee-coin reselection
+//
+// A redemption's fee grows with every DGB coin added to pay it, so choosing
+// coins once against a guessed size can leave the real transaction short.
+// These cases pin the estimate to the fee the build actually charges and
+// show that reselection changes the input set until the coins cover it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr CAmount PRODUCTION_DD_FEE_RATE{35000000}; // 0.35 DGB/kB, the rate the wallet and RPC use
+constexpr CAmount OLD_FIXED_REDEEM_TARGET{21000000}; // 400 vB * 0.35 DGB/kB + 50%, the old one-shot guess
+
+TxBuilderRedeemParams MakeRedeemParams(CAmount feeRate = PRODUCTION_DD_FEE_RATE)
+{
+    TxBuilderRedeemParams params;
+    uint256 collateralHash;
+    collateralHash.SetHex("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+    params.collateralOutpoint = COutPoint(collateralHash, 0);
+    params.ddToRedeem = 10000;
+    params.path = RedemptionPath::NORMAL;
+    params.ownerKey = CreateTestKey();
+    params.feeRate = feeRate;
+    params.ddUtxos = CreateTestUTXOs(1);
+    params.ddAmounts = {10000};
+    params.collateralAmount = 30000000000; // 300 DGB
+    params.ddMinted = 10000;
+    params.unlockHeight = 500;
+    return params;
+}
+
+// A wallet holding the given DGB coins, selecting smallest-first until the
+// target is met, exactly like DigiDollarWallet::SelectFeeCoins.
+struct FakeFeeWallet {
+    std::vector<CAmount> coins;
+    std::vector<size_t> selected_counts; // one entry per selector call
+
+    explicit FakeFeeWallet(std::vector<CAmount> c) : coins(std::move(c))
+    {
+        std::sort(coins.begin(), coins.end());
+    }
+
+    RedeemTxBuilder::FeeCoinSelector Selector()
+    {
+        return [this](CAmount target, std::vector<COutPoint>& utxos, std::vector<CAmount>& amounts, CAmount& total) {
+            utxos.clear();
+            amounts.clear();
+            total = 0;
+            for (size_t i = 0; i < coins.size() && total < target; ++i) {
+                utxos.emplace_back(uint256::ONE, static_cast<uint32_t>(i));
+                amounts.push_back(coins[i]);
+                total += coins[i];
+            }
+            selected_counts.push_back(utxos.size());
+            if (total >= target) return true;
+            utxos.clear();
+            amounts.clear();
+            total = 0;
+            return false;
+        };
+    }
+};
+
+CAmount Sum(const std::vector<CAmount>& amounts)
+{
+    CAmount total = 0;
+    for (const CAmount a : amounts) total += a;
+    return total;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(redeem_fee_estimate_matches_build_fee)
+{
+    // The estimate must be the fee the build charges, for every input count,
+    // with and without DD change, and for every collateral destination type.
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    const CKey destKey = CreateTestKey();
+    const std::vector<std::optional<CTxDestination>> destinations{
+        std::nullopt, // owner-key Taproot fallback
+        CTxDestination{WitnessV1Taproot(XOnlyPubKey(destKey.GetPubKey()))},
+        CTxDestination{WitnessV0KeyHash(destKey.GetPubKey())},
+        CTxDestination{PKHash(destKey.GetPubKey())},
+    };
+    for (const size_t feeInputs : {1u, 2u, 3u, 5u, 8u, 20u}) {
+        for (const CAmount ddInput : {CAmount{10000}, CAmount{12500}}) {
+            for (const auto& dest : destinations) {
+                TxBuilderRedeemParams params = MakeRedeemParams();
+                params.ddAmounts = {ddInput};
+                params.collateralDest = dest;
+                params.feeUtxos = CreateTestUTXOs(feeInputs);
+                // Generous coins: the DGB change stays above dust, so the
+                // build's fee is exactly the estimate and not "fee + dust".
+                params.feeAmounts.assign(feeInputs, 100 * COIN);
+
+                const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+                BOOST_REQUIRE_MESSAGE(estimate.ok, estimate.error);
+                BOOST_CHECK_GE(estimate.fee, COIN / 10);
+
+                const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
+                BOOST_REQUIRE_MESSAGE(result.success, result.error);
+                BOOST_CHECK_EQUAL(result.totalFees, estimate.fee);
+                BOOST_CHECK_EQUAL(result.tx.vin.size(), 2 + feeInputs);
+                // The build appends the DGB change output after fixing the fee, so the
+                // finished transaction is larger than the skeleton the fee was set on.
+                BOOST_CHECK_GT(EstimateTransactionVSize(result.tx), estimate.vsize);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(redeem_fee_estimate_keeps_minimum_fee_floor)
+{
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    TxBuilderRedeemParams params = MakeRedeemParams(/*feeRate=*/100000);
+    params.feeUtxos = CreateTestUTXOs(1);
+    const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+    BOOST_REQUIRE_MESSAGE(estimate.ok, estimate.error);
+    BOOST_CHECK_EQUAL(estimate.fee, COIN / 10); // the absolute DD minimum, as redeem_transaction_basic expects
+}
+
+BOOST_AUTO_TEST_CASE(redeem_fee_estimate_rejects_insufficient_dd)
+{
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    TxBuilderRedeemParams params = MakeRedeemParams();
+    params.ddAmounts = {5000}; // less than the 10000 to burn
+    params.feeUtxos = CreateTestUTXOs(1);
+    const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+    BOOST_CHECK(!estimate.ok);
+    BOOST_CHECK(estimate.error.find("Insufficient DD") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(redeem_fragmented_wallet_one_shot_selection_fails_then_reselection_converges)
+{
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    FakeFeeWallet wallet(std::vector<CAmount>(40, 5000000)); // forty coins of 0.05 DGB
+
+    // The old behaviour: one selection against a 400 vB guess. Smallest-first
+    // reaches 0.21 DGB with five coins, but seven inputs make the real
+    // transaction cost more than 0.25 DGB, and the build refuses it.
+    {
+        TxBuilderRedeemParams params = MakeRedeemParams();
+        CAmount total = 0;
+        BOOST_REQUIRE(wallet.Selector()(OLD_FIXED_REDEEM_TARGET, params.feeUtxos, params.feeAmounts, total));
+        BOOST_CHECK_EQUAL(params.feeUtxos.size(), 5u);
+        BOOST_CHECK_EQUAL(total, 25000000);
+        const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+        BOOST_REQUIRE_MESSAGE(estimate.ok, estimate.error);
+        BOOST_CHECK_GT(estimate.fee, total);
+        const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
+        BOOST_CHECK(!result.success);
+        BOOST_CHECK_EQUAL(result.error, "Insufficient fee inputs for DD redemption fee");
+    }
+    wallet.selected_counts.clear();
+
+    // Reselection: every attempt changes the input set until the coins cover
+    // the fee of the transaction they produce, and the build then succeeds.
+    {
+        TxBuilderRedeemParams params = MakeRedeemParams();
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(builder.SelectRedemptionFeeInputs(params, wallet.Selector(), error), error);
+        BOOST_CHECK(error.empty());
+        BOOST_CHECK_GT(params.feeUtxos.size(), 5u);
+        BOOST_CHECK_EQUAL(params.feeUtxos.size(), params.feeAmounts.size());
+        BOOST_CHECK_GT(wallet.selected_counts.size(), 1u);
+        for (size_t i = 1; i < wallet.selected_counts.size(); ++i) {
+            BOOST_CHECK_MESSAGE(wallet.selected_counts[i] > wallet.selected_counts[i - 1],
+                                "attempt " << i + 1 << " selected " << wallet.selected_counts[i]
+                                           << " coins, not more than attempt " << i << " (" << wallet.selected_counts[i - 1] << ")");
+        }
+        const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+        BOOST_REQUIRE_MESSAGE(estimate.ok, estimate.error);
+        BOOST_CHECK_GE(Sum(params.feeAmounts), estimate.fee);
+        const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
+        BOOST_REQUIRE_MESSAGE(result.success, result.error);
+        BOOST_CHECK_EQUAL(result.tx.vin.size(), 2 + params.feeUtxos.size());
+        BOOST_CHECK_GE(Sum(params.feeAmounts), result.totalFees);
+        BOOST_CHECK_GE(result.totalFees, COIN / 10);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(redeem_single_large_coin_is_selected_once)
+{
+    // A wallet with one large coin behaves exactly as before: one attempt,
+    // one fee input, and the build charges the estimated fee.
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    FakeFeeWallet wallet({100 * COIN});
+    TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(builder.SelectRedemptionFeeInputs(params, wallet.Selector(), error), error);
+    BOOST_CHECK_EQUAL(wallet.selected_counts.size(), 1u);
+    BOOST_CHECK_EQUAL(params.feeUtxos.size(), 1u);
+    const RedeemTxBuilder::FeeEstimate estimate = builder.EstimateRedemptionFee(params);
+    const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
+    BOOST_REQUIRE_MESSAGE(result.success, result.error);
+    BOOST_CHECK_EQUAL(result.totalFees, estimate.fee);
+    BOOST_CHECK_EQUAL(result.tx.vin.size(), 3u);
+}
+
+BOOST_AUTO_TEST_CASE(redeem_dust_only_wallet_fails_within_attempt_budget)
+{
+    // Coins so small that each one adds more fee than value can never
+    // converge. The loop must stop at its budget, clear the selection, and
+    // tell the user to consolidate rather than spin or return a short set.
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    FakeFeeWallet wallet(std::vector<CAmount>(200, 2000000)); // two hundred coins of 0.02 DGB
+    TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    BOOST_CHECK(!builder.SelectRedemptionFeeInputs(params, wallet.Selector(), error, /*max_attempts=*/4));
+    BOOST_CHECK_EQUAL(wallet.selected_counts.size(), 4u);
+    BOOST_CHECK(params.feeUtxos.empty());
+    BOOST_CHECK(params.feeAmounts.empty());
+    BOOST_CHECK_MESSAGE(error.find("onsolidate") != std::string::npos, error);
+    BOOST_CHECK_MESSAGE(error.find("Insufficient DGB fee inputs") != std::string::npos, error);
+}
+
+BOOST_AUTO_TEST_CASE(redeem_wallet_without_dgb_fails_with_balance_error)
+{
+    TestRedeemTxBuilder builder(Params(), 1000, 10000);
+    FakeFeeWallet empty({});
+    TxBuilderRedeemParams params = MakeRedeemParams();
+    std::string error;
+    BOOST_CHECK(!builder.SelectRedemptionFeeInputs(params, empty.Selector(), error));
+    BOOST_CHECK_EQUAL(empty.selected_counts.size(), 1u);
+    BOOST_CHECK(params.feeUtxos.empty());
+    BOOST_CHECK_MESSAGE(error.find("Insufficient DGB balance") != std::string::npos, error);
+
+    // Coins that run out part-way stop with the same balance error.
+    FakeFeeWallet tiny({1000000}); // a single 0.01 DGB coin
+    TxBuilderRedeemParams params2 = MakeRedeemParams();
+    BOOST_CHECK(!builder.SelectRedemptionFeeInputs(params2, tiny.Selector(), error));
+    BOOST_CHECK(params2.feeUtxos.empty());
+    BOOST_CHECK_MESSAGE(error.find("Insufficient DGB balance") != std::string::npos, error);
+}
+
 BOOST_AUTO_TEST_CASE(redeem_transaction_rejects_zero_prequeried_dd_minted)
 {
     const CChainParams& params = Params();

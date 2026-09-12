@@ -20,6 +20,83 @@ How to Upgrade
 ==============
 
 
+DigiDollar RPC changes in v9.26.6
+---------------------------------
+
+### Explicit amount units (`amount_unit`) — compatibility change
+
+`senddigidollar`, `sendmanydigidollar`, `redeemdigidollar` and the read-only
+`getredemptioninfo` no longer guess whether an amount is cents or dollars from
+the shape of the number. Previously `10000` meant 10,000 cents ($100.00) while
+`10000.00` meant $10,000.00, so a habitual decimal point requested one hundred
+times the intended amount.
+
+Each of these RPCs takes a new optional trailing string argument `amount_unit`
+with the values `"cents"` or `"dollars"`:
+
+- **No `amount_unit` and an integer** (`5000`, `"5000"`): cents, exactly as
+  before. Existing integer-cents callers need no change.
+- **No `amount_unit` and a decimal point** (`"50.00"`, `50.5`): rejected with
+  error `-8` and the message
+  `ambiguous amount: pass amount_unit=cents or amount_unit=dollars ...`.
+  Nothing is sent, redeemed or changed. Callers that relied on decimal input
+  meaning dollars must add `amount_unit="dollars"`.
+- **`amount_unit="cents"`**: the amount must be an integer; `"10.00"` is
+  rejected.
+- **`amount_unit="dollars"`**: at most two decimal places; `"12.34"` is 1,234
+  cents, `"12"` is 1,200 cents, `"12.345"` is rejected.
+
+Amounts are parsed as plain decimal numbers with checked integer arithmetic
+(never floating point): signs, whitespace, exponents (`1e3`), thousands
+separators and leading zeros are rejected. The $100,000 per-request cap on
+`senddigidollar`, per recipient on `sendmanydigidollar`, and on the
+`redeemdigidollar` principal is unchanged and applies under either unit; it
+never limits the emergency-redemption burn a wallet computes from a vault.
+
+For `sendmanydigidollar` one `amount_unit` applies to every recipient, and a
+rejected amount names the recipient it came from. The `min_amount` filter of
+`listdigidollarpositions` and the `min_balance` filter of
+`listdigidollaraddresses` share the parser and gained the same optional
+`amount_unit` argument. Two smaller changes come with that: a negative
+`min_amount` or `min_balance` used to be accepted and then ignored, and is now
+rejected like any other negative amount; and `getredemptioninfo` now applies
+the same $100,000 limit to `dd_amount` that `redeemdigidollar` applies, so
+checking a redemption and performing it give the same answer.
+
+Positional order of the new argument: `senddigidollar <address> <amount>
+[comment] [fee_rate] [selected_inputs] [amount_unit]`,
+`sendmanydigidollar <dummy> <amounts> [comment] [selected_inputs] [amount_unit]`,
+`redeemdigidollar <position_id> <dd_amount> [redemption_address] [fee_rate]
+[amount_unit]`, `getredemptioninfo <position_id> [dd_amount] [amount_unit]`.
+Named arguments (`amount_unit=dollars`) work with `digibyte-cli -named` and
+JSON-RPC named parameters. `mintdigidollar` is unchanged: it has always taken
+integer cents only.
+
+### Redemption fee coins are chosen from the real transaction size
+
+`redeemdigidollar` used to pick DGB coins for the fee once, against a fixed
+400-byte size guess, and then fail with `Insufficient fee inputs for DD
+redemption fee` when the real transaction (which grows with every fee coin)
+cost more. Wallets whose DGB was split into many small coins could not redeem
+at all. The fee coins are now selected from the projected size of the
+transaction they produce, re-selecting a bounded number of times until they
+cover it. The 0.1 DGB DigiDollar minimum fee and the 0.35 DGB/kB DigiDollar
+fee rate are unchanged. If a wallet holds only coins so small that each adds
+more fee than value, the RPC now says so and advises consolidating DGB
+coins.
+
+### Leftover DGB no longer follows a redemption address you supply
+
+`redeemdigidollar` sends the returned collateral to `redemption_address` when
+you give one, and that address may belong to someone else, such as an exchange
+deposit address. The DGB left over after the fee went to a change address from
+your own wallet, except in one case: if the wallet could not produce a change
+address, the leftover fell back to the collateral address and left the wallet
+for good. The redemption now stops with a clear error in that case. Redemptions
+that do not name a `redemption_address` are unaffected, and so is every
+redemption where the wallet can produce a change address.
+
+
 DigiDollar Oracle Phase 3: MuSig2 Aggregate Signatures
 -------------------------------------------------------
 

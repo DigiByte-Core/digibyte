@@ -1147,16 +1147,43 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         LogPrintf("DigiDollar Qt: Step 9 - Transaction ID: %s\n", txId.GetHex());
 
         DigiDollarWallet* ddWallet = m_wallet->getDigiDollarWallet();
-        if (ddWallet) {
-            ddWallet->StoreOwnerKey(positionId, ownerKey);
-            LogPrintf("DigiDollar Qt: Stored owner key for position %s before broadcast\n", positionId.GetHex());
-        } else {
-            LogPrintf("DigiDollar Qt: WARNING - DD wallet not available before broadcast, owner key not stored\n");
+        if (!ddWallet) {
+            LogPrintf("DigiDollar Qt: ERROR - DD wallet not available, nothing to save the mint in\n");
+            return DigiDollarMintResult(TransactionCreationFailed, "", "",
+                "DigiDollar wallet not initialized. Nothing was sent.");
         }
 
-        // Step 10: Commit through the wallet relay path, which broadcasts once
+        // Step 10: Save the owner key and the position record BEFORE the
+        // transaction leaves this node. Once it is sent it can be mined
+        // whether or not this process survives, so the records that make the
+        // vault redeemable have to be on disk first. Every write reports
+        // failure, and a failure stops the mint here, before anything is sent.
+        // DigiByte has 15-second blocks: 4 blocks/min * 60 min/hr * 24 hr/day = 5760 blocks/day
+        int64_t lockBlocks = DigiDollar::LockDaysToBlocks(lockDays);
+        int64_t unlockHeight = mintHeight + lockBlocks + DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
+        WalletCollateralPosition position(positionId, ddAmount, result.collateralRequired, lockTier, unlockHeight);
+        position.owner_keyid = ownerKeyID;  // Store the owner key ID for later transfer signing
+        {
+            std::string persist_error;
+            if (!ddWallet->RecordPendingMint(*txRef, position, ownerKey, persist_error)) {
+                // Drop whatever partial record was written; the owner key is kept.
+                std::string cleanup_error;
+                if (!ddWallet->ReleaseMintAttempt(positionId, cleanup_error)) {
+                    LogPrintf("DigiDollar Qt: cleanup after failed save of %s: %s\n",
+                              positionId.GetHex(), cleanup_error);
+                }
+                LogPrintf("DigiDollar Qt: ERROR - Could not save the mint before sending it: %s\n", persist_error);
+                return DigiDollarMintResult(TransactionCreationFailed, "", "",
+                    QString("Mint not broadcast: %1. Nothing was sent; check the wallet file and free disk space, then try again.")
+                        .arg(QString::fromStdString(persist_error)));
+            }
+        }
+        LogPrintf("DigiDollar Qt: Step 10 - Saved position %s (%d DD cents) and its owner key before broadcast\n",
+                  positionId.GetHex(), ddAmount);
+
+        // Step 11: Commit through the wallet relay path, which broadcasts once
         // and updates wallet/mempool state from the same code path.
-        LogPrintf("DigiDollar Qt: Step 10 - Committing transaction through wallet relay...\n");
+        LogPrintf("DigiDollar Qt: Step 11 - Committing transaction through wallet relay...\n");
 
         std::string commit_error;
         bool commit_success = false;
@@ -1174,40 +1201,28 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         }
         if (!commit_success) {
             LogPrintf("DigiDollar Qt: ERROR - Failed to commit transaction: %s\n", commit_error);
-            // CommitTransaction() adds the tx to the wallet as inactive BEFORE relay and
-            // leaves it there when relay fails. A rejected mint must not linger as a
-            // non-abandoned wallet tx: the generic history model decodes any DD-shaped tx
-            // into "DigiDollar Collateral Lock / Transfer" rows, surfacing phantom DD
-            // activity even though no vault position was created. Abandon it, mirroring
-            // the RPC mint path (rpc/digidollar.cpp) and CommitDDTransaction().
-            if (pWallet->TransactionCanBeAbandoned(txId)) {
-                pWallet->AbandonTransaction(txId);
-                LogPrintf("DigiDollar Qt: Abandoned rejected local mint tx %s\n", txId.GetHex());
+            // The mempool (or the wallet itself) refused the transaction.
+            // Release what this attempt reserved: its DGB inputs, the coin
+            // locks on the collateral and token outputs, and its active
+            // status. The owner key and the record of the attempt stay, so a
+            // reorg or a late confirmation can bring the vault back.
+            // Abandoning the transaction also keeps a refused mint out of the
+            // transaction list, which otherwise shows any DigiDollar-shaped
+            // wallet transaction as collateral lock activity that never
+            // happened.
+            std::string cleanup_error;
+            if (!ddWallet->ReleaseMintAttempt(positionId, cleanup_error)) {
+                LogPrintf("DigiDollar Qt: could not release rejected mint %s: %s\n",
+                          positionId.GetHex(), cleanup_error);
+            } else {
+                LogPrintf("DigiDollar Qt: Released rejected mint transaction %s\n", positionId.GetHex());
             }
             return DigiDollarMintResult(TransactionCreationFailed, "", "",
                 QString("Failed to broadcast transaction: %1").arg(QString::fromStdString(commit_error)));
         }
         LogPrintf("DigiDollar Qt: Transaction broadcast successful!\n");
-
-        // Step 11: Store position in wallet database for tracking
-        LogPrintf("DigiDollar Qt: Step 11 - Storing position in wallet...\n");
-
-        // Store position in DigiDollarWallet
-        if (ddWallet) {
-            // DigiByte has 15-second blocks: 4 blocks/min * 60 min/hr * 24 hr/day = 5760 blocks/day
-            int64_t lockBlocks = DigiDollar::LockDaysToBlocks(lockDays);
-            int64_t unlockHeight = mintHeight + lockBlocks + DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
-            WalletCollateralPosition position(positionId, ddAmount, result.collateralRequired, lockTier, unlockHeight);
-            position.owner_keyid = ownerKeyID;  // Store the owner key ID for later transfer signing
-            ddWallet->AddCollateralPosition(position);
-
-            LogPrintf("DigiDollar Qt: Position stored in wallet - ID: %s, DD: %d, DGB: %d, Tier: %d\n",
-                      positionId.GetHex(), ddAmount, result.collateralRequired, lockTier);
-
-            // Note: Transaction is automatically added to history by AddCollateralPosition()
-        } else {
-            LogPrintf("DigiDollar Qt: WARNING - DD wallet not available, position not stored\n");
-        }
+        LogPrintf("DigiDollar Qt: Position stored in wallet - ID: %s, DD: %d, DGB: %d, Tier: %d\n",
+                  positionId.GetHex(), ddAmount, result.collateralRequired, lockTier);
 
         LogPrintf("DigiDollar Qt: ========== MINT DIGIDOLLAR SUCCESS ==========\n");
         LogPrintf("DigiDollar Qt: Summary:\n");

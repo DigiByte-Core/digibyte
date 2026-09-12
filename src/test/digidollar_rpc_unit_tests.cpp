@@ -112,6 +112,18 @@ BOOST_FIXTURE_TEST_CASE(wave1_list_positions_min_amount_filters_dd_cents_not_dgb
     std::shared_ptr<wallet::CWallet> wallet = CreateWalletWithPositions();
     wallet::AddWallet(context, wallet);
 
+    // "1.00" means one dollar, which is 100 DigiDollar cents. It must never
+    // be read as a DGB amount in satoshis. The unit has to be said out loud:
+    // an amount with a decimal point and no amount_unit is refused.
+    JSONRPCRequest ambiguous;
+    ambiguous.context = &context;
+    ambiguous.strMethod = "listdigidollarpositions";
+    ambiguous.params = UniValue(UniValue::VARR);
+    ambiguous.params.push_back(true);
+    ambiguous.params.push_back(-1);
+    ambiguous.params.push_back("1.00");
+    BOOST_CHECK_THROW(listdigidollarpositions().HandleRequest(ambiguous), UniValue);
+
     JSONRPCRequest request;
     request.context = &context;
     request.strMethod = "listdigidollarpositions";
@@ -119,6 +131,9 @@ BOOST_FIXTURE_TEST_CASE(wave1_list_positions_min_amount_filters_dd_cents_not_dgb
     request.params.push_back(true);
     request.params.push_back(-1);
     request.params.push_back("1.00");
+    request.params.push_back(UniValue(UniValue::VNULL)); // count
+    request.params.push_back(UniValue(UniValue::VNULL)); // skip
+    request.params.push_back("dollars");
 
     UniValue result = listdigidollarpositions().HandleRequest(request);
     wallet::RemoveWallet(context, wallet, std::nullopt);

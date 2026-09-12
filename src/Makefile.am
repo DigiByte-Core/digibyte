@@ -159,6 +159,7 @@ DIGIBYTE_CORE_H = \
   dbwrapper.h \
   deploymentinfo.h \
   deploymentstatus.h \
+  digidollar/amount.h \
   digidollar/digidollar.h \
   digidollar/scripts.h \
   digidollar/txbuilder.h \
@@ -745,6 +746,7 @@ libdigibyte_common_a_SOURCES = \
   core_read.cpp \
   core_write.cpp \
   deploymentinfo.cpp \
+  digidollar/amount.cpp \
   digidollar/digidollar.cpp \
   digidollar/scripts.cpp \
   digidollar/txbuilder.cpp \
