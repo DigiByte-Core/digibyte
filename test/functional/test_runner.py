@@ -105,6 +105,7 @@ BASE_SCRIPTS = [
     # vv Tests less than 5m vv
     'feature_fee_estimation.py',
     'feature_taproot.py',
+    'feature_taproot.py --digidollar-active',
     'feature_block.py',
     # vv Tests less than 2m vv
     'mining_getblocktemplate_longpoll.py',
@@ -287,6 +288,8 @@ BASE_SCRIPTS = [
     'digidollar_thawday_fresh_sync.py',
     'digidollar_thawday_sync_state.py',
     'digidollar_thawday_node_matrix.py',
+    'digidollar_thawday_reference_reorg.py',
+    'digidollar_thawday_extra_burn.py --descriptors',
     'digidollar_oracle_startup_consensus.py',
     'digidollar_activation.py',
     'digidollar_basic.py',

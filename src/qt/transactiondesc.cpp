@@ -19,11 +19,13 @@
 #include <key_io.h>
 #include <logging.h>
 #include <policy/policy.h>
+#include <script/standard.h>
 #include <validation.h>
 #include <wallet/types.h>
 
 #include <stdint.h>
 #include <string>
+#include <variant>
 
 #include <QLatin1String>
 
@@ -240,9 +242,14 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
         strHTML += facts.have_dd_cents ? FormatDigiDollar(facts.dd_cents) : NotInThisTransaction();
         strHTML += "<br>";
 
-        if (!wtx.tx->vout.empty() && wtx.tx->vout[0].nValue > 0) {
+        // A valid mint has one positive Taproot output holding its collateral.
+        for (const CTxOut& output : wtx.tx->vout) {
+            CTxDestination destination;
+            if (output.nValue <= 0 || !ExtractDestination(output.scriptPubKey, destination) ||
+                !std::holds_alternative<WitnessV1Taproot>(destination)) continue;
             strHTML += "<b>" + tr("Collateral locked") + ":</b> " +
-                       DigiByteUnits::formatHtmlWithUnit(unit, wtx.tx->vout[0].nValue) + "<br>";
+                       DigiByteUnits::formatHtmlWithUnit(unit, output.nValue) + "<br>";
+            break;
         }
 
         strHTML += "<b>" + tr("Lock period") + ":</b> ";

@@ -96,6 +96,8 @@ class DigiDollarThawDayFreshSyncTest(DigiByteTestFramework):
         blocks_needed = unlock_height - producer.getblockcount()
         if blocks_needed > 0:
             self.mine(blocks_needed)
+        self.log.info("Recover a real partial UTXO write that spends a vault and burns extra tokens")
+        self.restart_node(0, self.extra_args[0] + ["-dbbatchsize=1", "-dbcrashratio=1"])
         producer.setmockoracleprice(self.REDEMPTION_PRICE)
         redemption = producer.redeemdigidollar(positions[0]["position_id"], self.PRINCIPAL)
         assert_equal(redemption["err_active"], True)
@@ -104,6 +106,12 @@ class DigiDollarThawDayFreshSyncTest(DigiByteTestFramework):
         assert redemption["txid"] in producer.getblock(redemption_block)["tx"]
         remaining_collateral = collateral - int(Decimal(positions[0]["dgb_collateral"]) * 100000000)
         expected = self.canonical(producer, 200000, 175000, remaining_collateral, 2)
+        with producer.assert_debug_log(["Writing partial batch", "Simulating a crash. Goodbye."]):
+            self.stop_node(0)
+        self.start_node(0, self.extra_args[0])
+        assert_equal(producer.getpeerinfo(), [])
+        assert_equal(producer.getbestblockhash(), redemption_block)
+        assert_equal(self.canonical(producer, 200000, 175000, remaining_collateral, 2), expected)
 
         self.log.info("Fresh observers validate the entire retained history from genesis")
         self.assert_fresh_observers(genesis)

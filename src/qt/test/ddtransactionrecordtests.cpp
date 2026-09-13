@@ -30,6 +30,7 @@
 #include <pow.h>
 #include <primitives/transaction.h>
 #include <qt/clientmodel.h>
+#include <qt/digibyteunits.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/transactiondesc.h>
@@ -43,8 +44,11 @@
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <algorithm>
+#include <iterator>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <QCoreApplication>
 #include <QRegularExpression>
@@ -324,6 +328,78 @@ void DDTransactionRecordTests::mintDetailsShowDigiDollarFacts()
     }
 
     MockOracleManager::GetInstance().Reset();
+}
+
+void DDTransactionRecordTests::mintDetailsFindCollateralInAnyOutput_data()
+{
+    QTest::addColumn<int>("first_output");
+    QTest::newRow("collateral first") << 0;
+    QTest::newRow("ordinary change first") << 2;
+    QTest::newRow("token first") << 1;
+}
+
+void DDTransactionRecordTests::mintDetailsFindCollateralInAnyOutput()
+{
+    QFETCH(int, first_output);
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    MineBlockWithOraclePrice(test, 500000);
+    std::shared_ptr<wallet::CWallet> wallet = wallet::CreateSyncedWallet(
+        *test.m_node.chain,
+        WITH_LOCK(Assert(test.m_node.chainman)->GetMutex(), return test.m_node.chainman->ActiveChain()),
+        test.coinbaseKey);
+    // Keep the original out of the mempool so reordered versions can be checked.
+    wallet->SetBroadcastTransactions(false);
+    wallet->EnsureDDWallet();
+
+    MiniGui gui(m_node);
+    gui.openWallet(m_node, wallet);
+    gui.walletModel->pollBalanceChanged();
+    const auto result = gui.walletModel->mintDigiDollar(10000, 0);
+    QVERIFY2(result.status == WalletModel::OK, result.reasonFailed.toUtf8().constData());
+
+    uint256 mint_txid;
+    mint_txid.SetHex(result.txid.toStdString());
+    const auto original = gui.walletModel->wallet().getWalletTx(mint_txid);
+    QVERIFY(original.tx != nullptr);
+    QCOMPARE(original.tx->vout.size(), size_t{4});
+    const CAmount collateral = original.tx->vout[0].nValue;
+    const auto change_output = std::find_if(original.tx->vout.begin() + 1, original.tx->vout.end(),
+        [](const CTxOut& output) { return output.nValue > 0; });
+    QVERIFY(change_output != original.tx->vout.end());
+    const CAmount change = change_output->nValue;
+    QVERIFY(collateral > 0);
+    QVERIFY(change > 0);
+    QVERIFY(collateral != change);
+
+    CMutableTransaction reordered{*original.tx};
+    const auto swap_index = first_output == 2 ? std::distance(original.tx->vout.begin(), change_output) : first_output;
+    std::swap(reordered.vout[0], reordered.vout[swap_index]);
+    for (auto& input : reordered.vin) {
+        input.scriptSig.clear();
+        input.scriptWitness.SetNull();
+    }
+    QVERIFY(WITH_LOCK(wallet->cs_wallet, return wallet->SignTransaction(reordered)));
+    const CTransactionRef tx = MakeTransactionRef(reordered);
+    const auto accepted = WITH_LOCK(cs_main, return test.m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true));
+    QVERIFY2(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID, accepted.m_state.ToString().c_str());
+    PutInWallet(*wallet, tx);
+
+    const auto wtx = gui.walletModel->wallet().getWalletTx(tx->GetHash());
+    auto rows = TransactionRecord::decomposeTransaction(wtx);
+    QVERIFY(!rows.isEmpty());
+    const QString text = DetailsPlainText(m_node, gui.walletModel->wallet(), rows.front());
+    MockOracleManager::GetInstance().Reset();
+
+    const QString expected = QTextDocumentFragment::fromHtml(
+        QStringLiteral("Collateral locked: ") + DigiByteUnits::formatHtmlWithUnit(DigiByteUnit::DGB, collateral)).toPlainText();
+    QVERIFY2(text.contains(expected), qPrintable(text));
 }
 
 void DDTransactionRecordTests::transferRowsShowDollarsAndFeeSeparately()

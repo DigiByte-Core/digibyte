@@ -57,7 +57,7 @@ private:
     int32_t cached_epoch{-1};
     int64_t last_update_time{0};
 
-    // Configuration
+    // Configuration is protected by mtx_messages.
     bool enabled{true};
     int32_t min_oracle_count{ORACLE_CONSENSUS_REQUIRED};
     int32_t total_oracle_count{ORACLE_ACTIVE_COUNT};
@@ -72,10 +72,26 @@ public:
     ~OracleBundleManager();
 
     //! Configuration
-    void SetEnabled(bool enable) { enabled = enable; }
-    bool IsEnabled() const { return enabled; }
-    void SetMinOracleCount(int32_t min_count) { min_oracle_count = min_count; }
-    int32_t GetMinOracleCount() const { return min_oracle_count; }
+    void SetEnabled(bool enable)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        enabled = enable;
+    }
+    bool IsEnabled() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        return enabled;
+    }
+    void SetMinOracleCount(int32_t min_count)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        min_oracle_count = min_count;
+    }
+    int32_t GetMinOracleCount() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        return min_oracle_count;
+    }
 
     //! Message management
     bool AddOracleMessage(const COraclePriceMessage& message);

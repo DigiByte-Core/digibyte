@@ -722,7 +722,7 @@ void SetupServerArgs(ArgsManager& argsman)
 
     // DigiDollar stablecoin options
     // DigiDollar startup options
-    argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (follows BIP9 activation by default)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (activation follows the network's configured block height)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-ddthawdayheight=<n>", "Set the block height at which the DigiDollar Thaw Day rules take effect (regtest only; on any other network this option is a startup error, so keep it under a [regtest] section of the config file). Default: not scheduled.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
 
@@ -2069,12 +2069,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // than by putting a lock around eight call sites, two of which are block
     // validation and mining.
     //
-    // The oracle bundle manager is deliberately left where it is, below. Its
-    // setup is followed by a full chain scan whose position relative to import
-    // is deliberate. The block notification this registers for does reach it,
-    // through the context proposal it builds, but only to take a locked snapshot
-    // that needs nothing the later setup adds. Its own publication is a separate
-    // problem and is written down rather than fixed here.
+    // Configure the bundle manager before signing callbacks or import can use
+    // it. Price reconstruction stays below, after the import thread is started.
+    OracleBundleManager::Initialize();
+    OracleBundleManager::GetInstance().SetConnman(node.connman.get());
     OracleSigningOrchestrator::Initialize(node.connman.get());
 
     std::vector<fs::path> vImportFiles;
@@ -2287,10 +2285,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         return false;
     }
 
-    // Initialize Oracle Bundle Manager with consensus parameters
-    OracleBundleManager::Initialize();
-    // Initialize oracle P2P connection for broadcasting
-    OracleBundleManager::GetInstance().SetConnman(node.connman.get());
     // Keep required reconstruction synchronous and publish only a complete scan.
     OracleBundleManager::LoadCallbacks oracle_load_callbacks;
     oracle_load_callbacks.cancelled = ShutdownRequested;

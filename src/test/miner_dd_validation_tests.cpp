@@ -373,22 +373,24 @@ struct ThawMinerValidationSetup : MinerDDValidationSetup {
     CTransactionRef redeemable_mint;
     CTransactionRef other_mint;
 
-    explicit ThawMinerValidationSetup(bool seed_redemption = false)
+    explicit ThawMinerValidationSetup(bool seed_redemption = false, CAmount principal = 100)
         : MinerDDValidationSetup({"-digidollaractivationheight=100", "-ddthawdayheight=400"})
     {
         DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
         if (seed_redemption) {
             DigiDollar::SystemHealthMonitor::ResetMetrics();
             redemption_owner.MakeNewKey(true);
-            const auto strong_funding = ConfirmOpTrueFunding(30 * COIN + MINT_FEE);
-            const auto weak_funding = ConfirmOpTrueFunding(15 * COIN + MINT_FEE);
+            const CAmount strong_collateral = 30 * COIN * principal / 100;
+            const CAmount weak_collateral = 15 * COIN * principal / 100;
+            const auto strong_funding = ConfirmOpTrueFunding(strong_collateral + MINT_FEE);
+            const auto weak_funding = ConfirmOpTrueFunding(weak_collateral + MINT_FEE);
             const int height = NextBlockHeight();
             InstallMuSig2OraclePrice(1000000, height);
-            redeemable_mint = BuildDDMint(strong_funding, 30 * COIN + MINT_FEE,
-                30 * COIN, 100, height, MINT_FEE, 0, &redemption_owner);
-            other_mint = BuildDDMint(weak_funding, 15 * COIN + MINT_FEE,
-                15 * COIN, 100, height, MINT_FEE, 0, &redemption_owner);
-            redemption_vault.ddAmount = 100;
+            redeemable_mint = BuildDDMint(strong_funding, strong_collateral + MINT_FEE,
+                strong_collateral, principal, height, MINT_FEE, 0, &redemption_owner);
+            other_mint = BuildDDMint(weak_funding, weak_collateral + MINT_FEE,
+                weak_collateral, principal, height, MINT_FEE, 0, &redemption_owner);
+            redemption_vault.ddAmount = principal;
             redemption_vault.lockHeight = height + DigiDollar::LockDaysToBlocks(0);
             redemption_vault.ownerKey = XOnlyPubKey(redemption_owner.GetPubKey());
             redemption_vault.internalKey = DigiDollar::GetCollateralNUMSKey();
@@ -500,7 +502,7 @@ struct ThawBoundaryTemplateSetup : MinerDDValidationSetup {
 };
 
 struct ThawMinerERRValidationSetup : ThawMinerValidationSetup {
-    ThawMinerERRValidationSetup() : ThawMinerValidationSetup(true) {}
+    explicit ThawMinerERRValidationSetup(CAmount principal = 100) : ThawMinerValidationSetup(true, principal) {}
 
     ~ThawMinerERRValidationSetup()
     {
@@ -585,6 +587,95 @@ struct OpenRedemptionStatsIndex {
     }
 };
 
+// Encode the current derived row to model a logically wrong saved total without
+// changing its format, block hash, collateral, vault count or physical checksum.
+struct SavedSupplyHeightKey {
+    int height;
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ser_writedata8(stream, uint8_t{'h'});
+        ser_writedata32be(stream, 3);
+        ser_writedata32be(stream, height);
+    }
+};
+
+struct SavedSupplyValue {
+    CAmount supply;
+    CAmount collateral;
+    uint64_t vaults;
+    bool known;
+    SERIALIZE_METHODS(SavedSupplyValue, obj) { READWRITE(obj.supply, obj.collateral, obj.vaults, obj.known); }
+};
+
+struct PreviousSupplyHeightKey {
+    int height;
+    template <typename Stream>
+    void Serialize(Stream& stream) const
+    {
+        ser_writedata8(stream, uint8_t{'h'});
+        ser_writedata32be(stream, height);
+    }
+};
+
+struct PreviousSupplyValue {
+    CAmount supply;
+    CAmount collateral;
+    uint64_t vaults;
+    SERIALIZE_METHODS(PreviousSupplyValue, obj) { READWRITE(obj.supply, obj.collateral, obj.vaults); }
+};
+
+struct SupplyVerificationSetup : ThawMinerERRValidationSetup {
+    SupplyVerificationSetup() : ThawMinerERRValidationSetup(1000) {}
+
+    fs::path IndexPath() const { return m_args.GetDataDirNet() / "indexes" / "digidollarstats" / "db"; }
+    CBlockIndex* Tip() { return WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()); }
+
+    void SaveIndex()
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        m_node.chainman->ActiveChainstate().ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        opened.index.Stop();
+    }
+
+    void ChangeSavedSupply(const CBlockIndex& block, CAmount supply)
+    {
+        CDBWrapper db{{.path = IndexPath(), .cache_bytes = 1 << 20, .memory_only = false}};
+        std::pair<uint256, SavedSupplyValue> row;
+        BOOST_REQUIRE(db.Read(SavedSupplyHeightKey{block.nHeight}, row));
+        BOOST_REQUIRE(row.first == block.GetBlockHash());
+        row.second.supply = supply;
+        BOOST_REQUIRE(db.Write(SavedSupplyHeightKey{block.nHeight}, row));
+    }
+
+    void CheckSupply(const DigiDollarStatsIndex& index, const CBlockIndex& block,
+                     CAmount supply, CAmount collateral, uint64_t vaults)
+    {
+        const auto stats = index.LookUpStats(block);
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, supply);
+        BOOST_CHECK_EQUAL(stats->total_collateral, collateral);
+        BOOST_CHECK_EQUAL(stats->vault_count, vaults);
+    }
+
+    CBlockIndex* AcceptExtraBurn(const COutPoint& funding)
+    {
+        InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+        const auto redemption = BuildMatureRedemption(funding, 2 * COIN, COIN, 750);
+        const auto accepted = CreateAndProcessBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE);
+        BOOST_REQUIRE(Tip()->GetBlockHash() == accepted.GetHash());
+        BOOST_REQUIRE(BlockHasTx(accepted, redemption->GetHash()));
+        const auto canonical = WITH_LOCK(cs_main, return m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState());
+        BOOST_REQUIRE(canonical);
+        BOOST_REQUIRE_EQUAL(canonical->open_vault_principal, 1000);
+        return Tip();
+    }
+};
+
 struct OpenGlobalRedemptionStatsIndex {
     explicit OpenGlobalRedemptionStatsIndex(node::NodeContext& node)
     {
@@ -600,7 +691,8 @@ struct OpenGlobalRedemptionStatsIndex {
     }
 };
 
-void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool duplicate_metadata)
+void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool duplicate_metadata,
+                                 bool cross_thaw = false, bool cross_while_open = false)
 {
     struct RestoreHeight {
         int saved;
@@ -638,8 +730,11 @@ void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool dup
         if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
         return tableRPC.execute(request);
     };
-    const auto unavailable = [](const UniValue& error) {
-        return error["message"].get_str().find("circulating supply is unavailable") != std::string::npos;
+    const auto unavailable = [&](const UniValue& error) {
+        const bool thaw = WITH_LOCK(cs_main, return DigiDollar::IsThawDayActive(Params().GetConsensus(), chain.m_chain.Height()));
+        const std::string expected = thaw ? "DigiDollar supply not ready: invalid creating token metadata" :
+                                           "DigiDollar circulating supply is unavailable from retained metadata";
+        return error["message"].get_str() == expected;
     };
     const DigiDollar::CanonicalTxLookup lookup = [&](const uint256& txid, uint32_t height, CTransactionRef& tx) {
         LOCK(cs_main);
@@ -660,7 +755,14 @@ void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool dup
         BOOST_CHECK(index.GetSummary().synced);
         BOOST_CHECK(index.GetSummary().best_block_hash == tip->GetBlockHash());
         BOOST_CHECK(!index.LookUpStats(*tip));
+        const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
         BOOST_CHECK_EXCEPTION(call("getdigidollarstats"), UniValue, unavailable);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+        if (DigiDollar::IsThawDayActive(Params().GetConsensus(), tip->nHeight)) {
+            BOOST_REQUIRE(canonical);
+            BOOST_CHECK_EQUAL(canonical->open_vault_principal, 100);
+            BOOST_CHECK(canonical->history_checked);
+        }
         const auto earlier = index.LookUpStats(*parent);
         BOOST_REQUIRE(earlier);
         BOOST_CHECK_EQUAL(earlier->total_dd_supply, 200);
@@ -694,6 +796,12 @@ void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool dup
                                                                lookup, health, error, {}, &supply));
             BOOST_CHECK_EQUAL(supply, 12345);
             BOOST_CHECK(health == saved_health);
+            bool supply_known{true};
+            BOOST_REQUIRE(DigiDollar::ReconstructChainstateHealth(chain.CoinsTip(), Params().GetConsensus(),
+                lookup, health, error, {}, &supply, {}, &supply_known));
+            BOOST_CHECK(!supply_known);
+            BOOST_CHECK_EQUAL(supply, 12345);
+            BOOST_CHECK(health == saved_health);
 
             // Even after unknown metadata, a later unreadable source remains an error.
             CMutableTransaction inspect;
@@ -724,6 +832,10 @@ void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool dup
         SyncWithValidationInterfaceQueue();
         index.Stop();
     }
+    if (cross_thaw && !cross_while_open) {
+        fixture.mineBlocks(Params().GetConsensus().nDDThawDayHeight - fixture.NextBlockHeight() + 1);
+        BOOST_REQUIRE_EQUAL(fixture.NextBlockHeight(), Params().GetConsensus().nDDThawDayHeight + 1);
+    }
     {
         OpenGlobalRedemptionStatsIndex reopened{fixture.m_node};
         auto& index = *g_digidollar_stats_index;
@@ -731,6 +843,10 @@ void CheckLegacyUncountableSupply(ThawMinerERRValidationSetup& fixture, bool dup
         BOOST_CHECK(index.GetSummary().best_block_hash == unknown_descendant->GetBlockHash());
         BOOST_REQUIRE(index.StartBackgroundSync());
         IndexWaitSynced(index);
+        if (cross_while_open) {
+            fixture.mineBlocks(Params().GetConsensus().nDDThawDayHeight - fixture.NextBlockHeight() + 1);
+            BOOST_REQUIRE_EQUAL(fixture.NextBlockHeight(), Params().GetConsensus().nDDThawDayHeight + 1);
+        }
         check_unknown();
         call("invalidateblock", unknown_block->GetBlockHash().GetHex());
         BOOST_REQUIRE(WITH_LOCK(cs_main, return chain.m_chain.Tip()) == parent);
@@ -1273,6 +1389,58 @@ BOOST_FIXTURE_TEST_CASE(thaw_miner_retries_ordered_redemption_then_mint, ThawMin
     BOOST_CHECK(chain.CoinsTip().GetDigiDollarState() == parent_state);
 }
 
+BOOST_FIXTURE_TEST_CASE(thaw_miner_second_retry_removes_redemptions_that_need_an_earlier_mint, ThawMinerERRValidationSetup)
+{
+    const auto strong_fee_input = ConfirmOpTrueFunding(2 * COIN);
+    const auto weak_fee_input = ConfirmOpTrueFunding(2 * COIN);
+    const auto txs = PrepareCandidate(REFERENCE_PRICE);
+    const auto strong = BuildMatureRedemption(strong_fee_input, 2 * COIN, COIN);
+    std::swap(redeemable_mint, other_mint);
+    const auto weak = BuildMatureRedemption(weak_fee_input, 2 * COIN, COIN / 2);
+    std::swap(redeemable_mint, other_mint);
+    AddToMempool(strong, COIN);
+    AddToMempool(weak, COIN / 2);
+    {
+        LOCK(m_node.mempool->cs);
+        m_node.mempool->PrioritiseTransaction(txs.mint->GetHash(), 10 * COIN);
+    }
+    const auto parent = WITH_LOCK(cs_main, return m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState());
+    BOOST_REQUIRE(parent);
+    BOOST_REQUIRE_EQUAL(parent->open_vault_principal, 200);
+    BOOST_REQUIRE_EQUAL(parent->collateral, 45 * COIN);
+    BlockAssembler::Options options;
+    options.blockMinFeeRate = CFeeRate(0);
+    int hook_calls{0};
+    options.on_before_test_block_validity = [&](CBlock& block) {
+        ++hook_calls;
+        BOOST_REQUIRE_EQUAL(block.vtx[1]->GetHash(), txs.mint->GetHash());
+        BOOST_REQUIRE(BlockHasTx(block, strong->GetHash()));
+        BOOST_REQUIRE(BlockHasTx(block, weak->GetHash()));
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(TestBlockValidity(state, Params(), m_node.chainman->ActiveChainstate(), block,
+            m_node.chainman->ActiveChain().Tip(), GetAdjustedTime, false, false), state.ToString());
+        // At the committed quote the mint pauses. Removing it leaves the first
+        // redemption healthy, then the second sees only the 90% weak vault.
+        ReplaceCommittedPrice(block, 60000);
+    };
+    const auto block_template = BuildTemplate(options);
+    BOOST_REQUIRE(block_template);
+    BOOST_CHECK_EQUAL(hook_calls, 1);
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.mint->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, txs.child->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, strong->GetHash()));
+    BOOST_CHECK(!BlockHasTx(block_template->block, weak->GetHash()));
+    BOOST_CHECK(BlockHasTx(block_template->block, txs.plain->GetHash()));
+    BOOST_CHECK_EQUAL(block_template->block.vtx.size(), 2U);
+    BOOST_CHECK_EQUAL(block_template->vTxFees.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxSigOpsCost.size(), block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(block_template->vTxFees[0], -PLAIN_FEE);
+    BOOST_CHECK_EQUAL(block_template->block.vtx[0]->vout[0].nValue,
+                      GetBlockSubsidy(NextBlockHeight(), Params().GetConsensus()) + PLAIN_FEE);
+    BOOST_CHECK_EQUAL(block_template->block.hashMerkleRoot, BlockMerkleRoot(block_template->block));
+    BOOST_CHECK(WITH_LOCK(cs_main, return m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState()) == parent);
+}
+
 BOOST_FIXTURE_TEST_CASE(thaw_redemption_change_is_countable_through_index_reopen, ThawMinerERRValidationSetup)
 {
     constexpr CAmount fee_value{2 * COIN};
@@ -1375,6 +1543,240 @@ BOOST_FIXTURE_TEST_CASE(thaw_redemption_change_is_countable_through_index_reopen
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(supply_index_repairs_saved_total_without_replacing_open_principal, SupplyVerificationSetup)
+{
+    const auto funding = ConfirmOpTrueFunding(2 * COIN);
+    InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+    const auto redemption = BuildMatureRedemption(funding, 2 * COIN, COIN, 750);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto accepted = CreateAndProcessBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE);
+    const auto* tip = WITH_LOCK(cs_main, return chain.m_chain.Tip());
+    BOOST_REQUIRE(tip->GetBlockHash() == accepted.GetHash());
+    BOOST_REQUIRE(BlockHasTx(accepted, redemption->GetHash()));
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    BOOST_REQUIRE(canonical);
+    BOOST_REQUIRE_EQUAL(canonical->open_vault_principal, 1000);
+    BOOST_REQUIRE_EQUAL(canonical->collateral, 150 * COIN);
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        const auto stats = opened.index.LookUpStats(*tip);
+        BOOST_REQUIRE(stats);
+        BOOST_REQUIRE_EQUAL(stats->total_dd_supply, 750);
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        opened.index.Stop();
+    }
+    const auto path = m_args.GetDataDirNet() / "indexes" / "digidollarstats" / "db";
+    {
+        CDBWrapper db{{.path = path, .cache_bytes = 1 << 20, .memory_only = false}};
+        uint32_t format{0};
+        BOOST_REQUIRE(db.Read(uint8_t{'S'}, format));
+        BOOST_REQUIRE_EQUAL(format, 3U);
+        std::pair<uint256, SavedSupplyValue> row;
+        BOOST_REQUIRE(db.Read(SavedSupplyHeightKey{tip->nHeight}, row));
+        BOOST_REQUIRE(row.first == tip->GetBlockHash());
+        BOOST_REQUIRE_EQUAL(row.second.supply, 750);
+        BOOST_REQUIRE(row.second.known);
+        row.second.supply = 873;
+        BOOST_REQUIRE(db.Write(SavedSupplyHeightKey{tip->nHeight}, row));
+    }
+    for (int reopen = 0; reopen < 2; ++reopen) {
+        OpenRedemptionStatsIndex opened{m_node};
+        const auto scans_before = DigiDollar::ChainstateHealthRebuildCount();
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), scans_before + 1);
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        const auto stats = opened.index.LookUpStats(*tip);
+        BOOST_REQUIRE(stats);
+        BOOST_CHECK_EQUAL(stats->total_dd_supply, 750);
+        BOOST_CHECK_EQUAL(stats->total_collateral, 150 * COIN);
+        BOOST_CHECK_EQUAL(stats->vault_count, 1U);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.m_chain.Tip()) == tip);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_repairs_behind_and_disconnected_saved_rows, SupplyVerificationSetup)
+{
+    const auto funding = ConfirmOpTrueFunding(2 * COIN);
+    auto* prefix = Tip();
+    SaveIndex();
+    ChangeSavedSupply(*prefix, 873);
+    auto* redeemed = AcceptExtraBurn(funding);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        const auto scans_before = DigiDollar::ChainstateHealthRebuildCount();
+        BOOST_REQUIRE(opened.index.Init());
+        CheckSupply(opened.index, *prefix, 2000, 450 * COIN, 2);
+        BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), scans_before + 1);
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        CheckSupply(opened.index, *redeemed, 750, 150 * COIN, 1);
+        BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), scans_before + 1);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+        chain.ForceFlushStateToDisk();
+        SyncWithValidationInterfaceQueue();
+        opened.index.Stop();
+    }
+    // Both the saved fork tip and the row to which sync will rewind are wrong.
+    ChangeSavedSupply(*redeemed, 873);
+    ChangeSavedSupply(*prefix, 873);
+    BlockValidationState disconnected;
+    BOOST_REQUIRE(chain.InvalidateBlock(disconnected, redeemed));
+    BOOST_REQUIRE(Tip() == prefix);
+    CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    auto* replacement = Tip();
+    BOOST_REQUIRE(replacement != redeemed);
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        CheckSupply(opened.index, *redeemed, 750, 150 * COIN, 1);
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        CheckSupply(opened.index, *replacement, 2000, 450 * COIN, 2);
+        CheckSupply(opened.index, *prefix, 2000, 450 * COIN, 2);
+        BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()->open_vault_principal), 2000);
+        // Keep the synced index open: the live callback has a different lock
+        // context from the background rewind exercised above.
+        const auto scans_before_live_reorg = DigiDollar::ChainstateHealthRebuildCount();
+        BlockValidationState live_disconnect;
+        BOOST_REQUIRE(chain.InvalidateBlock(live_disconnect, replacement));
+        WITH_LOCK(cs_main, chain.ResetBlockFailureFlags(redeemed));
+        BlockValidationState live_reconnect;
+        BOOST_REQUIRE(chain.ActivateBestChain(live_reconnect));
+        BOOST_REQUIRE(Tip() == redeemed);
+        BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
+        CheckSupply(opened.index, *redeemed, 750, 150 * COIN, 1);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+        BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), scans_before_live_reorg);
+        for (int i = 0; i < 3; ++i) {
+            CreateAndProcessBlock({}, CScript() << OP_TRUE);
+            BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
+            CheckSupply(opened.index, *Tip(), 750, 150 * COIN, 1);
+        }
+        BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), scans_before_live_reorg);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_cancellation_does_not_publish_a_repair, SupplyVerificationSetup)
+{
+    auto* tip = AcceptExtraBurn(ConfirmOpTrueFunding(2 * COIN));
+    SaveIndex();
+    ChangeSavedSupply(*tip, 873);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    {
+        auto& interrupt = const_cast<util::SignalInterrupt&>(m_node.chainman->m_interrupt);
+        struct ResetInterrupt {
+            util::SignalInterrupt& value;
+            ~ResetInterrupt() { value.reset(); }
+        } reset{interrupt};
+        DebugLogHelper cancelled{"outputs checked", [&](const std::string* line) {
+            if (!line) return true;
+            if (line->find("DigiDollar supply verification: ") == std::string::npos ||
+                line->find("verification: 0 outputs checked") != std::string::npos) return false;
+            interrupt();
+            return true;
+        }};
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_CHECK(!opened.index.Init());
+    }
+    {
+        CDBWrapper db{{.path = IndexPath(), .cache_bytes = 1 << 20, .memory_only = false}};
+        std::pair<uint256, SavedSupplyValue> row;
+        BOOST_REQUIRE(db.Read(SavedSupplyHeightKey{tip->nHeight}, row));
+        BOOST_CHECK_EQUAL(row.second.supply, 873);
+    }
+    BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+    OpenRedemptionStatsIndex reopened{m_node};
+    BOOST_REQUIRE(reopened.index.Init());
+    CheckSupply(reopened.index, *tip, 750, 150 * COIN, 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_verifies_before_first_activated_burn, SupplyVerificationSetup)
+{
+    auto& chain = m_node.chainman->ActiveChainstate();
+    BlockValidationState disconnected;
+    BOOST_REQUIRE(chain.InvalidateBlock(disconnected, Tip()));
+    const auto funding = ConfirmOpTrueFunding(2 * COIN);
+    auto* prefix = Tip();
+    BOOST_REQUIRE_EQUAL(prefix->nHeight, THAW_HEIGHT - 1);
+    SaveIndex();
+    ChangeSavedSupply(*prefix, 1);
+    OpenRedemptionStatsIndex opened{m_node};
+    BOOST_REQUIRE(opened.index.Init());
+    // The legacy path retains its saved value until H.
+    CheckSupply(opened.index, *prefix, 1, 450 * COIN, 2);
+    BOOST_REQUIRE(opened.index.StartBackgroundSync());
+    IndexWaitSynced(opened.index);
+    auto* tip = AcceptExtraBurn(funding);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, THAW_HEIGHT);
+    BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
+    CheckSupply(opened.index, *tip, 750, 150 * COIN, 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_missing_undo_keeps_the_saved_total_unmodified, SupplyVerificationSetup)
+{
+    const auto funding = ConfirmOpTrueFunding(2 * COIN);
+    auto* prefix = Tip();
+    SaveIndex();
+    ChangeSavedSupply(*prefix, 873);
+    auto* redeemed = AcceptExtraBurn(funding);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    {
+        struct RestoreUndo {
+            CBlockIndex& block;
+            unsigned int position;
+            ~RestoreUndo() { LOCK(cs_main); block.nUndoPos = position; }
+        } restore{*redeemed, redeemed->nUndoPos};
+        WITH_LOCK(cs_main, redeemed->nUndoPos = 0);
+        ASSERT_DEBUG_LOG("restore undo data at height " + std::to_string(redeemed->nHeight));
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_CHECK(!opened.index.Init());
+    }
+    {
+        CDBWrapper db{{.path = IndexPath(), .cache_bytes = 1 << 20, .memory_only = false}};
+        std::pair<uint256, SavedSupplyValue> row;
+        BOOST_REQUIRE(db.Read(SavedSupplyHeightKey{prefix->nHeight}, row));
+        BOOST_CHECK_EQUAL(row.second.supply, 873);
+    }
+    BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+    OpenRedemptionStatsIndex reopened{m_node};
+    BOOST_REQUIRE(reopened.index.Init());
+    BOOST_REQUIRE(reopened.index.StartBackgroundSync());
+    IndexWaitSynced(reopened.index);
+    CheckSupply(reopened.index, *redeemed, 750, 150 * COIN, 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_old_format_rebuild_preserves_extra_burn, SupplyVerificationSetup)
+{
+    auto* tip = AcceptExtraBurn(ConfirmOpTrueFunding(2 * COIN));
+    SaveIndex();
+    ChangeSavedSupply(*tip, 1000);
+    {
+        CDBWrapper db{{.path = IndexPath(), .cache_bytes = 1 << 20, .memory_only = false}};
+        BOOST_REQUIRE(db.Write(uint8_t{'S'}, uint32_t{2}));
+        // Deployed format two did not version its keys or store availability.
+        BOOST_REQUIRE(db.Write(PreviousSupplyHeightKey{tip->nHeight}, std::make_pair(tip->GetBlockHash(),
+            PreviousSupplyValue{1000, 150 * COIN, 1})));
+    }
+    for (int reopen = 0; reopen < 2; ++reopen) {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        CheckSupply(opened.index, *tip, 750, 150 * COIN, 1);
+        BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState()->open_vault_principal), 1000);
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(supply_index_rejects_readable_current_block_body_corruption, ThawMinerERRValidationSetup)
 {
     constexpr CAmount fee_value{2 * COIN};
@@ -1437,6 +1839,9 @@ BOOST_FIXTURE_TEST_CASE(supply_index_rejects_readable_current_block_body_corrupt
                 block.nDataPos = position;
             }
         } restore{*current, current->nFile, current->nDataPos};
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_CHECK(opened.index.GetSummary().best_block_hash == prefix->GetBlockHash());
         {
             LOCK(cs_main);
             // Append only to fixture-owned files; retain the original accepted bytes.
@@ -1449,9 +1854,6 @@ BOOST_FIXTURE_TEST_CASE(supply_index_rejects_readable_current_block_body_corrupt
             BOOST_CHECK(readable.GetHash() == current->GetBlockHash());
             BOOST_CHECK(BlockMerkleRoot(readable) != readable.hashMerkleRoot);
         }
-        OpenRedemptionStatsIndex opened{m_node};
-        BOOST_REQUIRE(opened.index.Init());
-        BOOST_CHECK(opened.index.GetSummary().best_block_hash == prefix->GetBlockHash());
         {
             ASSERT_DEBUG_LOG("DigiDollar supply index current block failed integrity verification");
             BOOST_REQUIRE(opened.index.StartBackgroundSync());
@@ -1495,6 +1897,21 @@ BOOST_FIXTURE_TEST_CASE(legacy_missing_token_metadata_keeps_supply_unavailable, 
 BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_metadata_keeps_supply_unavailable, ThawMinerERRValidationSetup)
 {
     CheckLegacyUncountableSupply(*this, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_unknown_token_supply_reopens_across_thaw, ThawMinerERRValidationSetup)
+{
+    CheckLegacyUncountableSupply(*this, false, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_supply_reopens_across_thaw, ThawMinerERRValidationSetup)
+{
+    CheckLegacyUncountableSupply(*this, true, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_unknown_token_supply_crosses_thaw_with_open_index, ThawMinerERRValidationSetup)
+{
+    CheckLegacyUncountableSupply(*this, false, true, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(thaw_miner_reports_missing_reference_before_selection, ThawMinerValidationSetup)

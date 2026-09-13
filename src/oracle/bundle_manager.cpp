@@ -165,6 +165,8 @@ OracleBundleManager::~OracleBundleManager()
 
 bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
 {
+    std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+
     LogPrint(BCLog::DIGIDOLLAR, "Oracle: AddOracleMessage called for oracle_id=%d, price=%llu, timestamp=%d, enabled=%d\n",
              message.oracle_id, message.price_micro_usd, message.timestamp, enabled);
 
@@ -179,8 +181,6 @@ bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
     }
 
     LogPrint(BCLog::DIGIDOLLAR, "Oracle: Message passed IsValidOracleMessage check\n");
-
-    std::lock_guard<std::recursive_mutex> lock(mtx_messages);
 
     // Purge stale messages from pending_messages.
     // Messages older than ORACLE_MAX_AGE_SECONDS are from oracles that may no
@@ -329,8 +329,12 @@ bool OracleBundleManager::AddOracleMessage(const COraclePriceMessage& message)
                     // Proactive broadcast: send consensus proposal when quorum is reached
                     // This ensures remote oracles get the proposal BEFORE any block template is needed
                     // Use cached_epoch, or fallback to a conservative estimate if not set
-                    int32_t epoch_for_broadcast = (cached_epoch >= 0) ? cached_epoch :
-                                                   static_cast<int32_t>(GetTime() / (1440 * 15));  // 1440 blocks * 15 seconds/block
+                    int32_t epoch_for_broadcast;
+                    {
+                        std::lock_guard<std::mutex> bundles_lock(mtx_bundles);
+                        epoch_for_broadcast = (cached_epoch >= 0) ? cached_epoch :
+                            static_cast<int32_t>(GetTime() / (1440 * 15));  // 1440 blocks * 15 seconds/block
+                    }
                     BroadcastConsensusProposal(epoch_for_broadcast, att_consensus_price, att_consensus_timestamp);
 
                     // Ask local oracle nodes to sign consensus values
@@ -652,7 +656,7 @@ COracleBundle OracleBundleManager::GetCurrentBundle(int32_t epoch) const
 
 bool OracleBundleManager::UpdateBundle(const COracleBundle& bundle)
 {
-    if (!enabled) {
+    if (!IsEnabled()) {
         return false;
     }
 
@@ -715,9 +719,9 @@ bool OracleBundleManager::AddOracleBundleToBlock(CBlock& block, int32_t block_he
     const bool block_needs_oracle_price = BlockNeedsOraclePrice(block);
 
     LogPrint(BCLog::DIGIDOLLAR, "Oracle: AddOracleBundleToBlock called for height %d, enabled=%d, min_oracle_count=%d\n",
-             block_height, enabled, min_oracle_count);
+             block_height, IsEnabled(), GetMinOracleCount());
 
-    if (!enabled) {
+    if (!IsEnabled()) {
         if (block_needs_oracle_price) {
             LogPrintf("Oracle: price-dependent DD block at height %d requires a MuSig2 bundle, but oracles are disabled\n",
                       block_height);
@@ -1702,6 +1706,7 @@ void OracleBundleManager::Initialize()
 {
     OracleBundleManager& manager = GetInstance();
     const Consensus::Params& consensus = Params().GetConsensus();
+    std::lock_guard<std::recursive_mutex> lock(manager.mtx_messages);
 
     // Set consensus requirements from chain parameters
     manager.min_oracle_count = consensus.nOracleConsensusRequired;
@@ -1974,6 +1979,7 @@ void OracleBundleManager::Clear()
 bool OracleBundleManager::ValidateConfiguration() const
 {
     const Consensus::Params& consensus = Params().GetConsensus();
+    std::lock_guard<std::recursive_mutex> lock(mtx_messages);
 
     // Validate oracle configuration
     if (consensus.vOraclePublicKeys.empty()) {
@@ -2046,7 +2052,7 @@ bool OracleBundleManager::IsValidOracleMessage(const COraclePriceMessage& messag
     }
 
     // Single-signer regtest mode still uses signed compact attestations.
-    if (min_oracle_count == 1) {
+    if (GetMinOracleCount() == 1) {
         if (!message.IsValid()) return false;
         return message.VerifyAttestation();
     }
@@ -2114,7 +2120,7 @@ bool OracleBundleManager::HasRequiredSignatures(const COracleBundle& bundle, int
         }
     }
 
-    return valid_signatures >= static_cast<size_t>(min_oracle_count);
+    return valid_signatures >= static_cast<size_t>(GetMinOracleCount());
 }
 
 void OracleBundleManager::UpdatePriceCache(int height, uint64_t price_micro_usd, int64_t source_time)

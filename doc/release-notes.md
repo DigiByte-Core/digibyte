@@ -1,27 +1,19 @@
-DigiByte Core version 9.26.6
-
-> **THIS IS A DEVELOPMENT CANDIDATE, NOT THE FINISHED RELEASE.**
->
-> No public network has a Thaw Day height set in this source. Every network ships with the field disabled, and
-> the option that would set one is refused on any public network. So installing this build activates nothing.
->
-> That is correct for testing and wrong for distribution. The plan requires the agreed heights to be in the
-> source that is tagged and shipped, as one coordinated release, because an announcement cannot activate binaries
-> that people have already installed. Shipping these notes as written would leave every fix that waits on Thaw
-> Day inactive on every node that installed it.
->
-> Before distribution: the release owner puts the approved heights into the tagged source, keeps one height per
-> network, retains the promised upgrade window, and the resulting candidate is tested again. These notes are then
-> finalised around that release.
->
-> The independent review of this candidate said **no go** for release, for replacing a live wallet, and for
-> starting the final reindex. Its report and the open items are in the private review tree.
+DigiByte Core version 9.26.6rc1
 ============================
 
-DigiByte Core v9.26.6 is a repair release. It fixes crashes and hangs, repairs
-DigiDollar redeeming, makes DigiDollar amounts mean one thing instead of two,
-corrects what the wallet shows you, and cuts about 1.5 GB off the memory a
-synced node uses, at a cost of about two and a half seconds more on startup.
+RC1 is a candidate for coordinated node and wallet testing. It is not the
+final v9.26.6 release. Activation settings are listed below; installing a
+candidate does not change heights already built into it.
+
+The release repairs identified crash and hang defects, improves DigiDollar
+redemption and amount handling, and corrects wallet displays. Feather reduces
+memory use by keeping less-used block header fields on disk and removing
+repeated startup work. Memory use and startup time depend on the chain,
+hardware, and options. See [the RAM explanation](../RAM_IMPROVE.md) for the
+design and measured results.
+
+Saved transaction fee estimates now load correctly after a restart. The node
+keeps its learned fee history instead of discarding its own saved file.
 
 It also adds Thaw Day. Thaw Day is a single block height, one per network, at
 which a set of DigiDollar rule changes takes effect together. **No network has a
@@ -78,7 +70,8 @@ fixed.
 It stops with a message telling you to restore the missing block and undo files
 or download that part of the chain again. This check is not new either, but it
 is the failure an operator is most likely to meet, so it is worth saying plainly.
-A node that has never pruned below the floor is not affected.
+A node that has kept every block at or above the floor is not affected by this
+missing-history check.
 
 **A node that cannot meet its prune target does not say so.** It keeps the
 blocks it must keep, goes over the target you set, and writes nothing that tells
@@ -145,7 +138,7 @@ same answer.
 
 `mintdigidollar` is unchanged. It has always taken whole cents only.
 
-3. This release does not switch anything on
+3. Thaw Day activation settings
 --------------------------------------------
 
 Thaw Day is a single block height per network. In this release every network
@@ -153,9 +146,11 @@ ships with it not scheduled: mainnet, the public test network, and signet. Only
 a private regtest chain can set one, with `-ddthawdayheight=N`. On any public
 network that option is a startup error.
 
-A height is chosen and published separately, with its own notice and its own
-upgrade period. Until then, none of the DigiDollar rule changes in this release
-does anything, on any network. Upgrading is safe to do now and changes no rule.
+The final mainnet height must be included in the tagged release source and
+published with at least 14 days for operators to upgrade. An announcement
+cannot activate an installed binary that has no height configured. Testnet
+activation has its own coordinated height. The same height on each network
+selects all intended Thaw Day rule changes together.
 
 
 How to upgrade
@@ -173,9 +168,10 @@ If you prune, read section 1 above first and raise the setting.
 
 Older wallets still open. Minting a new DigiDollar needs a descriptor wallet
 with private keys, HD support, a Taproot receiving descriptor and a bech32
-change descriptor. A wallet without those can still hold, send and redeem
-DigiDollar; it cannot mint. The wallet now says so before it asks for your
-passphrase, instead of failing at the end.
+change descriptor. A wallet that cannot mint may still send and redeem existing
+DigiDollar if it has the keys needed to sign those transactions. Wallets with
+private keys disabled cannot send or redeem. The wallet now explains minting
+eligibility before requesting the passphrase.
 
 
 Thaw Day
@@ -193,9 +189,9 @@ rules change together:
   rebuilt the same way on every node.
 - **A vault has one identity** that every node derives the same way.
 
-The height of the block being checked decides which rules apply to it. Not the
-height of your node's tip. That means a reindex, a reorg and a freshly synced
-node all reach the same answer for the same block.
+The height of the block being checked decides which rules apply to it. The new
+rules use that block's ancestry and coin state during normal operation, replay
+and reorgs. Blocks below Thaw Day keep their existing validation rules.
 
 You can see the status at any time:
 
@@ -206,14 +202,22 @@ digibyte-cli getdigidollardeploymentinfo
 The `thaw_day` object reports whether a height is scheduled, what it is, your
 tip height, the next block height, and whether the rules apply at each.
 
-**One thing to expect when a height is finally set.** The first block at or
-above the Thaw Day height makes the node add up every unspent output once, to
-build the starting vault totals. The node stops answering while that runs. On a
-test-network-sized coin set the walk cost about 0.3 microseconds per output,
-which would be roughly twelve seconds for forty million outputs with the data
-already in memory, plus a one-off allocation of about three quarters of whatever
-your coin cache holds. **This has not been measured on a mainnet-sized coin
-set.** It happens once, at one block, not once per block.
+**Preparing and checking the accounting takes work.** The node normally builds
+the starting vault totals when it connects the block immediately before Thaw
+Day, or when it starts at that height. It walks the unspent outputs while
+holding the chain lock, so RPC requests needing that lock wait. Later startups
+independently check the saved vault totals again. **This cost has not been
+measured on a mainnet-sized coin set.** Small regtest measurements do not predict
+a mainnet startup time.
+
+An existing DigiDollar statistics index also checks its saved token supply
+against unspent outputs when it first reaches Thaw Day and when it reopens
+afterward. A new index can count directly from the chain as it catches up.
+It compares totals for the same block and repairs an incorrect saved total.
+This adds startup work. Normal block updates use each block's changes instead
+of scanning the whole coin set again. Token supply and open-vault debt are
+different totals; extra tokens burned during redemption can make them differ
+without indicating corruption.
 
 
 What changed
@@ -277,9 +281,10 @@ Money and safety
 Crashes, hangs and things that would not stop
 ----------------------------------------------
 
-- **The node always finishes shutting down.** It used to destroy its oracle
-  objects as the first step of shutting down, while a scheduler thread was still
-  running inside one of them. That thread then waited forever on a lock in freed
+- **Oracle shutdown now waits for callbacks before destroying their objects.**
+  It used to destroy its oracle objects as the first step of shutting down,
+  while a scheduler thread was still running inside one of them. That thread
+  then waited forever on a lock in freed
   memory, and when the memory was reused instead, the node crashed. On the test
   machine, 8 stops out of 30 hung on the old code. A test that stops a node
   twenty times in a row failed on every attempt: three of those runs hung and
@@ -303,8 +308,8 @@ Crashes, hangs and things that would not stop
   stem pool stayed on the old chain state. Both now take the same locks in the
   same order as every other writer.
 
-- **The wallet can no longer freeze the node.** Loading a wallet, importing a
-  descriptor or a wallet file, and `rescanblockchain` used to be able to hang a
+- **The reported wallet lock-order faults are fixed.** Loading a wallet,
+  importing a descriptor or a wallet file, and `rescanblockchain` used to hang a
   node that had a DigiDollar wallet, because the wallet asked the chain a
   question while holding a wallet lock and the chain was waiting for the wallet.
   Minting and redeeming had the same fault while checking that the chain had not
@@ -434,9 +439,10 @@ Startup and recovery
   bundles instead of parsing them again.
 
 - **A long DigiDollar rebuild reports progress and can be cancelled.** A scan
-  that is interrupted no longer publishes half-finished figures. This rebuild
-  only runs once a Thaw Day height is set and reached. With no height set, it
-  does nothing.
+  that is interrupted no longer publishes half-finished figures. The new
+  canonical recovery starts when the next block reaches Thaw Day. Existing
+  DigiDollar startup reconstruction still runs on DigiDollar-active chains
+  below that height, including when Thaw Day is not scheduled.
 
 - **A pruned node keeps the block history validation needs.** See section 1
   above.
@@ -467,10 +473,9 @@ For exchanges and custody
 - **The four amount commands are the breaking change.** See section 2. Check
   every script before you upgrade.
 - **Circulating supply can now report that it is unknown** instead of returning
-  a number it cannot stand behind. `getdigidollarstats` returns an error,
-  "DigiDollar circulating supply is unavailable from retained metadata", when
-  the historical amounts cannot be recovered reliably. Treat that as unknown.
-  Do not treat it as zero.
+  an unreliable number. `getdigidollarstats` returns an error when historical
+  amounts cannot be recovered reliably. The text differs between the legacy
+  and Thaw Day paths. Treat this as unavailable supply. Do not treat it as zero.
 - **Open vault principal is reported separately from circulating tokens.**
   `getdigidollarstats` reports `open_vault_principal`, and
   `selected_health_denominator` says which of the two the health figure was
@@ -508,28 +513,23 @@ rest of the network rejects. Plan to upgrade before the height, not after it.
 What has been checked, and what has not
 =======================================
 
-Checked:
+Each candidate needs its own verification record. That record must identify the
+source commit, binary hashes, build options, tests run, skipped tests, and
+unresolved findings. Results from an earlier build do not establish that RC1
+passed. The completed record accompanies the candidate.
 
-- The whole public test network chain was reindexed from the first block, with
-  every signature checked, on this code and on the code without the memory
-  change. Both reached the same block and the same hash.
-- The unit tests, the wallet window tests and the node tests were run on the
-  tree with all nine commits, and the recorded result was a clean run of all
-  three. The full result for the build that ships is recorded separately and
-  goes out with it.
+Controlled regtest coverage includes Thaw Day activation, restart, reindex,
+reorgs, and separate token and vault accounting. A public testnet replay checks
+the history available at its recorded height. No public network currently has
+a Thaw Day height scheduled in this candidate.
 
-Not run:
+Before the final mainnet release, complete the final-build mainnet history
+replay, coordinated public testnet activation and observation, required platform
+checks, and final independent review. A local candidate test run does not finish
+those release gates.
 
-- **The full mainnet reindex from genesis has not been run.** It is deliberately
-  handed to a separate team to run against the final build.
-- **No reindex has crossed a Thaw Day height**, because no network has one set.
-- **The seven-day test network run has not been done.**
-- **Independent review of the whole change, the build and the results is not
-  finished.**
-
-Passing a reindex is evidence about one build and one history that already
-exists. It says this software validates the blocks that are already on the
-chain. It says nothing about a block someone mines next month.
+Passing a reindex is evidence about the tested build and the recorded history.
+It does not prove how every possible future block will behave.
 
 
 Compatibility

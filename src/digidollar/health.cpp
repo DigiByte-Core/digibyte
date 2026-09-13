@@ -125,7 +125,8 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
                                 ChainstateHealth& health, std::string& error,
                                 const std::function<bool()>& interrupted,
                                 CAmount* circulating_supply,
-                                const std::function<void(uint64_t, uint64_t)>& progress)
+                                const std::function<void(uint64_t, uint64_t)>& progress,
+                                bool* circulating_supply_known)
 {
     g_chainstate_health_rebuilds.fetch_add(1, std::memory_order_relaxed);
     try {
@@ -140,6 +141,7 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
             return false;
         }
         CAmount supply{0};
+        bool supply_known{true};
         uint64_t scanned{0};
         auto last_progress = SteadyClock::now();
         if (progress) progress(0, 0);
@@ -171,12 +173,18 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
                 }
                 if (HasDigiDollarMarker(*creating)) {
                     CAmount amount{0};
-                    if (!ExtractDDAmountFromBlockDb(outpoint, coin.nHeight, lookup, amount) || amount <= 0 ||
-                        amount > std::numeric_limits<CAmount>::max() - supply) {
-                        error = "DigiDollar supply not ready: invalid creating token metadata";
+                    if (!ExtractDDAmountFromBlockDb(outpoint, coin.nHeight, lookup, amount) || amount <= 0) {
+                        if (!circulating_supply_known) {
+                            error = "DigiDollar supply not ready: invalid creating token metadata";
+                            return false;
+                        }
+                        supply_known = false;
+                    } else if (amount > std::numeric_limits<CAmount>::max() - supply) {
+                        error = "DigiDollar supply not ready: token total exceeds the supported range";
                         return false;
+                    } else {
+                        supply += amount;
                     }
-                    supply += amount;
                 }
             }
             if (++scanned % 4096 == 0 && SteadyClock::now() - last_progress >= std::chrono::seconds{1}) {
@@ -196,7 +204,8 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
             return false;
         }
         health = rebuilt;
-        if (circulating_supply) *circulating_supply = supply;
+        if (circulating_supply && supply_known) *circulating_supply = supply;
+        if (circulating_supply_known) *circulating_supply_known = supply_known;
         return true;
     } catch (const dbwrapper_error& exception) {
         error = std::string("DigiDollar state not ready: restore unreadable chainstate data: ") + exception.what();

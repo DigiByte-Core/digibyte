@@ -7,6 +7,7 @@
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -112,6 +113,64 @@ class ConfArgsTest(DigiByteTestFramework):
             conf.write('')  # clear
         with open(inc_conf_file2_path, 'w', encoding='utf-8') as conf:
             conf.write('')  # clear
+
+    def test_generated_config(self):
+        if sys.platform == "win32":
+            self.log.info('Skipping the shell config generator on Windows')
+            return
+
+        self.log.info('Test the generated and shipped example configurations')
+        source_dir = Path(__file__).resolve().parents[2]
+        test_dir = Path(self.options.tmpdir) / 'example_config'
+        test_dir.mkdir()
+        generated_config = test_dir / 'generated.conf'
+        env = dict(os.environ, TOPDIR=str(source_dir), DIGIBYTED=self.options.digibyted,
+                   SHARE_EXAMPLES_DIR=str(test_dir), EXAMPLE_CONF_FILE=str(generated_config))
+        subprocess.run(['bash', str(source_dir / 'contrib/devtools/gen-digibyte-conf.sh')],
+                       env=env, check=True, capture_output=True, text=True)
+
+        for name, config in [('generated', generated_config),
+                             ('shipped', source_dir / 'share/examples/digibyte.conf')]:
+            datadir = test_dir / name
+            datadir.mkdir()
+            command = [
+                self.options.digibyted, f'-datadir={datadir}', f'-conf={config}',
+                '-regtest', '-daemon=0', '-disablewallet', '-server=0', '-dbcache=4',
+                '-networkactive=0', '-connect=0', '-listen=0', '-dnsseed=0',
+                '-fixedseeds=0', '-discover=0', '-listenonion=0', '-upnp=0',
+                '-natpmp=0', '-par=1', '-printtoconsole=0',
+            ]
+            debug_log = datadir / 'regtest/debug.log'
+            stderr_path = datadir / 'stderr.log'
+            with (datadir / 'stdout.log').open('w', encoding='utf8') as stdout, stderr_path.open('w', encoding='utf8') as stderr:
+                process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+                try:
+                    def has_started():
+                        assert process.poll() is None, f'{name}: {stderr_path.read_text(encoding="utf8")}'
+                        return debug_log.exists() and 'Done loading' in debug_log.read_text(encoding='utf8')
+
+                    self.wait_until(has_started)
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.wait(timeout=60 * self.options.timeout_factor)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                        raise
+            util.assert_equal(process.returncode, 0)
+            util.assert_equal(stderr_path.read_text(encoding='utf8'), '')
+            assert 'Shutdown: done' in debug_log.read_text(encoding='utf8')
+            for line in config.read_text(encoding='utf8').splitlines():
+                line = line.strip()
+                assert not line or line.startswith('#') or line in ['[main]', '[test]', '[signet]', '[regtest]'], line
+
+        # Keep every documented option, including placeholders for private settings.
+        help_text = subprocess.check_output([self.options.digibyted, '--help'], text=True)
+        help_options = set(re.findall(r'^  -([a-z][a-z0-9-]*)(?=[=\s]|$)', help_text, re.MULTILINE))
+        config_options = set(re.findall(r'^#([a-z][a-z0-9-]*)(?=[=\s]|$)', generated_config.read_text(encoding='utf8'), re.MULTILINE))
+        util.assert_equal(help_options, config_options)
 
     def test_config_file_log(self):
         # Disable this test for windows currently because trying to override
@@ -377,6 +436,7 @@ class ConfArgsTest(DigiByteTestFramework):
         util.write_config(conf_file, n=0, chain="regtest")  # Reset to regtest
 
     def run_test(self):
+        self.test_generated_config()
         self.test_log_buffer()
         self.test_args_log()
         self.test_seed_peers()

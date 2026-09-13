@@ -75,13 +75,17 @@ VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& co
 
 /** Reconstruct from a consistent UTXO view. This never establishes history proof
  * and never mutates either the view or the legacy health monitor.
+ * An optional availability result allows callers to retain an unknown token
+ * total when readable legacy metadata has no unambiguous amount. Missing source
+ * blocks still fail the scan. No partial token total is returned.
  */
 bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params& params,
                                 const CanonicalTxLookup& lookup,
                                 ChainstateHealth& health, std::string& error,
                                 const std::function<bool()>& interrupted = {},
                                 CAmount* circulating_supply = nullptr,
-                                const std::function<void(uint64_t, uint64_t)>& progress = {});
+                                const std::function<void(uint64_t, uint64_t)>& progress = {},
+                                bool* circulating_supply_known = nullptr);
 
 /** How many times the whole coin set has been walked to rebuild the accounting.
  * This walk reads a block from disk for every unspent DigiDollar output, so it

@@ -13,6 +13,7 @@
 #include <oracle/bundle_manager.h>
 #include <oracle/musig2_aggregator.h>
 #include <oracle/musig2_messages.h>
+#include <oracle/node.h>
 #include <oracle/signing_orchestrator.h>
 #include <primitives/block.h>
 #include <primitives/oracle.h>
@@ -21,11 +22,13 @@
 #include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <util/time.h>
+#include <util/strencodings.h>
 
 #include <secp256k1.h>
 #include <secp256k1_musig.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -954,6 +957,300 @@ BOOST_AUTO_TEST_CASE(nonce_broadcast_reports_how_many_peers_it_reached)
 
     orch.SetConnman(nullptr);
     connman->ClearTestNodes();
+}
+
+class SigningRetrySetup
+{
+    std::array<CBlockIndex, 16> m_indexes;
+    const uint256 m_seed{Params().GetConsensus().hashGenesisBlock};
+
+public:
+    OracleSigningOrchestrator orchestrator;
+    ConnmanTestMsg connman;
+    std::vector<uint8_t> oracle_ids;
+    CNode* peer{nullptr};
+
+    SigningRetrySetup(AddrMan& addrman, const NetGroupManager& netgroupman)
+        : connman(0x1337, 0x1337, addrman, netgroupman, Params())
+    {
+        OracleManager::StopOracleService();
+        OracleBundleManager::Initialize();
+        OracleBundleManager::GetInstance().Clear();
+        OracleBundleManager::GetInstance().SetConnman(nullptr);
+        // Synthetic indexes provide ancestry to the real scheduled callback.
+        for (size_t i = 0; i < m_indexes.size(); ++i) {
+            m_indexes[i].nHeight = i;
+            m_indexes[i].phashBlock = &m_seed;
+            if (i > 0) m_indexes[i].pprev = &m_indexes[i - 1];
+            m_indexes[i].BuildSkip();
+        }
+    }
+
+    ~SigningRetrySetup()
+    {
+        orchestrator.Stop();
+        SyncWithValidationInterfaceQueue();
+        OracleManager::StopOracleService();
+        orchestrator.SetConnman(nullptr);
+        connman.ClearTestNodes();
+        OracleBundleManager::GetInstance().Clear();
+    }
+
+    void StartSigners()
+    {
+        oracle_ids = SortMusigTestIdsBySeed(GetActiveOracleIdsForMusigTest(), 0, m_seed);
+        oracle_ids.resize(Params().GetConsensus().nOracleConsensusRequired);
+        auto& manager = OracleManager::GetInstance();
+        for (uint8_t id : oracle_ids) {
+            const CKey key = GetRegtestMusigOracleKey(id);
+            BOOST_REQUIRE(manager.AddOracleNode(id, HexStr(Span{key.begin(), key.size()})));
+            OracleNode* oracle = manager.GetOracleNode(id);
+            BOOST_REQUIRE(oracle);
+            oracle->SetSkipExchangeFetchForTesting(true);
+            oracle->Start();
+            BOOST_REQUIRE(oracle->IsRunning());
+            BOOST_REQUIRE(OracleBundleManager::GetInstance().AddOracleMessage(
+                MakeSignedMusigPriceEvidence(id, 6000, GetTime())));
+        }
+        orchestrator.Start();
+    }
+
+    void Tick(int height)
+    {
+        BOOST_REQUIRE_LT(height, static_cast<int>(m_indexes.size()));
+        GetMainSignals().BlockConnected(ChainstateRole::NORMAL,
+                                       std::make_shared<const CBlock>(), &m_indexes[height]);
+        SyncWithValidationInterfaceQueue();
+    }
+
+    void ConnectPeer()
+    {
+        orchestrator.SetConnman(&connman);
+        peer = new CNode(0, nullptr, CAddress(), 0, 0, CAddress(), {},
+                         ConnectionType::INBOUND, false);
+        peer->fSuccessfullyConnected = true;
+        connman.AddTestNode(*peer);
+    }
+
+    std::vector<CSerializedNetMsg> TakeMessages()
+    {
+        std::vector<CSerializedNetMsg> result;
+        V1Transport receiver{peer->GetId(), SER_NETWORK, PROTOCOL_VERSION};
+        {
+            LOCK(peer->cs_vSend);
+            // PushMessage may have handed the first message to the transport.
+            // Read its actual bytes, then copy messages still in the send queue.
+            while (true) {
+                const auto& [bytes, more, type] = peer->m_transport->GetBytesToSend(false);
+                if (bytes.empty()) break;
+                auto remaining = bytes;
+                while (!remaining.empty()) BOOST_REQUIRE(receiver.ReceivedBytes(remaining));
+                peer->m_transport->MarkBytesSent(bytes.size());
+                if (receiver.ReceivedMessageComplete()) {
+                    bool rejected{false};
+                    auto received = receiver.GetReceivedMessage(std::chrono::microseconds{0}, rejected);
+                    BOOST_REQUIRE(!rejected);
+                    CSerializedNetMsg message;
+                    message.m_type = received.m_type;
+                    const auto payload = MakeUCharSpan(received.m_recv);
+                    message.data.assign(payload.begin(), payload.end());
+                    result.push_back(std::move(message));
+                }
+            }
+            for (const auto& message : peer->vSendMsg) result.push_back(message.Copy());
+        }
+        connman.FlushSendBuffer(*peer);
+        return result;
+    }
+
+    void CheckCompletedBundle()
+    {
+        COracleBundle bundle{0};
+        BOOST_REQUIRE(orchestrator.GetCompletedSession(0, bundle.aggregate_sig,
+            bundle.participation_bitmap, bundle.median_price_micro_usd, bundle.timestamp));
+        std::string error;
+        BOOST_CHECK_MESSAGE(OracleBundleManager::ValidateMuSig2Bundle(
+            bundle, 10, Params().GetConsensus(), error), error);
+    }
+};
+
+BOOST_AUTO_TEST_CASE(scheduled_signing_retries_after_peer_connects)
+{
+    SigningRetrySetup setup{*m_node.addrman, *m_node.netgroupman};
+    setup.StartSigners();
+    setup.Tick(0); // Nonces are held with no connection manager.
+    setup.orchestrator.SetConnman(&setup.connman);
+    setup.Tick(2); // Context is held with a connection manager but no peers.
+    setup.Tick(3); // Partial signatures are held after their secret nonces are consumed.
+    auto* session = setup.orchestrator.GetOrCreateSigningSession(0);
+    BOOST_REQUIRE_EQUAL(session->GetState(), MuSig2SessionState::COMPLETE);
+    const uint256 context_id = session->GetSessionContextId();
+    const uint256 nonce_set_hash = session->GetNonceSetHash();
+    setup.CheckCompletedBundle();
+    OracleManager::StopOracleService();
+    OracleSigningOrchestrator receiver;
+    BOOST_REQUIRE(!receiver.IsOracleNode());
+
+    setup.ConnectPeer();
+    setup.Tick(4);
+    std::map<uint8_t, uint256> delivered_nonces;
+    std::vector<OracleMusigContextMsg> contexts;
+    std::set<uint8_t> partial_signers;
+    for (const auto& message : setup.TakeMessages()) {
+        CDataStream stream{message.data, SER_NETWORK, PROTOCOL_VERSION};
+        if (message.m_type == NetMsgType::ORACLEMUSIGNONCE) {
+            OracleMusigNonceMsg nonce;
+            stream >> nonce;
+            BOOST_CHECK_EQUAL(nonce.attempt_id, 0);
+            BOOST_CHECK(nonce.VerifySignature(XOnlyPubKey(GetRegtestMusigOracleKey(nonce.oracle_id).GetPubKey())));
+            BOOST_CHECK(delivered_nonces.emplace(nonce.oracle_id, nonce.GetHash()).second);
+            receiver.IngestRemoteNonce(nonce);
+        } else if (message.m_type == NetMsgType::ORACLEMUSIGCONTEXT) {
+            OracleMusigContextMsg context;
+            stream >> context;
+            BOOST_CHECK_EQUAL(context.attempt_id, 0);
+            BOOST_CHECK(context.session_context_id == context_id);
+            BOOST_CHECK(context.nonce_set_hash == nonce_set_hash);
+            BOOST_CHECK(context.VerifySignature(XOnlyPubKey(GetRegtestMusigOracleKey(context.proposer_id).GetPubKey())));
+            contexts.push_back(context);
+            receiver.IngestRemoteContext(context);
+        } else if (message.m_type == NetMsgType::ORACLEMUSIGPARTIALSIG) {
+            OracleMusigPartialSigMsg partial;
+            stream >> partial;
+            BOOST_CHECK_EQUAL(partial.attempt_id, 0);
+            BOOST_CHECK(partial.session_context_id == context_id);
+            BOOST_CHECK(partial.VerifySignature(XOnlyPubKey(GetRegtestMusigOracleKey(partial.oracle_id).GetPubKey())));
+            BOOST_CHECK(partial_signers.insert(partial.oracle_id).second);
+            receiver.IngestRemotePartialSig(partial);
+        } else {
+            BOOST_ERROR("unexpected queued message: " << message.m_type);
+        }
+    }
+    BOOST_CHECK_EQUAL(delivered_nonces.size(), setup.oracle_ids.size());
+    BOOST_CHECK_EQUAL(partial_signers.size(), setup.oracle_ids.size());
+    BOOST_REQUIRE_EQUAL(contexts.size(), 1U);
+    for (const auto& nonce : contexts.front().nonce_evidence) {
+        BOOST_REQUIRE(delivered_nonces.count(nonce.oracle_id));
+        BOOST_CHECK(delivered_nonces.at(nonce.oracle_id) == nonce.GetHash());
+    }
+    receiver.OnBlockConnected(std::make_shared<const CBlock>(), 4);
+    COracleBundle received_bundle{0};
+    BOOST_REQUIRE(receiver.GetCompletedSession(0, received_bundle.aggregate_sig,
+        received_bundle.participation_bitmap, received_bundle.median_price_micro_usd,
+        received_bundle.timestamp));
+    std::string error;
+    BOOST_CHECK_MESSAGE(OracleBundleManager::ValidateMuSig2Bundle(
+        received_bundle, 4, Params().GetConsensus(), error), error);
+    setup.Tick(5);
+    BOOST_CHECK(setup.TakeMessages().empty());
+    BOOST_CHECK(session->GetSessionContextId() == context_id);
+    setup.CheckCompletedBundle();
+}
+
+BOOST_AUTO_TEST_CASE(scheduled_signing_replacement_discards_old_retries)
+{
+    SigningRetrySetup setup{*m_node.addrman, *m_node.netgroupman};
+    setup.StartSigners();
+    setup.orchestrator.SetConnman(&setup.connman);
+    setup.Tick(0);
+    // Keep one selected signer offline after its nonce, leaving the other
+    // signers' context and partial signatures waiting for delivery.
+    OracleManager::GetInstance().EnableOracle(setup.oracle_ids.back(), false);
+    setup.Tick(2);
+    setup.Tick(3);
+    auto* session = setup.orchestrator.GetOrCreateSigningSession(0);
+    BOOST_REQUIRE_EQUAL(session->GetState(), MuSig2SessionState::SIGNING);
+    BOOST_REQUIRE_EQUAL(session->GetPartialSigCount(), setup.oracle_ids.size() - 1);
+    const uint256 old_context = session->GetSessionContextId();
+    secp256k1_musig_partial_sig duplicate;
+    BOOST_CHECK(!session->CreatePartialSignature(setup.oracle_ids.front(),
+        GetRegtestMusigOracleKey(setup.oracle_ids.front()), duplicate));
+    session->SetTimeoutBlocks(4);
+    setup.Tick(4);
+    BOOST_REQUIRE_EQUAL(session->GetState(), MuSig2SessionState::FAILED);
+
+    setup.ConnectPeer();
+    setup.Tick(5);
+    BOOST_REQUIRE_EQUAL(setup.orchestrator.GetActiveAttemptId(0), 1);
+    const auto messages = setup.TakeMessages();
+    BOOST_REQUIRE_EQUAL(messages.size(), setup.oracle_ids.size() - 1);
+    for (const auto& message : messages) {
+        BOOST_REQUIRE_EQUAL(message.m_type, NetMsgType::ORACLEMUSIGNONCE);
+        CDataStream stream{message.data, SER_NETWORK, PROTOCOL_VERSION};
+        OracleMusigNonceMsg nonce;
+        stream >> nonce;
+        BOOST_CHECK_EQUAL(nonce.attempt_id, 1);
+        BOOST_CHECK(nonce.VerifySignature(XOnlyPubKey(GetRegtestMusigOracleKey(nonce.oracle_id).GetPubKey())));
+    }
+
+    OracleManager::GetInstance().EnableOracle(setup.oracle_ids.back(), true);
+    setup.Tick(6);
+    setup.Tick(7);
+    setup.Tick(8);
+    session = setup.orchestrator.GetOrCreateSigningSession(0);
+    BOOST_CHECK_EQUAL(session->GetState(), MuSig2SessionState::COMPLETE);
+    BOOST_CHECK(session->GetSessionContextId() != old_context);
+    setup.CheckCompletedBundle();
+    size_t nonce_count{0}, context_count{0}, partial_count{0};
+    for (const auto& message : setup.TakeMessages()) {
+        CDataStream stream{message.data, SER_NETWORK, PROTOCOL_VERSION};
+        if (message.m_type == NetMsgType::ORACLEMUSIGNONCE) {
+            OracleMusigNonceMsg nonce;
+            stream >> nonce;
+            BOOST_CHECK_EQUAL(nonce.attempt_id, 1);
+            ++nonce_count;
+        } else if (message.m_type == NetMsgType::ORACLEMUSIGCONTEXT) {
+            OracleMusigContextMsg context;
+            stream >> context;
+            BOOST_CHECK_EQUAL(context.attempt_id, 1);
+            BOOST_CHECK(context.session_context_id == session->GetSessionContextId());
+            ++context_count;
+        } else if (message.m_type == NetMsgType::ORACLEMUSIGPARTIALSIG) {
+            OracleMusigPartialSigMsg partial;
+            stream >> partial;
+            BOOST_CHECK_EQUAL(partial.attempt_id, 1);
+            BOOST_CHECK(partial.session_context_id == session->GetSessionContextId());
+            ++partial_count;
+        } else {
+            BOOST_ERROR("unexpected queued message: " << message.m_type);
+        }
+    }
+    BOOST_CHECK_EQUAL(nonce_count, 1U);
+    BOOST_CHECK_EQUAL(context_count, 1U);
+    BOOST_CHECK_EQUAL(partial_count, setup.oracle_ids.size());
+}
+
+BOOST_AUTO_TEST_CASE(scheduled_signing_retries_after_peer_reconnects)
+{
+    SigningRetrySetup setup{*m_node.addrman, *m_node.netgroupman};
+    setup.StartSigners();
+    setup.ConnectPeer();
+    setup.Tick(0);
+    const auto nonces = setup.TakeMessages();
+    BOOST_REQUIRE_EQUAL(nonces.size(), setup.oracle_ids.size());
+    for (const auto& message : nonces) {
+        BOOST_CHECK_EQUAL(message.m_type, NetMsgType::ORACLEMUSIGNONCE);
+    }
+    setup.connman.ClearTestNodes();
+    setup.peer = nullptr;
+    setup.Tick(2);
+    setup.Tick(3);
+    setup.CheckCompletedBundle();
+
+    setup.ConnectPeer();
+    setup.Tick(4);
+    const auto retries = setup.TakeMessages();
+    BOOST_REQUIRE_EQUAL(retries.size(), setup.oracle_ids.size() + 1);
+    size_t contexts{0}, partials{0};
+    for (const auto& message : retries) {
+        if (message.m_type == NetMsgType::ORACLEMUSIGCONTEXT) ++contexts;
+        else if (message.m_type == NetMsgType::ORACLEMUSIGPARTIALSIG) ++partials;
+        else BOOST_ERROR("unexpected retry after reconnect: " << message.m_type);
+    }
+    BOOST_CHECK_EQUAL(contexts, 1U);
+    BOOST_CHECK_EQUAL(partials, setup.oracle_ids.size());
+    setup.Tick(5);
+    BOOST_CHECK(setup.TakeMessages().empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

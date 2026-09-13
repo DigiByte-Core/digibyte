@@ -56,6 +56,8 @@ private:
     // Network-wide DigiDollar statistics (incremental state)
     CAmount m_total_dd_supply{0};        //!< Running total of DigiDollar supply
     bool m_supply_known{true};          //!< False once retained metadata leaves circulation unknown
+    //! A saved baseline is independently checked once the chain reaches Thaw Day.
+    bool m_supply_verified{false};
     CAmount m_total_collateral{0};       //!< Running total of locked collateral
     uint64_t m_vault_count{0};           //!< Running count of active vaults
 

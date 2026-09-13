@@ -249,12 +249,15 @@ struct HeaderResponseSetup : RegTestingSetup {
         BOOST_REQUIRE(fs::exists(blocks_dir));
         {
             HiddenBlocksDirectory hidden{blocks_dir, *m_node.notifications};
-            if (compact) {
-                CBlock block{header};
-                block.vtx.push_back(Params().GenesisBlock().vtx.front());
-                BOOST_CHECK_NO_THROW(Message(NetMsgType::CMPCTBLOCK, CBlockHeaderAndShortTxIDs{block}));
-            } else {
-                BOOST_CHECK_NO_THROW(Message(NetMsgType::HEADERS, std::vector<CBlock>{CBlock{header}}));
+            {
+                ASSERT_DEBUG_LOG("System error while flushing:");
+                if (compact) {
+                    CBlock block{header};
+                    block.vtx.push_back(Params().GenesisBlock().vtx.front());
+                    BOOST_CHECK_NO_THROW(Message(NetMsgType::CMPCTBLOCK, CBlockHeaderAndShortTxIDs{block}));
+                } else {
+                    BOOST_CHECK_NO_THROW(Message(NetMsgType::HEADERS, std::vector<CBlock>{CBlock{header}}));
+                }
             }
             BOOST_CHECK(!peer.fDisconnect);
             BOOST_CHECK(sent_headers.empty());
@@ -270,7 +273,10 @@ struct HeaderResponseSetup : RegTestingSetup {
             // and intentionally leaves the caller's output index unset.
             BlockValidationState state;
             const CBlockIndex* index{nullptr};
-            BOOST_CHECK(!chainman.ProcessNewBlockHeaders({header}, true, state, &index));
+            {
+                ASSERT_DEBUG_LOG("System error while flushing:");
+                BOOST_CHECK(!chainman.ProcessNewBlockHeaders({header}, true, state, &index));
+            }
             BOOST_CHECK(state.IsError());
             BOOST_CHECK(!state.IsInvalid());
             BOOST_CHECK(index == nullptr);

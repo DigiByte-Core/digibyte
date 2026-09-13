@@ -31,6 +31,8 @@ private Q_SLOTS:
     // The details window for a mint must name the DigiDollar amount, the
     // locked collateral, the lock period, the unlock height and the vault.
     void mintDetailsShowDigiDollarFacts();
+    void mintDetailsFindCollateralInAnyOutput_data();
+    void mintDetailsFindCollateralInAnyOutput();
     // A transfer must show the DigiDollars on one row and the DigiByte fee on
     // a row of its own, whichever of the two ways the wallet breaks it up.
     void transferRowsShowDollarsAndFeeSeparately();

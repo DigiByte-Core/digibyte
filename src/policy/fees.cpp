@@ -33,6 +33,8 @@
 #include <utility>
 
 static constexpr double INF_FEERATE = 1e99;
+// The serialized fee-history format is independent of the client version.
+static constexpr int FEE_ESTIMATES_FILE_VERSION = 149900;
 
 std::string StringForFeeEstimateHorizon(FeeEstimateHorizon horizon)
 {
@@ -932,7 +934,7 @@ bool CBlockPolicyEstimator::Write(AutoFile& fileout) const
 {
     try {
         LOCK(m_cs_fee_estimator);
-        fileout << 149900; // version required to read: 0.14.99 or later
+        fileout << FEE_ESTIMATES_FILE_VERSION;
         fileout << CLIENT_VERSION; // version that wrote the file
         fileout << nBestSeenHeight;
         if (BlockSpan() > HistoricalBlockSpan()/2) {
@@ -959,7 +961,7 @@ bool CBlockPolicyEstimator::Read(AutoFile& filein)
         LOCK(m_cs_fee_estimator);
         int nVersionRequired, nVersionThatWrote;
         filein >> nVersionRequired >> nVersionThatWrote;
-        if (nVersionRequired > CLIENT_VERSION) {
+        if (nVersionRequired > FEE_ESTIMATES_FILE_VERSION) {
             throw std::runtime_error(strprintf("up-version (%d) fee estimate file", nVersionRequired));
         }
 
@@ -968,9 +970,9 @@ bool CBlockPolicyEstimator::Read(AutoFile& filein)
         unsigned int nFileBestSeenHeight;
         filein >> nFileBestSeenHeight;
 
-        if (nVersionRequired < 149900) {
+        if (nVersionRequired < FEE_ESTIMATES_FILE_VERSION) {
             LogPrintf("%s: incompatible old fee estimation data (non-fatal). Version: %d\n", __func__, nVersionRequired);
-        } else { // New format introduced in 149900
+        } else {
             unsigned int nFileHistoricalFirst, nFileHistoricalBest;
             filein >> nFileHistoricalFirst >> nFileHistoricalBest;
             if (nFileHistoricalFirst > nFileHistoricalBest || nFileHistoricalBest > nFileBestSeenHeight) {

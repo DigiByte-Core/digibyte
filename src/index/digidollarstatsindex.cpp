@@ -4,6 +4,7 @@
 
 #include <index/digidollarstatsindex.h>
 
+#include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <common/args.h>
@@ -17,6 +18,7 @@
 #include <node/blockstorage.h>
 #include <serialize.h>
 #include <undo.h>
+#include <util/time.h>
 #include <validation.h>
 
 #include <algorithm>
@@ -105,6 +107,143 @@ struct DBHashKey {
     }
 };
 
+/** Read supply from chain data without changing either validation health cache. */
+class SupplyVerification {
+    Chainstate& m_chainstate;
+    std::map<uint256, CBlock> m_source_blocks;
+
+    bool Cancelled(std::string& error) const
+    {
+        if (!m_chainstate.m_chainman.m_interrupt) return false;
+        error = "DigiDollar circulating supply verification interrupted";
+        return true;
+    }
+
+    bool ReadBlock(const CBlockIndex& index, CBlock& block, std::string& error) const
+    {
+        bool mutated{false};
+        if (!m_chainstate.m_blockman.ReadBlockFromDisk(block, index) ||
+            block.GetHash() != index.GetBlockHash() ||
+            BlockMerkleRoot(block, &mutated) != block.hashMerkleRoot || mutated) {
+            error = strprintf("DigiDollar supply not ready: restore the block at height %d (%s)",
+                              index.nHeight, index.GetBlockHash().ToString());
+            return false;
+        }
+        return true;
+    }
+
+    DigiDollar::CanonicalTxLookup Lookup(const CBlockIndex& tip)
+    {
+        return [this, &tip](const uint256& txid, uint32_t height, CTransactionRef& out) {
+            if (height > static_cast<uint32_t>(tip.nHeight)) return false;
+            const auto* source = tip.GetAncestor(height);
+            if (!source) return false;
+            const uint256 hash = source->GetBlockHash();
+            auto it = m_source_blocks.find(hash);
+            if (it == m_source_blocks.end()) {
+                CBlock block;
+                std::string error;
+                if (!ReadBlock(*source, block, error)) return false;
+                if (m_source_blocks.size() >= 8) m_source_blocks.erase(m_source_blocks.begin());
+                it = m_source_blocks.emplace(hash, std::move(block)).first;
+            }
+            for (const auto& tx : it->second.vtx) {
+                if (tx->GetHash() == txid) { out = tx; return true; }
+            }
+            return false;
+        };
+    }
+
+    bool ApplyBlock(const CBlockIndex& index, bool undo, CAmount& supply, bool& known, std::string& error)
+    {
+        if (Cancelled(error)) return false;
+        const auto& params = m_chainstate.m_chainman.GetConsensus();
+        if (index.nHeight == 0 || index.nHeight < params.DigiDollarHeight) return true;
+        CBlock block;
+        if (!ReadBlock(index, block, error)) return false;
+        CBlockUndo block_undo;
+        if (!m_chainstate.m_blockman.UndoReadFromDisk(block_undo, index) ||
+            block_undo.vtxundo.size() + 1 != block.vtx.size()) {
+            error = strprintf("DigiDollar supply not ready: restore undo data at height %d (%s)",
+                              index.nHeight, index.GetBlockHash().ToString());
+            return false;
+        }
+        const auto lookup = Lookup(index);
+        __int128 change{0};
+        for (size_t i = 1; i < block.vtx.size(); ++i) {
+            CAmount delta{0};
+            const auto result = DigiDollar::GetCirculatingSupplyChange(*block.vtx[i], block_undo.vtxundo[i - 1].vprevout,
+                    index.nHeight, params, lookup, delta, error);
+            if (result == DigiDollar::SupplyChangeResult::FAILURE) return false;
+            if (result == DigiDollar::SupplyChangeResult::UNKNOWN_METADATA) known = false;
+            else change += delta;
+        }
+        if (!known) return true;
+        const __int128 next = static_cast<__int128>(supply) + (undo ? -change : change);
+        if (next < 0 || next > std::numeric_limits<CAmount>::max()) {
+            error = "DigiDollar supply not ready: reconstructed token total is out of range";
+            return false;
+        }
+        supply = static_cast<CAmount>(next);
+        return true;
+    }
+
+public:
+    explicit SupplyVerification(Chainstate& chainstate) : m_chainstate{chainstate} {}
+
+    bool Move(const CBlockIndex& from, const CBlockIndex& to, CAmount& supply, bool& known, std::string& error)
+    {
+        const auto* fork = LastCommonAncestor(&from, &to);
+        if (!fork) { error = "DigiDollar supply not ready: index ancestry is unavailable"; return false; }
+        auto last_progress = SteadyClock::now();
+        uint64_t checked{0};
+        const auto progress = [&] {
+            ++checked;
+            if (SteadyClock::now() - last_progress >= std::chrono::seconds{1}) {
+                LogPrintf("DigiDollar supply verification: %u branch blocks checked\n", checked);
+                last_progress = SteadyClock::now();
+            }
+        };
+        for (auto* index = &from; index != fork; index = index->pprev) {
+            if (!ApplyBlock(*index, true, supply, known, error)) return false;
+            progress();
+        }
+        for (int height = fork->nHeight + 1; height <= to.nHeight; ++height) {
+            if (!ApplyBlock(*to.GetAncestor(height), false, supply, known, error)) return false;
+            progress();
+        }
+        return !Cancelled(error);
+    }
+
+    bool At(const CBlockIndex& target, CAmount& supply, bool& known, std::string& error)
+    {
+        AssertLockHeld(cs_main);
+        if (Cancelled(error)) return false;
+        const auto& params = m_chainstate.m_chainman.GetConsensus();
+        if (target.nHeight == 0 || target.nHeight < params.DigiDollarHeight) {
+            supply = 0;
+            known = true;
+            return true;
+        }
+        const auto* tip = m_chainstate.m_chain.Tip();
+        if (!tip || m_chainstate.CoinsTip().GetBestBlock() != tip->GetBlockHash()) {
+            error = "DigiDollar supply not ready: UTXO state does not match the chain tip";
+            return false;
+        }
+        LogPrintf("DigiDollar supply verification: checking saved block %s from UTXO tip %s\n",
+                  target.GetBlockHash().ToString(), tip->GetBlockHash().ToString());
+        DigiDollar::ChainstateHealth unused_health;
+        if (!DigiDollar::ReconstructChainstateHealth(m_chainstate.CoinsTip(), params, Lookup(*tip),
+                unused_health, error, [&] { return Cancelled(error); }, &supply,
+                [](uint64_t completed, uint64_t) {
+                    LogPrintf("DigiDollar supply verification: %u outputs checked\n", completed);
+                }, &known)) return false;
+        // A saved index can lag or belong to a disconnected branch. Translate
+        // the independently counted tip supply using actual block token deltas.
+        return Move(*tip, target, supply, known, error);
+    }
+};
+
 } // namespace
 
 std::unique_ptr<DigiDollarStatsIndex> g_digidollar_stats_index;
@@ -143,6 +282,7 @@ DigiDollarStatsIndex::DigiDollarStatsIndex(std::unique_ptr<interfaces::Chain> ch
 
 bool DigiDollarStatsIndex::CustomInit(const std::optional<interfaces::BlockKey>& block)
 {
+    m_supply_verified = false;
     if (block) {
         // Load existing state from database
         std::pair<uint256, DigiDollarDBVal> read_out;
@@ -169,6 +309,36 @@ bool DigiDollarStatsIndex::CustomInit(const std::optional<interfaces::BlockKey>&
         m_total_collateral = read_out.second.total_collateral;
         m_vault_count = read_out.second.vault_count;
 
+        const auto* tip = m_chainstate->m_chain.Tip();
+        if (tip && DigiDollar::IsThawDayActive(m_chainstate->m_chainman.GetConsensus(), tip->nHeight)) {
+            const auto* indexed = m_chainstate->m_blockman.LookupBlockIndex(block->hash);
+            CAmount verified{0};
+            bool known{false};
+            std::string reason;
+            if (!indexed || indexed->nHeight != block->height ||
+                !SupplyVerification{*m_chainstate}.At(*indexed, verified, known, reason))
+                return error("DigiDollar stats index: %s", reason);
+            if (m_supply_known != known || (known && m_total_dd_supply != verified)) {
+                if (known) read_out.second.total_dd_supply = verified;
+                read_out.second.supply_known = known;
+                const bool written = read_out.first == block->hash ?
+                    m_db->Write(DBHeightKey(block->height), read_out) :
+                    m_db->Write(DBHashKey(block->hash), read_out.second);
+                if (!written) return error("DigiDollar stats index: cannot save repaired circulating supply");
+                if (known) {
+                    LogPrintf("DigiDollar circulating supply repaired at block %s: %d -> %d cents\n",
+                              block->hash.ToString(), m_total_dd_supply, verified);
+                    m_total_dd_supply = verified;
+                }
+                m_supply_known = known;
+            } else if (known) {
+                LogPrintf("DigiDollar circulating supply verified at block %s: %d cents\n",
+                          block->hash.ToString(), verified);
+            }
+            if (!known) LogPrintf("DigiDollar circulating supply remains unavailable from retained token metadata at block %s\n", block->hash.ToString());
+            m_supply_verified = true;
+        }
+
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollarStatsIndex: Initialized from height %d - DD Supply: %s, Collateral: %d, Vaults: %d\n",
                  block->height, m_supply_known ? std::to_string(m_total_dd_supply) : "unavailable", m_total_collateral, m_vault_count);
     } else {
@@ -177,6 +347,7 @@ bool DigiDollarStatsIndex::CustomInit(const std::optional<interfaces::BlockKey>&
         m_supply_known = true;
         m_total_collateral = 0;
         m_vault_count = 0;
+        m_supply_verified = true;
 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollarStatsIndex: Initialized from genesis\n");
     }
@@ -227,8 +398,27 @@ bool DigiDollarStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
     };
     CAmount supply = m_total_dd_supply;
     bool supply_known = m_supply_known;
+    bool supply_verified = m_supply_verified;
     CAmount collateral = m_total_collateral;
     uint64_t vaults = m_vault_count;
+    {
+        LOCK(cs_main);
+        if (!supply_verified && DigiDollar::IsThawDayActive(params, block.height)) {
+            CAmount verified{0};
+            bool known{false};
+            std::string reason;
+            if (!pindex->pprev || !SupplyVerification{*m_chainstate}.At(*pindex->pprev, verified, known, reason))
+                return error("%s: %s", __func__, reason);
+            if (known && (!supply_known || supply != verified)) {
+                LogPrintf("DigiDollar circulating supply repaired before block %s: %d -> %d cents\n",
+                          block.hash.ToString(), supply, verified);
+            }
+            if (known) supply = verified;
+            else LogPrintf("DigiDollar circulating supply remains unavailable from retained token metadata before block %s\n", block.hash.ToString());
+            supply_known = known;
+            supply_verified = true;
+        }
+    }
     for (size_t i = 1; i < cblock.vtx.size(); ++i) {
         const auto& tx = *cblock.vtx[i];
         const auto& inputs = undo.vtxundo[i - 1].vprevout;
@@ -268,6 +458,7 @@ bool DigiDollarStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
     if (!m_db->Write(DBHeightKey(block.height), std::make_pair(block.hash, DigiDollarDBVal{supply, collateral, vaults, supply_known}))) return false;
     m_total_dd_supply = supply;
     m_supply_known = supply_known;
+    m_supply_verified = supply_verified;
     m_total_collateral = collateral;
     m_vault_count = vaults;
     return true;
@@ -299,8 +490,6 @@ bool DigiDollarStatsIndex::CustomRewind(const interfaces::BlockKey& current_tip,
         db_it->Next();
     }
 
-    if (!m_db->WriteBatch(batch)) return false;
-
     // Load state from new_tip
     std::pair<uint256, DigiDollarDBVal> new_tip_state;
     if (new_tip.height < m_chainstate->m_chainman.GetConsensus().DigiDollarHeight) {
@@ -315,6 +504,28 @@ bool DigiDollarStatsIndex::CustomRewind(const interfaces::BlockKey& current_tip,
             return error("%s: Cannot read state at new tip %s", __func__, new_tip.hash.ToString());
         }
     }
+
+    if (m_supply_verified) {
+        LOCK(cs_main);
+        const auto* from = m_chainstate->m_blockman.LookupBlockIndex(current_tip.hash);
+        const auto* to = m_chainstate->m_blockman.LookupBlockIndex(new_tip.hash);
+        CAmount verified = m_total_dd_supply;
+        bool known = m_supply_known;
+        std::string reason;
+        if (!from || !to) return error("DigiDollar stats index rewind: block ancestry is unavailable");
+        SupplyVerification verification{*m_chainstate};
+        // An unavailable fork may have disappeared from the UTXO set. Rescan
+        // then, so readable replacement history can make supply known again.
+        if (!(known ? verification.Move(*from, *to, verified, known, reason) :
+                      verification.At(*to, verified, known, reason)))
+            return error("DigiDollar stats index rewind: %s", reason);
+        // Do not reintroduce an older incorrect row after repairing the saved tip.
+        if (known) new_tip_state.second.total_dd_supply = verified;
+        new_tip_state.second.supply_known = known;
+        if (new_tip_state.first == new_tip.hash) batch.Write(DBHeightKey(new_tip.height), new_tip_state);
+        else batch.Write(DBHashKey(new_tip.hash), new_tip_state.second);
+    }
+    if (!m_db->WriteBatch(batch)) return false;
 
     // Restore running state from new_tip
     m_total_dd_supply = new_tip_state.second.total_dd_supply;
