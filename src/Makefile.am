@@ -157,6 +157,7 @@ DIGIBYTE_CORE_H = \
   cuckoocache.h \
   dandelion.h \
   dbwrapper.h \
+  dbwrapper_env.h \
   deploymentinfo.h \
   deploymentstatus.h \
   digidollar/amount.h \
@@ -219,6 +220,7 @@ DIGIBYTE_CORE_H = \
   netgroup.h \
   netmessagemaker.h \
   node/abort.h \
+  node/blockheadercache.h \
   node/blockmanager_args.h \
   node/blockstorage.h \
   node/caches.h \
@@ -242,6 +244,7 @@ DIGIBYTE_CORE_H = \
   node/transaction.h \
   node/txreconciliation.h \
   node/utxo_snapshot.h \
+  node/warnings.h \
   node/validation_cache_args.h \
   noui.h \
   outputtype.h \
@@ -305,6 +308,7 @@ DIGIBYTE_CORE_H = \
   util/bytevectorhash.h \
   util/chaintype.h \
   util/check.h \
+  util/compact_work.h \
   util/epochguard.h \
   util/error.h \
   util/exception.h \
@@ -400,6 +404,7 @@ libdigibyte_node_a_SOURCES = \
   consensus/tx_verify.cpp \
   dandelion.cpp \
   dbwrapper.cpp \
+  dbwrapper_env.cpp \
   deploymentstatus.cpp \
   digidollar/health.cpp \
   flatfile.cpp \
@@ -425,6 +430,7 @@ libdigibyte_node_a_SOURCES = \
   net_processing.cpp \
   netgroup.cpp \
   node/abort.cpp \
+  node/blockheadercache.cpp \
   node/blockmanager_args.cpp \
   node/blockstorage.cpp \
   node/caches.cpp \
@@ -1031,6 +1037,7 @@ libdigibytekernel_la_SOURCES = \
   consensus/tx_verify.cpp \
   core_read.cpp \
   dbwrapper.cpp \
+  dbwrapper_env.cpp \
   deploymentinfo.cpp \
   deploymentstatus.cpp \
   flatfile.cpp \

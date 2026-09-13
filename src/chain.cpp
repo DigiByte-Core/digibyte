@@ -11,17 +11,62 @@
 #include <util/time.h>
 #include <logging.h>
 
+namespace {
+class LocalBlockHeader final : public BlockHeaderSource {
+    const BlockHeaderData m_data;
+public:
+    explicit LocalBlockHeader(const BlockHeaderData& data) : m_data{data} {}
+    BlockHeaderData Read(const uint256&) const override { return m_data; }
+    bool IsShared() const override { return false; }
+};
+} // namespace
+
+BlockHeaderData CBlockIndex::GetHeaderData() const
+{
+    if (!m_header_source) return {};
+    return m_header_source->Read(m_header_source->IsShared() ? GetBlockHash() : uint256{});
+}
+
+void CBlockIndex::SetHeaderData(const BlockHeaderData& data)
+{
+    auto replacement = std::make_unique<LocalBlockHeader>(data);
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+    m_header_source = replacement.release();
+}
+
+void CBlockIndex::UseHeaderSource(const BlockHeaderSource& source)
+{
+    assert(source.IsShared());
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+    m_header_source = &source;
+}
+
+CBlockIndex::~CBlockIndex()
+{
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+}
+
+CBlockIndex::CBlockIndex(const CBlockIndex& other)
+    : m_chain_work{other.m_chain_work},
+      phashBlock{other.phashBlock}, pprev{other.pprev}, pskip{other.pskip},
+      nHeight{other.nHeight}, nFile{other.nFile}, nDataPos{other.nDataPos}, nUndoPos{other.nUndoPos},
+      nTx{other.nTx}, nChainTx{other.nChainTx}, nStatus{other.nStatus},
+      nVersion{other.nVersion}, nTime{other.nTime}, nBits{other.nBits},
+      nSequenceId{other.nSequenceId}, nTimeMax{other.nTimeMax}
+{
+    SetHeaderData(other.GetHeaderData());
+}
+
 /**
  * CBlockIndex constructor that copies from a block header.
  * We can safely call LogPrintf here because we are in a .cpp file that includes logging.
  */
 CBlockIndex::CBlockIndex(const CBlockHeader& block)
     : nVersion(block.nVersion),
-      hashMerkleRoot(block.hashMerkleRoot),
       nTime(block.nTime),
-      nBits(block.nBits),
-      nNonce(block.nNonce)
+      nBits(block.nBits)
 {
+    SetHeaderData({block.hashMerkleRoot, block.nNonce});
     // A block header names its mining algorithm in its version bits. Say so
     // once here if the bits are not one of DigiByte's five algorithms; GetAlgo
     // below then treats the block as Scrypt.
@@ -38,7 +83,7 @@ std::string CBlockFileInfo::ToString() const
 std::string CBlockIndex::ToString() const
 {
     return strprintf("CBlockIndex(pprev=%p, nHeight=%d, merkle=%s, hashBlock=%s)",
-                     pprev, nHeight, hashMerkleRoot.ToString(), GetBlockHash().ToString());
+                     pprev, nHeight, GetHeaderData().merkle_root.ToString(), GetBlockHash().ToString());
 }
 
 void CChain::SetTip(CBlockIndex& block) {
@@ -247,7 +292,11 @@ arith_uint256 GetBlockProofBase(const CBlockIndex& block)
 
 arith_uint256 GetBlockProof(const CBlockIndex& block)
 {
-    CBlockHeader header = block.GetBlockHeader();
+    // Work uses the header version and time, which remain in memory. Preserve
+    // CBlockHeader's algorithm decoding, including unknown version bits.
+    CBlockHeader header;
+    header.nVersion = block.nVersion;
+    header.nTime = block.nTime;
     int nHeight = block.nHeight;
     const Consensus::Params& params = Params().GetConsensus();
 
@@ -283,7 +332,9 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
 
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo)
 {
-    CBlockHeader header = block.GetBlockHeader();
+    CBlockHeader header;
+    header.nVersion = block.nVersion;
+    header.nTime = block.nTime;
     int nHeight = block.nHeight;
     const Consensus::Params& params = Params().GetConsensus();
 
@@ -310,10 +361,10 @@ int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& fr
 {
     arith_uint256 r;
     int sign = 1;
-    if (to.nChainWork > from.nChainWork) {
-        r = to.nChainWork - from.nChainWork;
+    if (to.GetChainWork() > from.GetChainWork()) {
+        r = to.GetChainWork() - from.GetChainWork();
     } else {
-        r = from.nChainWork - to.nChainWork;
+        r = from.GetChainWork() - to.GetChainWork();
         sign = -1;
     }
     r = r * arith_uint256(params.nPowTargetSpacing) / GetBlockProof(tip);

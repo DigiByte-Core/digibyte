@@ -5,6 +5,8 @@
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <kernel/disconnected_transactions.h>
+#include <node/chainstate.h>
+#include <node/interface_ui.h>
 #include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
 #include <random.h>
@@ -16,6 +18,7 @@
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 #include <timedata.h>
+#include <txdb.h>
 #include <uint256.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -24,6 +27,7 @@
 
 #include <vector>
 
+#include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
 using node::BlockManager;
@@ -904,6 +908,216 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion_hash_mismatch, Sna
         LOCK(::cs_main);
         BOOST_CHECK_EQUAL(chainman_restarted.ActiveHeight(), 220);
     }
+}
+
+namespace {
+using StartupCandidates = std::set<CBlockIndex*, node::CBlockIndexWorkComparator>;
+
+StartupCandidates EagerStartupCandidates(ChainstateManager& chainman, const Chainstate& chainstate)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    // Reference the old startup sequence: collect all eligible records, then
+    // discard candidates worse than the tip recovered from the coins database.
+    StartupCandidates candidates;
+    const CBlockIndex* snapshot_base = chainman.GetSnapshotBaseBlock();
+    for (auto& [hash, block] : chainman.m_blockman.m_block_index) {
+        if (&block != snapshot_base &&
+            (!block.IsValid(BLOCK_VALID_TRANSACTIONS) || (!block.HaveNumChainTxs() && block.pprev))) continue;
+        if (&chainstate != &chainman.ActiveChainstate() &&
+            snapshot_base->GetAncestor(block.nHeight) != &block) continue;
+        candidates.insert(&block);
+    }
+    if (chainstate.m_chain.Tip()) {
+        auto it = candidates.begin();
+        while (it != candidates.end() && candidates.value_comp()(*it, chainstate.m_chain.Tip())) {
+            it = candidates.erase(it);
+        }
+    }
+    return candidates;
+}
+
+void CheckStartupCandidates(const Chainstate& chainstate, const StartupCandidates& expected)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const auto& actual = chainstate.setBlockIndexCandidates;
+    BOOST_CHECK_EQUAL_COLLECTIONS(actual.begin(), actual.end(), expected.begin(), expected.end());
+    if (!expected.empty() && !actual.empty()) BOOST_CHECK(*actual.rbegin() == *expected.rbegin());
+}
+
+struct StartupCandidateRecoverySetup : TestChain100Setup {
+    StartupCandidateRecoverySetup()
+        : TestChain100Setup(ChainType::REGTEST, {}, /*coins_db_in_memory=*/false,
+                           /*block_tree_db_in_memory=*/false) {}
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(startup_candidates_wait_for_recovered_coins_tip, StartupCandidateRecoverySetup)
+{
+    auto& chainman = *m_node.chainman;
+    uint256 old_hash;
+    uint256 recovered_hash;
+    fs::path coins_path;
+    {
+        LOCK(cs_main);
+        auto& chainstate = chainman.ActiveChainstate();
+        chainstate.ForceFlushStateToDisk();
+        old_hash = chainstate.m_chain.Tip()->GetBlockHash();
+        recovered_hash = chainstate.m_chain[98]->GetBlockHash();
+        const auto path = chainstate.CoinsDB().StoragePath();
+        BOOST_REQUIRE(path);
+        coins_path = *path;
+    }
+    SyncWithValidationInterfaceQueue();
+    {
+        LOCK(cs_main);
+        chainman.ResetChainstates();
+    }
+    {
+        // Model an interrupted write while moving from height 100 back to 98.
+        // Replay must undo the old tip before candidate filtering uses the result.
+        CDBWrapper coins{{.path = coins_path, .cache_bytes = 1 << 20, .obfuscate = true}};
+        BOOST_REQUIRE(coins.Erase(uint8_t{'B'}));
+        BOOST_REQUIRE(coins.Write(uint8_t{'H'}, std::vector<uint256>{recovered_hash, old_hash}));
+    }
+
+    std::optional<size_t> candidates_before_replay;
+    boost::signals2::scoped_connection connection{uiInterface.ShowProgress_connect(
+        [&](const std::string& title, int percent, bool) {
+            if (percent == 0 && title.find("Replaying blocks") == 0) {
+                candidates_before_replay = WITH_LOCK(cs_main, return chainman.ActiveChainstate().setBlockIndexCandidates.size());
+            }
+        })};
+    node::ChainstateLoadOptions options;
+    options.mempool = m_node.mempool.get();
+    options.stempool = m_node.stempool.get();
+    const auto [status, error] = node::LoadChainstate(chainman, m_cache_sizes, options);
+    BOOST_REQUIRE_MESSAGE(status == node::ChainstateLoadStatus::SUCCESS, error.original);
+    BOOST_REQUIRE(candidates_before_replay);
+    BOOST_CHECK_EQUAL(*candidates_before_replay, 0U);
+    {
+        LOCK(cs_main);
+        auto& chainstate = chainman.ActiveChainstate();
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Height(), 98);
+        BOOST_CHECK(chainstate.CoinsTip().GetBestBlock() == recovered_hash);
+        const auto expected = EagerStartupCandidates(chainman, chainstate);
+        CheckStartupCandidates(chainstate, expected);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.size(), 3U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(chainman.m_blockman.LookupBlockIndex(recovered_hash)), 1U);
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ActiveChainstate().ActivateBestChain(state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(cs_main, return chainman.ActiveTip()->GetBlockHash()) == old_hash);
+}
+
+BOOST_FIXTURE_TEST_CASE(startup_candidates_empty_coins_view_can_replay_history, TestChain100Setup)
+{
+    auto& chainman = *m_node.chainman;
+    uint256 expected_tip;
+    {
+        LOCK(cs_main);
+        auto& chainstate = chainman.ActiveChainstate();
+        expected_tip = chainstate.m_chain.Tip()->GetBlockHash();
+        chainstate.ForceFlushStateToDisk();
+    }
+    SyncWithValidationInterfaceQueue();
+    {
+        LOCK(cs_main);
+        chainman.ResetChainstates();
+        chainman.InitializeChainstate(m_node.mempool.get(), m_node.stempool.get());
+    }
+    auto& chainstate = chainman.ActiveChainstate();
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainstate.m_chain.Tip() == nullptr);
+        chainstate.InitCoinsDB(1 << 20, /*in_memory=*/true, /*should_wipe=*/true);
+        BOOST_REQUIRE(chainstate.ReplayBlocks());
+        chainstate.InitCoinsCache(1 << 20);
+        BOOST_REQUIRE(chainstate.CoinsTip().GetBestBlock().IsNull());
+        BOOST_REQUIRE(chainman.LoadBlockIndex(/*load_candidates=*/false));
+        BOOST_CHECK(chainstate.setBlockIndexCandidates.empty());
+        const auto expected = EagerStartupCandidates(chainman, chainstate);
+        BOOST_REQUIRE(chainstate.RebuildBlockIndexCandidates());
+        CheckStartupCandidates(chainstate, expected);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.size(), 101U);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)), 1U);
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) == expected_tip);
+    mineBlocks(1);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainstate.m_chain.Height()), 101);
+}
+
+BOOST_FIXTURE_TEST_CASE(startup_candidates_preserve_forks_and_snapshot_roles, TestChain100Setup)
+{
+    auto& chainman = *m_node.chainman;
+    auto& background = chainman.ActiveChainstate();
+    LOCK(cs_main);
+    CBlockIndex* tip = background.m_chain.Tip();
+    const auto add = [&](uint32_t status, const arith_uint256& work, int sequence, unsigned int chain_tx) {
+        auto* block = chainman.m_blockman.InsertBlockIndex(InsecureRand256());
+        block->pprev = tip->pprev;
+        block->nHeight = tip->nHeight;
+        block->nVersion = tip->nVersion;
+        block->nTime = tip->nTime;
+        block->nBits = tip->nBits;
+        block->nStatus = status;
+        block->nTx = 1;
+        block->nChainTx = chain_tx;
+        block->SetChainWork(work);
+        block->nSequenceId = sequence;
+        block->BuildSkip();
+        return block;
+    };
+    const uint32_t valid = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+    auto* stronger = add(valid, tip->GetChainWork() + 1, tip->nSequenceId, tip->nChainTx);
+    auto* earlier = add(valid, tip->GetChainWork(), tip->nSequenceId - 1, tip->nChainTx);
+    auto* later = add(valid, tip->GetChainWork(), tip->nSequenceId + 1, tip->nChainTx);
+    auto* failed = add(valid | BLOCK_FAILED_VALID, tip->GetChainWork() + 5, 0, tip->nChainTx);
+    auto* headers_only = add(BLOCK_VALID_TREE, tip->GetChainWork() + 5, 0, 0);
+    auto* missing_parent_txs = add(valid, tip->GetChainWork() + 5, 0, 0);
+    auto* pruned = add(BLOCK_VALID_TRANSACTIONS, tip->GetChainWork() + 2, 0, tip->nChainTx);
+    const auto expected = EagerStartupCandidates(chainman, background);
+    BOOST_REQUIRE(background.RebuildBlockIndexCandidates());
+    CheckStartupCandidates(background, expected);
+    for (auto* included : {tip, stronger, earlier, pruned}) BOOST_CHECK_EQUAL(background.setBlockIndexCandidates.count(included), 1U);
+    for (auto* excluded : {later, failed, headers_only, missing_parent_txs}) BOOST_CHECK_EQUAL(background.setBlockIndexCandidates.count(excluded), 0U);
+
+    auto* snapshot_base = background.m_chain[90];
+    auto* snapshot_tip = background.m_chain[95];
+    auto* validation_tip = background.m_chain[70];
+    const auto saved_status = snapshot_base->nStatus;
+    snapshot_base->nStatus = BLOCK_VALID_TREE | BLOCK_ASSUMED_VALID;
+    auto& snapshot = chainman.ActivateExistingSnapshot(snapshot_base->GetBlockHash());
+    snapshot.InitCoinsDB(1 << 20, /*in_memory=*/true, /*should_wipe=*/false);
+    snapshot.InitCoinsCache(1 << 20);
+    snapshot.CoinsTip().SetBestBlock(snapshot_tip->GetBlockHash());
+    snapshot.m_chain.SetTip(*snapshot_tip);
+    background.m_chain.SetTip(*validation_tip);
+    const auto expected_background = EagerStartupCandidates(chainman, background);
+    const auto expected_snapshot = EagerStartupCandidates(chainman, snapshot);
+    BOOST_REQUIRE(background.RebuildBlockIndexCandidates());
+    BOOST_REQUIRE(snapshot.RebuildBlockIndexCandidates());
+    CheckStartupCandidates(background, expected_background);
+    CheckStartupCandidates(snapshot, expected_snapshot);
+    BOOST_CHECK_EQUAL(background.setBlockIndexCandidates.size(), 21U);
+    BOOST_CHECK_EQUAL(background.setBlockIndexCandidates.count(snapshot_base), 1U);
+    BOOST_CHECK_EQUAL(background.setBlockIndexCandidates.count(stronger), 0U);
+    BOOST_CHECK_EQUAL(snapshot.setBlockIndexCandidates.count(stronger), 1U);
+    BOOST_CHECK_EQUAL(snapshot.setBlockIndexCandidates.count(snapshot_base), 0U);
+
+    // A caller can already have the recovered tip in memory and still need
+    // candidate initialization for each chainstate independently.
+    background.CoinsTip().SetBestBlock(validation_tip->GetBlockHash());
+    background.ClearBlockIndexCandidates();
+    snapshot.ClearBlockIndexCandidates();
+    BOOST_REQUIRE(background.LoadChainTip(/*rebuild_candidates=*/true));
+    BOOST_REQUIRE(snapshot.LoadChainTip(/*rebuild_candidates=*/true));
+    CheckStartupCandidates(background, expected_background);
+    CheckStartupCandidates(snapshot, expected_snapshot);
+    snapshot_base->nStatus = saved_status;
+    background.CoinsTip().SetBestBlock(tip->GetBlockHash());
+    background.m_chain.SetTip(*tip);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

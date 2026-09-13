@@ -7,16 +7,24 @@
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
+#include <node/interface_ui.h>
 #include <script/solver.h>
 #include <primitives/block.h>
+#include <timedata.h>
 #include <util/chaintype.h>
+#include <util/signalinterrupt.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
+#include <boost/signals2/connection.hpp>
 #include <test/util/logging.h>
 #include <test/util/mining.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
+
+#include <fstream>
+#include <functional>
 
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
@@ -25,6 +33,70 @@ using node::MAX_BLOCKFILE_SIZE;
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(block_index_progress_large_chain)
+{
+    constexpr int total{24203363};
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(0, total), 0);
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(20000000, total), 82);
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(22000000, total), 90);
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(24000000, total), 99);
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(total, total), 100);
+    BOOST_CHECK_EQUAL(node::BlockIndexProgressPercent(0, 0), 100);
+}
+
+BOOST_AUTO_TEST_CASE(block_index_load_cancelled_before_empty_scan)
+{
+    const auto params{CreateChainParams(m_args, ChainType::REGTEST)};
+    node::BlockTreeDB db{{.path = m_args.GetDataDirBase() / "cancelled-index", .cache_bytes = 1 << 20, .memory_only = true}};
+    util::SignalInterrupt interrupt;
+    interrupt();
+    bool inserted{false};
+    const auto insert = [&](const uint256&) -> CBlockIndex* {
+        inserted = true;
+        return nullptr;
+    };
+    LOCK(cs_main);
+    BOOST_CHECK(!db.LoadBlockIndexGuts(params->GetConsensus(), insert, interrupt));
+    BOOST_CHECK(!inserted);
+}
+
+BOOST_AUTO_TEST_CASE(block_index_load_cancelled_at_last_record)
+{
+    const auto params{CreateChainParams(m_args, ChainType::REGTEST)};
+    node::BlockTreeDB db{{.path = m_args.GetDataDirBase() / "last-record-index", .cache_bytes = 1 << 20, .memory_only = true}};
+    const auto genesis_hash = params->GenesisBlock().GetHash();
+    CBlockIndex genesis{params->GenesisBlock()};
+    genesis.phashBlock = &genesis_hash;
+    util::SignalInterrupt interrupt;
+    CBlockIndex loaded;
+    loaded.phashBlock = &genesis_hash;
+    std::vector<std::string> progress;
+    boost::signals2::scoped_connection connection{uiInterface.InitMessage_connect([&](const std::string& message) {
+        progress.push_back(message);
+    })};
+    const auto insert = [&](const uint256& hash) -> CBlockIndex* {
+        if (hash.IsNull()) {
+            interrupt();
+            return nullptr;
+        }
+        BOOST_REQUIRE(hash == genesis_hash);
+        return &loaded;
+    };
+    LOCK(cs_main);
+    BOOST_REQUIRE(db.WriteBatchSync({}, 0, {&genesis}));
+    BOOST_CHECK(!db.LoadBlockIndexGuts(params->GetConsensus(), insert, interrupt));
+    for (const auto& message : progress) {
+        BOOST_CHECK(message.find("Loaded block index") == std::string::npos);
+    }
+    // Cancellation preserves the loaded record and allows a complete retry.
+    interrupt.reset();
+    const auto retry_insert = [&](const uint256& hash) -> CBlockIndex* {
+        return hash.IsNull() ? nullptr : &loaded;
+    };
+    BOOST_CHECK(db.LoadBlockIndexGuts(params->GetConsensus(), retry_insert, interrupt));
+    BOOST_CHECK(loaded.GetBlockHeader().GetHash() == genesis_hash);
+}
 
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {
@@ -304,5 +376,286 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_early_file_is_automatically_prunable_withou
 {
     CheckEarlyFileRetention(false, true);
 }
+
+namespace {
+class FlushRecordingNotifications final : public kernel::Notifications {
+public:
+    unsigned flush_errors{0};
+    unsigned fatal_errors{0};
+    void flushError(const std::string&) override { ++flush_errors; }
+    void fatalError(const std::string&, const bilingual_str&) override { ++fatal_errors; }
+};
+
+/** Make only one temporary test path unusable, restoring it on every exit. */
+class ScopedPathObstruction {
+    const fs::path m_path;
+    const fs::path m_saved;
+public:
+    explicit ScopedPathObstruction(const fs::path& path)
+        : m_path{path}, m_saved{path + ".saved"}
+    {
+        const bool directory = fs::is_directory(path);
+        if (fs::exists(m_saved)) throw std::runtime_error("Test backup path already exists");
+        fs::rename(m_path, m_saved);
+        try {
+            if (directory) {
+                std::ofstream obstruction{m_path};
+                if (!obstruction) throw std::runtime_error("Cannot obstruct test directory");
+            } else {
+                fs::create_directory(m_path);
+            }
+        } catch (...) {
+            fs::remove(m_path);
+            fs::rename(m_saved, m_path);
+            throw;
+        }
+    }
+    ~ScopedPathObstruction()
+    {
+        std::error_code error;
+        fs::remove(m_path, error);
+        fs::rename(m_saved, m_path, error);
+        assert(!error);
+    }
+};
+
+class ScopedBlockSaveListener final : public CValidationInterface {
+    const std::function<void()> m_callback;
+    void NewPoWValidBlock(const CBlockIndex*, const std::shared_ptr<const CBlock>&) override
+    {
+        m_callback();
+    }
+public:
+    explicit ScopedBlockSaveListener(std::function<void()> callback) : m_callback{std::move(callback)}
+    {
+        RegisterValidationInterface(this);
+    }
+    ~ScopedBlockSaveListener() { UnregisterValidationInterface(this); }
+};
+
+struct BlockFileDurabilitySetup : ChainTestingSetup {
+    FlushRecordingNotifications notifications;
+    std::unique_ptr<ChainstateManager> manager;
+    CBlockIndex* genesis{nullptr};
+    CBlockIndex* assumed{nullptr};
+    uint32_t next_nonce{1000000};
+
+    BlockFileDurabilitySetup() : ChainTestingSetup{ChainType::REGTEST}
+    {
+        const ChainstateManager::Options chain_options{
+            .chainparams = Params(),
+            .datadir = m_args.GetDataDirNet() / "flush-durability",
+            .adjusted_time_callback = GetAdjustedTime,
+            .check_block_index = false,
+            .notifications = notifications,
+        };
+        const BlockManager::Options block_options{
+            .chainparams = Params(),
+            .blocks_dir = chain_options.datadir / "blocks",
+            .notifications = notifications,
+        };
+        fs::create_directories(block_options.blocks_dir);
+        manager = std::make_unique<ChainstateManager>(m_node.kernel->interrupt, chain_options, block_options);
+        auto& blockman = manager->m_blockman;
+        LOCK(cs_main);
+        blockman.m_block_tree_db = std::make_unique<node::BlockTreeDB>(DBParams{
+            .path = block_options.blocks_dir / "index", .cache_bytes = 1 << 20});
+        auto& chainstate = manager->InitializeChainstate(nullptr, nullptr);
+        chainstate.InitCoinsDB(1 << 20, /*in_memory=*/true, /*should_wipe=*/true);
+        chainstate.InitCoinsCache(1 << 20);
+        BOOST_REQUIRE(chainstate.LoadGenesisBlock());
+        genesis = blockman.LookupBlockIndex(Params().GenesisBlock().GetHash());
+        BOOST_REQUIRE(genesis);
+        chainstate.CoinsTip().SetBestBlock(genesis->GetBlockHash());
+        BOOST_REQUIRE(chainstate.LoadChainTip());
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS));
+    }
+
+    void AddAssumedFile() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        auto& blockman = manager->m_blockman;
+        blockman.m_snapshot_height = 1;
+        // These are storage records. Block acceptance is not under test here.
+        CBlock block = Params().GenesisBlock();
+        block.hashPrevBlock = genesis->GetBlockHash();
+        ++block.nTime;
+        ++block.nNonce;
+        const auto pos = blockman.SaveBlockToDisk(block, 1, nullptr);
+        BOOST_REQUIRE(!pos.IsNull());
+        BOOST_REQUIRE_NE(pos.nFile, genesis->nFile);
+        assumed = blockman.AddToBlockIndex(block, manager->m_best_header);
+        manager->ReceivedBlockTransactions(block, assumed, pos);
+        SelectTip(true);
+        BlockValidationState state;
+        BOOST_REQUIRE(manager->ActiveChainstate().FlushStateToDisk(state, FlushStateMode::ALWAYS));
+    }
+
+    void SelectTip(bool use_assumed) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        auto& chainstate = manager->ActiveChainstate();
+        auto* tip = use_assumed ? assumed : genesis;
+        chainstate.m_chain.SetTip(*tip);
+        chainstate.CoinsTip().SetBestBlock(tip->GetBlockHash());
+    }
+
+    CBlockHeader StageWrites(unsigned header_count = 1) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        auto& blockman = manager->m_blockman;
+        BOOST_REQUIRE(!blockman.SaveBlockToDisk(Params().GenesisBlock(), 0, nullptr).IsNull());
+        CBlockHeader header = Params().GenesisBlock();
+        header.hashPrevBlock = genesis->GetBlockHash();
+        ++header.nTime;
+        for (unsigned i = 0; i < header_count; ++i) {
+            header.nNonce = next_nonce++;
+            blockman.AddToBlockIndex(header, manager->m_best_header);
+        }
+        return header;
+    }
+
+    void CheckFileFailure(bool assumed_tip, bool fail_assumed, bool undo, FlushStateMode mode,
+                          unsigned header_count = 1) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        SelectTip(assumed_tip);
+        auto& blockman = manager->m_blockman;
+        auto& db = *blockman.m_block_tree_db;
+        const CBlockHeader header = StageWrites(header_count);
+        const uint256 hash = header.GetHash();
+        CBlockFileInfo before;
+        BOOST_REQUIRE(db.ReadBlockFileInfo(genesis->nFile, before));
+        const int file = fail_assumed ? assumed->nFile : genesis->nFile;
+        const auto path = undo ? fs::path{blockman.GetBlockPosFilename(FlatFilePos{file, 0}).parent_path()} / fs::u8path(strprintf("rev%05u.dat", file)) :
+                                 blockman.GetBlockPosFilename(FlatFilePos{file, 0});
+        BOOST_REQUIRE(fs::is_regular_file(path));
+        notifications.flush_errors = notifications.fatal_errors = 0;
+        {
+            ScopedPathObstruction obstruction{path};
+            BlockValidationState state;
+            BOOST_CHECK(!manager->ActiveChainstate().FlushStateToDisk(state, mode));
+            BOOST_CHECK(state.IsError());
+            BOOST_CHECK(!state.IsInvalid());
+            BOOST_CHECK_GT(notifications.flush_errors, 0U);
+            BOOST_CHECK_EQUAL(notifications.fatal_errors, 1U);
+            BOOST_CHECK(!db.Exists(std::make_pair(uint8_t{'b'}, hash)));
+            CBlockFileInfo after;
+            BOOST_REQUIRE(db.ReadBlockFileInfo(genesis->nFile, after));
+            BOOST_CHECK_EQUAL(after.nBlocks, before.nBlocks);
+            BOOST_CHECK(blockman.LookupBlockIndex(hash)->GetBlockHeader().GetHash() == hash);
+            if (mode == FlushStateMode::NONE) BOOST_CHECK(blockman.HeaderCacheNeedsFlush());
+        }
+        BlockValidationState retry;
+        BOOST_REQUIRE(manager->ActiveChainstate().FlushStateToDisk(retry, mode));
+        BOOST_CHECK(db.ReadBlockHeader(hash).GetHash() == hash);
+        CBlockFileInfo persisted;
+        BOOST_REQUIRE(db.ReadBlockFileInfo(genesis->nFile, persisted));
+        BOOST_CHECK_EQUAL(persisted.nBlocks, blockman.GetBlockFileInfo(genesis->nFile)->nBlocks);
+        BOOST_CHECK(!blockman.HeaderCacheNeedsFlush());
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_flush_both_cursors_before_shared_index, BlockFileDurabilitySetup)
+{
+    LOCK(cs_main);
+    AddAssumedFile();
+    for (bool undo : {false, true}) {
+        CheckFileFailure(/*assumed_tip=*/true, /*fail_assumed=*/false, undo, FlushStateMode::ALWAYS);
+        CheckFileFailure(/*assumed_tip=*/false, /*fail_assumed=*/true, undo, FlushStateMode::ALWAYS);
+        CheckFileFailure(/*assumed_tip=*/true, /*fail_assumed=*/true, undo, FlushStateMode::ALWAYS);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_header_budget_flush_preserves_dirty_data_on_failure, BlockFileDurabilitySetup)
+{
+    LOCK(cs_main);
+    AddAssumedFile();
+    CheckFileFailure(/*assumed_tip=*/true, /*fail_assumed=*/false, /*undo=*/false,
+                     FlushStateMode::NONE, /*header_count=*/65536);
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_flush_without_assumed_cursor, BlockFileDurabilitySetup)
+{
+    LOCK(cs_main);
+    // A snapshot can exist before its first block file has been created.
+    manager->m_blockman.m_snapshot_height = 1;
+    const auto header = StageWrites();
+    auto& chainstate = manager->ActiveChainstate();
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::ALWAYS));
+    BOOST_CHECK(manager->m_blockman.m_block_tree_db->ReadBlockHeader(header.GetHash()).GetHash() == header.GetHash());
+    BOOST_CHECK_EQUAL(notifications.flush_errors, 0U);
+    BOOST_CHECK_EQUAL(notifications.fatal_errors, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_accept_block_reports_final_flush_failure, BlockFileDurabilitySetup)
+{
+    LOCK(cs_main);
+    auto& blockman = manager->m_blockman;
+    auto block = CreateBlockChain(1, Params()).front();
+    const auto hash = block->GetHash();
+    // Exercise the block notification used after initial download.
+    manager->m_cached_finished_ibd = true;
+    BOOST_REQUIRE(!blockman.HeaderCacheNeedsFlush());
+    bool notified{false};
+    const auto undo_path = fs::path{blockman.GetBlockPosFilename(genesis->GetBlockPos()).parent_path()} / "rev00000.dat";
+    BOOST_REQUIRE(fs::is_regular_file(undo_path));
+    {
+        ScopedPathObstruction obstruction{undo_path};
+        ScopedBlockSaveListener listener{[&] {
+            // This synchronous notification follows the early header-budget
+            // check. Fill the cache here so only the final flush can fail.
+            notified = true;
+            BOOST_REQUIRE(!blockman.HeaderCacheNeedsFlush());
+            StageWrites(65535);
+            BOOST_REQUIRE(blockman.HeaderCacheNeedsFlush());
+        }};
+        BlockValidationState state;
+        CBlockIndex* index{nullptr};
+        bool new_block{false};
+        BOOST_CHECK(!manager->AcceptBlock(block, state, &index, /*fRequested=*/true,
+                                         /*dbp=*/nullptr, &new_block, /*min_pow_checked=*/true));
+        BOOST_REQUIRE(notified);
+        BOOST_REQUIRE(new_block);
+        BOOST_REQUIRE(index);
+        BOOST_CHECK(index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(!state.IsInvalid());
+        BOOST_CHECK_EQUAL(notifications.fatal_errors, 1U);
+        BOOST_CHECK(!blockman.m_block_tree_db->Exists(std::make_pair(uint8_t{'b'}, hash)));
+        BOOST_CHECK(blockman.LookupBlockIndex(hash)->GetBlockHeader().GetHash() == hash);
+    }
+    BlockValidationState retry;
+    BOOST_REQUIRE(manager->ActiveChainstate().FlushStateToDisk(retry, FlushStateMode::NONE));
+    BOOST_CHECK(blockman.m_block_tree_db->ReadBlockHeader(hash).GetHash() == hash);
+}
+
+#ifndef WIN32
+BOOST_FIXTURE_TEST_CASE(blockmanager_failed_index_batch_preserves_dirty_data, BlockFileDurabilitySetup)
+{
+    LOCK(cs_main);
+    auto& blockman = manager->m_blockman;
+    auto& db = *blockman.m_block_tree_db;
+    const auto header = StageWrites();
+    const uint256 hash = header.GetHash();
+    // Fill the 256 KiB write buffer. The next batch must create a new log.
+    BOOST_REQUIRE(db.Write(uint8_t{'z'}, std::string(1 << 20, 'x'), /*fSync=*/true));
+    const auto db_path = db.StoragePath();
+    BOOST_REQUIRE(db_path);
+    {
+        // POSIX permits moving this open directory. Replacing it with a file
+        // makes creation of the next log fail without a global I/O hook.
+        ScopedPathObstruction obstruction{*db_path};
+        BOOST_CHECK_THROW(blockman.WriteBlockIndexDB(), dbwrapper_error);
+        BOOST_CHECK(!db.Exists(std::make_pair(uint8_t{'b'}, hash)));
+        BOOST_CHECK(blockman.LookupBlockIndex(hash)->GetBlockHeader().GetHash() == hash);
+    }
+    BOOST_REQUIRE(blockman.WriteBlockIndexDB());
+    BOOST_CHECK(db.ReadBlockHeader(hash).GetHash() == hash);
+    CBlockFileInfo persisted;
+    BOOST_REQUIRE(db.ReadBlockFileInfo(genesis->nFile, persisted));
+    BOOST_CHECK_EQUAL(persisted.nBlocks, blockman.GetBlockFileInfo(genesis->nFile)->nBlocks);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

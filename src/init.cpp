@@ -25,6 +25,7 @@
 #include <common/system.h>
 #include <compat/sanity.h>
 #include <consensus/amount.h>
+#include <dbwrapper.h>
 #include <deploymentstatus.h>
 #include <hash.h>
 #include <httprpc.h>
@@ -110,6 +111,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <set>
 #include <stdint.h>
 #include <stdio.h>
@@ -164,7 +166,8 @@ static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
 // anyway.
 #define MIN_CORE_FILEDESCRIPTORS 0
 #else
-#define MIN_CORE_FILEDESCRIPTORS 150
+// Reserve table descriptors for the block index and both normal and snapshot chainstates.
+#define MIN_CORE_FILEDESCRIPTORS (150 + 3 * BUFFERED_DB_TABLE_CACHE_FILES)
 #endif
 
 static const char* DEFAULT_ASMAP_FILENAME="ip_asn.map";
@@ -1154,19 +1157,20 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     nUserMaxConnections = args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
     nMaxConnections = std::max(nUserMaxConnections, 0);
 
-    nFD = RaiseFileDescriptorLimit(nMaxConnections + MIN_CORE_FILEDESCRIPTORS + MAX_ADDNODE_CONNECTIONS + nBind + NUM_FDS_MESSAGE_CAPTURE);
+    const int reserved_fds = MIN_CORE_FILEDESCRIPTORS + MAX_ADDNODE_CONNECTIONS + nBind + NUM_FDS_MESSAGE_CAPTURE;
+    const int64_t requested_fds = int64_t{nMaxConnections} + reserved_fds;
+    nFD = RaiseFileDescriptorLimit(static_cast<int>(std::min(requested_fds, int64_t{std::numeric_limits<int>::max()})));
 
 #ifdef USE_POLL
     int fd_max = nFD;
 #else
     int fd_max = FD_SETSIZE;
 #endif
-    // Trim requested connection counts, to fit into system limitations
-    // <int> in std::min<int>(...) to work around FreeBSD compilation issue described in #2695
-    nMaxConnections = std::max(std::min<int>(nMaxConnections, fd_max - nBind - MIN_CORE_FILEDESCRIPTORS - MAX_ADDNODE_CONNECTIONS - NUM_FDS_MESSAGE_CAPTURE), 0);
-    if (nFD < MIN_CORE_FILEDESCRIPTORS)
+    // Leave the full reserve available before assigning descriptors to automatic connections.
+    const int available_fds = std::min(nFD, fd_max);
+    if (available_fds < reserved_fds)
         return InitError(_("Not enough file descriptors available."));
-    nMaxConnections = std::min(nFD - MIN_CORE_FILEDESCRIPTORS - MAX_ADDNODE_CONNECTIONS - NUM_FDS_MESSAGE_CAPTURE, nMaxConnections);
+    nMaxConnections = std::min(nMaxConnections, available_fds - reserved_fds);
 
     if (nMaxConnections < nUserMaxConnections)
         InitWarning(strprintf(_("Reducing -maxconnections from %d to %d, because of system limitations."), nUserMaxConnections, nMaxConnections));

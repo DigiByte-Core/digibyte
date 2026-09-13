@@ -12,6 +12,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <support/allocators/pool.h>
 #include <sync.h>
 #include <util/fs.h>
 #include <util/hasher.h>
@@ -58,13 +59,18 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
-    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt, const BlockHeaderSource* header_source = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    CBlockHeader ReadBlockHeader(const uint256& hash) const;
 };
 } // namespace kernel
 
 namespace node {
 using kernel::BlockTreeDB;
+class BlockIndexHeaderStore;
+
+/** Percentage shown while processing the loaded block index. */
+int BlockIndexProgressPercent(uint64_t completed, uint64_t total);
 
 /** The pre-allocation chunk size for blk?????.dat files (since 0.8) */
 static const unsigned int BLOCKFILE_CHUNK_SIZE = 0x1000000; // 16 MiB
@@ -82,7 +88,13 @@ extern std::atomic_bool fReindex;
 // we ever switch to another associative container, we need to either use a
 // container that has stable addressing (true of all std associative
 // containers), or make the key a `std::unique_ptr<CBlockIndex>`
-using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
+// Leave room for the standard library's node links and any cached hash.
+using BlockMap = std::unordered_map<uint256,
+                                    CBlockIndex,
+                                    BlockHasher,
+                                    std::equal_to<uint256>,
+                                    PoolAllocator<std::pair<const uint256, CBlockIndex>,
+                                                  sizeof(std::pair<const uint256, CBlockIndex>) + sizeof(void*) * 4>>;
 
 struct CBlockIndexWorkComparator {
     bool operator()(const CBlockIndex* pa, const CBlockIndex* pb) const;
@@ -145,7 +157,7 @@ private:
     const Consensus::Params& GetConsensus() const { return m_opts.chainparams.GetConsensus(); }
     /**
      * Load the blocktree off disk and into memory. Populate certain metadata
-     * per index entry (nStatus, nChainWork, nTimeMax, etc.) as well as peripheral
+     * per index entry (nStatus, chainwork, nTimeMax, etc.) as well as peripheral
      * collections like m_dirty_blockindex.
      */
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
@@ -158,7 +170,8 @@ private:
     [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
 
     [[nodiscard]] bool FindBlockPos(FlatFilePos& pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
+    /** Flush every current block and undo file before writing their shared index. */
+    [[nodiscard]] bool FlushBlockFiles();
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     FlatFileSeq BlockFileSeq() const;
@@ -250,18 +263,22 @@ private:
 
     const kernel::BlockManagerOpts m_opts;
 
+    // Headers remain available until all index entries have been destroyed.
+    std::unique_ptr<BlockIndexHeaderStore> m_header_source;
+
+    // Index nodes borrow this storage, so it must outlive m_block_index.
+    BlockMap::allocator_type::ResourceType m_block_index_memory;
+
 public:
     using Options = kernel::BlockManagerOpts;
 
-    explicit BlockManager(const util::SignalInterrupt& interrupt, Options opts)
-        : m_prune_mode{opts.prune_target > 0},
-          m_opts{std::move(opts)},
-          m_interrupt{interrupt} {};
+    explicit BlockManager(const util::SignalInterrupt& interrupt, Options opts);
+    ~BlockManager();
 
     const util::SignalInterrupt& m_interrupt;
     std::atomic<bool> m_importing{false};
 
-    BlockMap m_block_index GUARDED_BY(cs_main);
+    BlockMap m_block_index GUARDED_BY(cs_main){0, BlockHasher{}, std::equal_to<uint256>{}, &m_block_index_memory};
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
@@ -286,6 +303,9 @@ public:
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+
+    /** Unwritten headers must reach the database before their cache grows further. */
+    bool HeaderCacheNeedsFlush() const;
 
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)

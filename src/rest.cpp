@@ -9,9 +9,11 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <core_io.h>
+#include <dbwrapper.h>
 #include <httpserver.h>
 #include <index/blockfilterindex.h>
 #include <index/txindex.h>
+#include <logging.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <primitives/block.h>
@@ -172,6 +174,58 @@ static std::string AvailableDataFormatsString()
     return formats;
 }
 
+static RESTResponse HeaderStorageErrorResponse(const dbwrapper_error& error)
+{
+    LogPrintf("Cannot serve REST response: local block header storage error: %s\n", error.what());
+    return {HTTP_INTERNAL_SERVER_ERROR, "text/plain", "Error reading block header from local storage\r\n"};
+}
+
+RESTResponse BuildRESTHeadersResponse(Span<const CBlockIndex* const> headers, const CBlockIndex* tip, RESTResponseFormat format)
+{
+    try {
+        switch (format) {
+        case RESTResponseFormat::BINARY:
+        case RESTResponseFormat::HEX: {
+            DataStream bytes;
+            for (const auto* index : headers) bytes << index->GetBlockHeader();
+            if (format == RESTResponseFormat::BINARY) return {HTTP_OK, "application/octet-stream", bytes.str()};
+            return {HTTP_OK, "text/plain", HexStr(bytes) + "\n"};
+        }
+        case RESTResponseFormat::JSON: {
+            UniValue result{UniValue::VARR};
+            for (const auto* index : headers) result.push_back(blockheaderToJSON(tip, index));
+            return {HTTP_OK, "application/json", result.write() + "\n"};
+        }
+        default:
+            return {HTTP_NOT_FOUND, "text/plain", "output format not found (available: " + AvailableDataFormatsString() + ")\r\n"};
+        }
+    } catch (const dbwrapper_error& error) {
+        return HeaderStorageErrorResponse(error);
+    }
+}
+
+RESTResponse BuildRESTBlockResponse(node::BlockManager& blockman, const CBlock& block, const CBlockIndex* tip,
+                                    const CBlockIndex* index, RESTResponseFormat format, TxVerbosity verbosity)
+{
+    try {
+        switch (format) {
+        case RESTResponseFormat::BINARY:
+        case RESTResponseFormat::HEX: {
+            CDataStream bytes{SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags()};
+            bytes << block;
+            if (format == RESTResponseFormat::BINARY) return {HTTP_OK, "application/octet-stream", bytes.str()};
+            return {HTTP_OK, "text/plain", HexStr(bytes) + "\n"};
+        }
+        case RESTResponseFormat::JSON:
+            return {HTTP_OK, "application/json", blockToJSON(blockman, block, tip, index, verbosity).write() + "\n"};
+        default:
+            return {HTTP_NOT_FOUND, "text/plain", "output format not found (available: " + AvailableDataFormatsString() + ")\r\n"};
+        }
+    } catch (const dbwrapper_error& error) {
+        return HeaderStorageErrorResponse(error);
+    }
+}
+
 static bool CheckWarmup(HTTPRequest* req)
 {
     std::string statusmessage;
@@ -237,44 +291,10 @@ static bool rest_headers(const std::any& context,
         }
     }
 
-    switch (rf) {
-    case RESTResponseFormat::BINARY: {
-        DataStream ssHeader{};
-        for (const CBlockIndex *pindex : headers) {
-            ssHeader << pindex->GetBlockHeader();
-        }
-
-        std::string binaryHeader = ssHeader.str();
-        req->WriteHeader("Content-Type", "application/octet-stream");
-        req->WriteReply(HTTP_OK, binaryHeader);
-        return true;
-    }
-
-    case RESTResponseFormat::HEX: {
-        DataStream ssHeader{};
-        for (const CBlockIndex *pindex : headers) {
-            ssHeader << pindex->GetBlockHeader();
-        }
-
-        std::string strHex = HexStr(ssHeader) + "\n";
-        req->WriteHeader("Content-Type", "text/plain");
-        req->WriteReply(HTTP_OK, strHex);
-        return true;
-    }
-    case RESTResponseFormat::JSON: {
-        UniValue jsonHeaders(UniValue::VARR);
-        for (const CBlockIndex *pindex : headers) {
-            jsonHeaders.push_back(blockheaderToJSON(tip, pindex));
-        }
-        std::string strJSON = jsonHeaders.write() + "\n";
-        req->WriteHeader("Content-Type", "application/json");
-        req->WriteReply(HTTP_OK, strJSON);
-        return true;
-    }
-    default: {
-        return RESTERR(req, HTTP_NOT_FOUND, "output format not found (available: " + AvailableDataFormatsString() + ")");
-    }
-    }
+    const auto response = BuildRESTHeadersResponse(headers, tip, rf);
+    req->WriteHeader("Content-Type", response.content_type);
+    req->WriteReply(response.status, response.body);
+    return response.status == HTTP_OK;
 }
 
 static bool rest_block(const std::any& context,
@@ -313,37 +333,10 @@ static bool rest_block(const std::any& context,
         return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
     }
 
-    switch (rf) {
-    case RESTResponseFormat::BINARY: {
-        CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
-        ssBlock << block;
-        std::string binaryBlock = ssBlock.str();
-        req->WriteHeader("Content-Type", "application/octet-stream");
-        req->WriteReply(HTTP_OK, binaryBlock);
-        return true;
-    }
-
-    case RESTResponseFormat::HEX: {
-        CDataStream ssBlock(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
-        ssBlock << block;
-        std::string strHex = HexStr(ssBlock) + "\n";
-        req->WriteHeader("Content-Type", "text/plain");
-        req->WriteReply(HTTP_OK, strHex);
-        return true;
-    }
-
-    case RESTResponseFormat::JSON: {
-        UniValue objBlock = blockToJSON(chainman.m_blockman, block, tip, pblockindex, tx_verbosity);
-        std::string strJSON = objBlock.write() + "\n";
-        req->WriteHeader("Content-Type", "application/json");
-        req->WriteReply(HTTP_OK, strJSON);
-        return true;
-    }
-
-    default: {
-        return RESTERR(req, HTTP_NOT_FOUND, "output format not found (available: " + AvailableDataFormatsString() + ")");
-    }
-    }
+    const auto response = BuildRESTBlockResponse(chainman.m_blockman, block, tip, pblockindex, rf, tx_verbosity);
+    req->WriteHeader("Content-Type", response.content_type);
+    req->WriteReply(response.status, response.body);
+    return response.status == HTTP_OK;
 }
 
 static bool rest_block_extended(const std::any& context, HTTPRequest* req, const std::string& strURIPart)

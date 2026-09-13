@@ -758,11 +758,14 @@ public:
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Rebuild candidates using this chainstate's current tip and snapshot role. */
+    bool RebuildBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Find the last common block of this chain and a locator. */
     const CBlockIndex* FindForkInGlobalIndex(const CBlockLocator& locator) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    /** Update the chain tip based on database information, i.e. CoinsTip()'s best block. */
-    bool LoadChainTip() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Update the chain tip from CoinsTip()'s best block, optionally rebuilding startup candidates. */
+    bool LoadChainTip(bool rebuild_candidates = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Dictates whether we need to flush the cache to disk or not.
     //!
@@ -1240,8 +1243,8 @@ public:
     [[nodiscard]] MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
-    bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Load the block index, optionally deferring candidates until the coins tip is recovered.
+    bool LoadBlockIndex(bool load_candidates = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.

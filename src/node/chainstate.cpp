@@ -8,6 +8,7 @@
 #include <coins.h>
 #include <consensus/digidollar.h>
 #include <consensus/params.h>
+#include <dbwrapper.h>
 #include <digidollar/digidollar.h>
 #include <logging.h>
 #include <node/blockstorage.h>
@@ -18,6 +19,7 @@
 #include <txdb.h>
 #include <uint256.h>
 #include <util/fs.h>
+#include <util/signalinterrupt.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
@@ -46,7 +48,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
         .memory_only = options.block_tree_db_in_memory,
         .wipe_data = options.reindex,
-        .options = chainman.m_options.block_tree_db});
+        .options = chainman.m_options.block_tree_db,
+        .use_mmap = false,
+        .max_open_files = BUFFERED_DB_MAX_OPEN_FILES});
 
     if (options.reindex) {
         pblocktree->WriteReindexing(true);
@@ -63,7 +67,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // Note that it also sets fReindex global based on the disk flag!
     // From here on, fReindex and options.reindex values may be different!
     LogPrintf("CompleteChainstateInitialization: Before LoadBlockIndex\n");
-    if (!chainman.LoadBlockIndex()) {
+    if (!chainman.LoadBlockIndex(/*load_candidates=*/false)) {
         LogPrintf("CompleteChainstateInitialization: LoadBlockIndex failed\n");
         if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
@@ -138,12 +142,17 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         chainstate->InitCoinsCache(chainman.m_total_coinstip_cache * init_cache_fraction);
         assert(chainstate->CanFlushToDisk());
 
+        // Replay can change the coins tip. Build candidates only after recovery
+        // so each chainstate filters history against its own recovered tip.
         if (!is_coinsview_empty(chainstate)) {
             // LoadChainTip initializes the chain based on CoinsTip()'s best block
-            if (!chainstate->LoadChainTip()) {
+            if (!chainstate->LoadChainTip(/*rebuild_candidates=*/true)) {
+                if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+        } else if (!chainstate->RebuildBlockIndexCandidates()) {
+            return {ChainstateLoadStatus::INTERRUPTED, {}};
         }
     }
 

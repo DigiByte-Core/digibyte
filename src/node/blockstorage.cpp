@@ -14,6 +14,7 @@
 #include <kernel/messagestartchars.h>
 #include <logging.h>
 #include <node/interface_ui.h>
+#include <node/blockheadercache.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <reverse_iterator.h>
@@ -25,11 +26,13 @@
 #include <util/fs.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
 
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 
 namespace kernel {
@@ -95,61 +98,57 @@ bool BlockTreeDB::ReadFlag(const std::string& name, bool& fValue)
     return true;
 }
 
-bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+CBlockHeader BlockTreeDB::ReadBlockHeader(const uint256& hash) const
+{
+    CDiskBlockIndex diskindex;
+    if (!Read(std::make_pair(DB_BLOCK_INDEX, hash), diskindex)) {
+        throw dbwrapper_error("Block header is missing from the block index database");
+    }
+    auto header = diskindex.GetBlockHeader();
+    header.hashPrevBlock = diskindex.hashPrev;
+    if (header.GetHash() != hash) {
+        throw dbwrapper_error("Block header does not match its database key");
+    }
+    return header;
+}
+
+bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt, const BlockHeaderSource* header_source)
 {
     AssertLockHeld(::cs_main);
+    if (interrupt) return false;
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
-    pcursor->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
+    pcursor->Seek(DB_BLOCK_INDEX);
 
-    // Count total entries first for progress calculation
-    // This is a quick count-only pass
-    int nTotal = 0;
-    {
-        std::unique_ptr<CDBIterator> pcounter(NewIterator());
-        pcounter->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
-        while (pcounter->Valid()) {
-            std::pair<uint8_t, uint256> key;
-            if (pcounter->GetKey(key) && key.first == DB_BLOCK_INDEX) {
-                nTotal++;
-                pcounter->Next();
-            } else {
-                break;
-            }
-        }
-    }
-
-    int nCount = 0;
-    int nLastPercent = -1;
+    uint64_t loaded_records{0};
+    auto last_progress = SteadyClock::now();
+    uiInterface.InitMessage(strprintf(_("Loading block index: %u records").translated, loaded_records));
 
     // Load m_block_index
     while (pcursor->Valid()) {
         if (interrupt) return false;
-        
-        // Calculate and display percentage progress
-        if (nTotal > 0) {
-            int nPercent = 100 * nCount / nTotal;
-            if (nPercent > nLastPercent && nPercent % 10 == 0) {
-                uiInterface.InitMessage(strprintf(_("Loading blocks... %d%%").translated, nPercent));
-                nLastPercent = nPercent;
+        uint8_t prefix;
+        if (!pcursor->GetKey(prefix)) return error("%s: failed to read database key prefix", __func__);
+        if (prefix == DB_BLOCK_INDEX) {
+            std::pair<uint8_t, uint256> key;
+            // A block index key contains exactly one prefix byte and one full hash.
+            if (pcursor->GetKeySize() != 1 + uint256{}.size() || !pcursor->GetKey(key)) {
+                return error("%s: invalid block index key", __func__);
             }
-        }
-        nCount++;
-        std::pair<uint8_t, uint256> key;
-        if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
                 // Construct block index object
-                CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
+                const auto block_hash = diskindex.ConstructBlockHash();
+                if (block_hash != key.second) return error("%s: block header does not match its database key", __func__);
+                CBlockIndex* pindexNew = insertBlockIndex(block_hash);
                 pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
                 pindexNew->nHeight        = diskindex.nHeight;
                 pindexNew->nFile          = diskindex.nFile;
                 pindexNew->nDataPos       = diskindex.nDataPos;
                 pindexNew->nUndoPos       = diskindex.nUndoPos;
                 pindexNew->nVersion       = diskindex.nVersion;
-                pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
+                pindexNew->SetHeaderData(diskindex.GetHeaderData());
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
-                pindexNew->nNonce         = diskindex.nNonce;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
@@ -219,7 +218,7 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                             LogPrintf("  Expected hash: %s\n", checkpointIt->second.ToString());
                             LogPrintf("  Actual hash:   %s\n", blockHash.ToString());
                             LogPrintf("  Block details: version=%d, time=%d, bits=%08x, nonce=%u\n",
-                                     pindexNew->nVersion, pindexNew->nTime, pindexNew->nBits, pindexNew->nNonce);
+                                     pindexNew->nVersion, pindexNew->nTime, pindexNew->nBits, pindexNew->GetHeaderData().nonce);
 
                             // This is a critical error - checkpoint hashes must match
                             return error("%s: Block hash mismatch at checkpoint height %d: expected %s, got %s",
@@ -243,6 +242,12 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                     }
                 }
 
+                if (header_source) pindexNew->UseHeaderSource(*header_source);
+                ++loaded_records;
+                if (loaded_records % 4096 == 0 && SteadyClock::now() - last_progress >= std::chrono::seconds{1}) {
+                    last_progress = SteadyClock::now();
+                    uiInterface.InitMessage(strprintf(_("Loading block index: %u records").translated, loaded_records));
+                }
                 pcursor->Next();
             } else {
                 return error("%s: failed to read value", __func__);
@@ -252,6 +257,9 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         }
     }
 
+    if (interrupt) return false;
+    pcursor->CheckStatus();
+    uiInterface.InitMessage(strprintf(_("Loaded block index: %u records").translated, loaded_records));
     return true;
 }
 } // namespace kernel
@@ -259,11 +267,81 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 namespace node {
 std::atomic_bool fReindex(false);
 
+/** New headers stay in memory until their existing database batch succeeds.
+ * Committed headers use a bounded read cache. Neither path writes block data.
+ */
+class BlockIndexHeaderStore final : public BlockHeaderSource {
+    mutable std::mutex m_mutex;
+    std::unordered_map<uint256, BlockHeaderData, BlockHasher> m_unwritten;
+    mutable BlockHeaderCache m_cache;
+public:
+    explicit BlockIndexHeaderStore(BlockHeaderCache::ReadFn reader)
+        : m_cache{std::move(reader), 65536} {}
+
+    void Remember(const CBlockHeader& header)
+    {
+        std::lock_guard<std::mutex> lock{m_mutex};
+        m_unwritten.try_emplace(header.GetHash(), BlockHeaderData{header.hashMerkleRoot, header.nNonce});
+    }
+
+    void Committed(const std::vector<const CBlockIndex*>& indices)
+    {
+        std::lock_guard<std::mutex> lock{m_mutex};
+        for (const auto* index : indices) m_unwritten.erase(index->GetBlockHash());
+        if (m_unwritten.empty()) decltype(m_unwritten){}.swap(m_unwritten);
+    }
+
+    bool NeedsFlush() const
+    {
+        std::lock_guard<std::mutex> lock{m_mutex};
+        return m_unwritten.size() >= 65536;
+    }
+
+    BlockHeaderData Read(const uint256& hash) const override
+    {
+        {
+            std::lock_guard<std::mutex> lock{m_mutex};
+            const auto it = m_unwritten.find(hash);
+            if (it != m_unwritten.end()) return it->second;
+        }
+        auto result = m_cache.Read(hash);
+        if (result.status != BlockHeaderReadStatus::FOUND || !result.header) {
+            throw dbwrapper_error("Cannot read stored block header: " + result.error);
+        }
+        return {result.header->hashMerkleRoot, result.header->nNonce};
+    }
+};
+
+BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
+    : m_prune_mode{opts.prune_target > 0},
+      m_opts{std::move(opts)},
+      m_header_source{std::make_unique<BlockIndexHeaderStore>([this](const uint256& hash) {
+          // The database stays open until node workers and index users stop.
+          auto* db = WITH_LOCK(cs_main, return m_block_tree_db.get());
+          if (!db) return BlockHeaderReadResult::Error("Block index database is not open");
+          return BlockHeaderReadResult::Found(db->ReadBlockHeader(hash));
+      })},
+      m_interrupt{interrupt} {}
+
+BlockManager::~BlockManager() = default;
+
+bool BlockManager::HeaderCacheNeedsFlush() const
+{
+    return m_header_source->NeedsFlush();
+}
+
+int BlockIndexProgressPercent(uint64_t completed, uint64_t total)
+{
+    return total == 0 || completed >= total ? 100 : static_cast<int>(100 * completed / total);
+}
+
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
     // First sort by most total work, ...
-    if (pa->nChainWork > pb->nChainWork) return false;
-    if (pa->nChainWork < pb->nChainWork) return true;
+    const arith_uint256 work_a = pa->GetChainWork();
+    const arith_uint256 work_b = pb->GetChainWork();
+    if (work_a > work_b) return false;
+    if (work_a < work_b) return true;
 
     // ... then by earliest time received, ...
     if (pa->nSequenceId < pb->nSequenceId) return false;
@@ -324,6 +402,8 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     pindexNew->nSequenceId = 0;
 
     pindexNew->phashBlock = &((*mi).first);
+    m_header_source->Remember(block);
+    pindexNew->UseHeaderSource(*m_header_source);
     BlockMap::iterator miPrev = m_block_index.find(block.hashPrevBlock);
     if (miPrev != m_block_index.end()) {
         pindexNew->pprev = &(*miPrev).second;
@@ -331,9 +411,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         pindexNew->BuildSkip();
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
-    pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    pindexNew->SetChainWork((pindexNew->pprev ? pindexNew->pprev->GetChainWork() : 0) + GetBlockProof(*pindexNew));
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
+    if (best_header == nullptr || best_header->GetChainWork() < pindexNew->GetChainWork()) {
         best_header = pindexNew;
     }
 
@@ -502,7 +582,7 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
 bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
 {
     if (!m_block_tree_db->LoadBlockIndexGuts(
-            GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }, m_interrupt)) {
+            GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }, m_interrupt, m_header_source.get())) {
         return false;
     }
 
@@ -531,23 +611,25 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
 
     Assert(m_snapshot_height.has_value() == snapshot_blockhash.has_value());
 
-    // Calculate nChainWork
-    LogPrintf("LoadBlockIndex: Getting all block indices...");
+    // Calculate total work.
+    LogPrintf("LoadBlockIndex: Getting all block indices...\n");
     std::vector<CBlockIndex*> vSortedByHeight{GetAllBlockIndices()};
-    LogPrintf("LoadBlockIndex: Sorting %d block indices by height...", vSortedByHeight.size());
+    uiInterface.InitMessage(_("Sorting block index").translated);
+    LogPrintf("LoadBlockIndex: Sorting %u block indices by height...\n", vSortedByHeight.size());
     std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
               CBlockIndexHeightOnlyComparator());
-    LogPrintf("LoadBlockIndex: Sort complete, processing blocks...");
+    LogPrintf("LoadBlockIndex: Sort complete, processing blocks...\n");
 
     CBlockIndex* previous_index{nullptr};
-    int nProcessed = 0;
+    uint64_t nProcessed = 0;
     int nLastPercent = -1;
-    int nTotal = vSortedByHeight.size();
+    const uint64_t nTotal = vSortedByHeight.size();
     for (CBlockIndex* pindex : vSortedByHeight) {
         // Show progress
         if (nTotal > 0) {
-            int nPercent = 100 * nProcessed / nTotal;
+            int nPercent = BlockIndexProgressPercent(nProcessed, nTotal);
             if (nPercent > nLastPercent && nPercent % 10 == 0) {
+                uiInterface.InitMessage(strprintf(_("Processing block index: %d%%").translated, nPercent));
                 LogPrintf("LoadBlockIndex: Processing blocks... %d%%\n", nPercent);
                 nLastPercent = nPercent;
             }
@@ -558,7 +640,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             return error("%s: block index is non-contiguous, index of height %d missing", __func__, previous_index->nHeight + 1);
         }
         previous_index = pindex;
-        pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        pindex->SetChainWork((pindex->pprev ? pindex->pprev->GetChainWork() : 0) + GetBlockProof(*pindex));
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
 
         // We can link the chain of blocks for which we've received transactions at some point, or
@@ -590,6 +672,9 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
     }
 
+    if (m_interrupt) return false;
+    uiInterface.InitMessage(_("Processing block index: 100%").translated);
+    LogPrintf("LoadBlockIndex: Processing blocks... 100%%\n");
     return true;
 }
 
@@ -598,20 +683,22 @@ bool BlockManager::WriteBlockIndexDB()
     AssertLockHeld(::cs_main);
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
     vFiles.reserve(m_dirty_fileinfo.size());
-    for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
-        vFiles.emplace_back(*it, &m_blockfile_info[*it]);
-        m_dirty_fileinfo.erase(it++);
+    for (int file : m_dirty_fileinfo) {
+        vFiles.emplace_back(file, &m_blockfile_info[file]);
     }
     std::vector<const CBlockIndex*> vBlocks;
     vBlocks.reserve(m_dirty_blockindex.size());
-    for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
-        m_dirty_blockindex.erase(it++);
+    for (const CBlockIndex* block : m_dirty_blockindex) {
+        vBlocks.push_back(block);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
+    // Keep all pending records and header bytes available if the write fails.
+    m_dirty_fileinfo.clear();
+    m_dirty_blockindex.clear();
+    m_header_source->Committed(vBlocks);
     return true;
 }
 
@@ -898,18 +985,21 @@ BlockfileType BlockManager::BlockfileTypeForHeight(int height)
     return (height >= *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
 }
 
-bool BlockManager::FlushChainstateBlockFile(int tip_height)
+bool BlockManager::FlushBlockFiles()
 {
     LOCK(cs_LastBlockFile);
-    auto& cursor = m_blockfile_cursors[BlockfileTypeForHeight(tip_height)];
-    // If the cursor does not exist, it means an assumeutxo snapshot is loaded,
-    // but no blocks past the snapshot height have been written yet, so there
-    // is no data associated with the chainstate, and it is safe not to flush.
-    if (cursor) {
-        return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false);
+    bool success{true};
+    int last_flushed_file{-1};
+    // The index contains records from both chainstates. Flush every current
+    // file, even when only one chainstate triggered the index write.
+    for (const auto& cursor : m_blockfile_cursors) {
+        if (!cursor || cursor->file_num == last_flushed_file) continue;
+        last_flushed_file = cursor->file_num;
+        if (!FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false)) {
+            success = false;
+        }
     }
-    // No need to log warnings in this case.
-    return true;
+    return success;
 }
 
 uint64_t BlockManager::CalculateCurrentUsage()

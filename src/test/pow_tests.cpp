@@ -145,7 +145,7 @@ BOOST_AUTO_TEST_CASE(GetBlockProofEquivalentTime_test)
         bnTarget.SetCompact(blocks[i].nBits, &fNegative, &fOverflow);
         arith_uint256 blockProof = (fNegative || fOverflow || bnTarget == 0) ? 0 : ((~bnTarget / (bnTarget + 1)) + 1);
         
-        blocks[i].nChainWork = i ? blocks[i - 1].nChainWork + blockProof : arith_uint256(0);
+        blocks[i].SetChainWork(i ? blocks[i - 1].GetChainWork() + blockProof : arith_uint256(0));
 
         // Create random block hash
         const uint256 randomhash = GetRandHash();

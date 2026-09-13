@@ -97,11 +97,6 @@ BASE_SCRIPTS = [
     # Longest test should go first, to favor running tests in parallel
     'digidollar_listunspent.py --descriptors',
     
-    # DigiByte: DISABLED TESTS
-    # The following test is disabled because it requires MultiAlgo PoW adaptation:
-    # - feature_assumevalid.py (line 141)
-    # This test needs DigiByte-specific equivalent-work handling for assumevalid.
-    
     # DigiByte: Multi-Algorithm Mining Tests
     'feature_digibyte_multialgo_mining.py',
     'feature_digibyte_groestl_deactivation.py',
@@ -148,8 +143,7 @@ BASE_SCRIPTS = [
     'wallet_groups.py --legacy-wallet',
     'wallet_groups.py --descriptors',
     'p2p_blockfilters.py',
-    # DigiByte: Disabled - requires MultiAlgo PoW adaptation for DGB specifics
-    # 'feature_assumevalid.py',
+    'feature_assumevalid.py',
     'wallet_taproot.py --descriptors',
     'feature_bip68_sequence.py',
     'rpc_packages.py',
@@ -461,6 +455,7 @@ BASE_SCRIPTS = [
     'p2p_fingerprint.py',
     'feature_uacomment.py',
     'feature_init.py',
+    'feature_file_descriptors.py',
     'wallet_coinbase_category.py --legacy-wallet',
     'wallet_coinbase_category.py --descriptors',
     'feature_filelock.py',

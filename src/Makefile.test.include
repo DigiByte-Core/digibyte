@@ -236,7 +236,10 @@ DIGIBYTE_TESTS =\
   test/blockencodings_tests.cpp \
   test/blockfilter_index_tests.cpp \
   test/blockfilter_tests.cpp \
+  test/blockheadercache_tests.cpp \
+  test/blockindexstorage_tests.cpp \
   test/blockmanager_tests.cpp \
+  test/blockmap_tests.cpp \
   test/bloom_tests.cpp \
   test/bswap_tests.cpp \
   test/checkqueue_tests.cpp \
@@ -244,10 +247,12 @@ DIGIBYTE_TESTS =\
   test/coins_tests.cpp \
   test/coinstatsindex_tests.cpp \
   test/compilerbug_tests.cpp \
+  test/compact_work_tests.cpp \
   test/compress_tests.cpp \
   test/crypto_tests.cpp \
   test/cuckoocache_tests.cpp \
   test/dbwrapper_tests.cpp \
+  test/dbwrapper_env_tests.cpp \
   test/dandelion_stempool_reorg_tests.cpp \
   test/dandelion_tests.cpp \
   test/denialofservice_tests.cpp \
@@ -287,6 +292,7 @@ DIGIBYTE_TESTS =\
   test/raii_event_tests.cpp \
   test/random_tests.cpp \
   test/rest_tests.cpp \
+  test/headerresponse_tests.cpp \
   test/result_tests.cpp \
   test/reverselock_tests.cpp \
   test/rpc_tests.cpp \
@@ -394,7 +400,7 @@ endif # ENABLE_WALLET
 TEST_SOURCE_ROOT_DEF = -DDIGIBYTE_TEST_SOURCE_ROOT=\"$(abs_top_srcdir)\"
 
 test_test_digibyte_SOURCES = $(DIGIBYTE_TEST_SUITE) $(DIGIBYTE_TESTS) $(JSON_TEST_FILES) $(RAW_TEST_FILES)
-test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS) $(TEST_SOURCE_ROOT_DEF)
+test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS) $(TEST_SOURCE_ROOT_DEF) $(LEVELDB_CPPFLAGS)
 test_test_digibyte_LDADD = $(LIBTEST_UTIL)
 if ENABLE_WALLET
 test_test_digibyte_LDADD += $(LIBDIGIBYTE_WALLET)
@@ -440,6 +446,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/checkqueue.cpp \
  test/fuzz/coins_view.cpp \
  test/fuzz/coinscache_sim.cpp \
+ test/fuzz/compact_work.cpp \
  test/fuzz/connman.cpp \
  test/fuzz/dandelion.cpp \
  test/fuzz/crypto.cpp \
