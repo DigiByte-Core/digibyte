@@ -26,6 +26,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <atomic>
 #include <limits>
 #include <util/moneystr.h>
 #include <validation.h>
@@ -76,14 +77,30 @@ VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& co
         return VaultLookupResult::NOT_VAULT;
     CAmount principal{0}, collateral{0};
     if (!ExtractMintAccountingAmounts(*creating, principal, collateral, false)) {
-        error = "DigiDollar state not ready: creating mint metadata does not establish the vault principal";
-        return VaultLookupResult::NOT_READY;
+        // The creating block is present and readable; the mint inside it simply
+        // does not record an amount and a single collateral output that can be
+        // read back. Every node reading that same block reaches the same answer,
+        // so this output is not a collateral vault and is left out of the totals.
+        // That is different from the node having lost the block, which is the
+        // readiness failure above: reporting this as missing data would stop
+        // every node at the Thaw Day height for ever, asking the operator to
+        // restore a block the node already has.
+        LogPrintf("DigiDollar: mint %s does not record a readable vault amount, so output %s:%u "
+                  "at height %u is not counted as collateral\n",
+                  creating->GetHash().ToString(), outpoint.hash.ToString(), outpoint.n, coin.nHeight);
+        return VaultLookupResult::NOT_VAULT;
     }
-    // ExtractMintAccountingAmounts requires exactly one positive Taproot output.
-    // The verified outpoint above therefore identifies that exact vault.
+    // ExtractMintAccountingAmounts requires exactly one positive Taproot output,
+    // and the outpoint checked above is that output, so the two amounts agree.
+    // The check stays as a guard. If it ever fired the creating block would still
+    // be present and readable, so the answer has to be the same on every node:
+    // not a vault, rather than a halt.
     if (collateral != coin.out.nValue) {
-        error = "DigiDollar state not ready: creating vault and UTXO disagree";
-        return VaultLookupResult::NOT_READY;
+        LogPrintf("DigiDollar: mint %s records collateral %d but its output %s:%u at height %u holds %d, "
+                  "so it is not counted as collateral\n",
+                  creating->GetHash().ToString(), collateral, outpoint.hash.ToString(), outpoint.n,
+                  coin.nHeight, coin.out.nValue);
+        return VaultLookupResult::NOT_VAULT;
     }
     vault = {outpoint, principal, collateral};
     return VaultLookupResult::VAULT;
@@ -96,6 +113,13 @@ std::optional<int> CalculateChainstateHealth(const ChainstateHealth& state, CAmo
         state.collateral, state.open_vault_principal, price_micro_usd / 10);
 }
 
+namespace {
+// Counts the full walks of the coin set. See ChainstateHealthRebuildCount().
+std::atomic<uint64_t> g_chainstate_health_rebuilds{0};
+} // namespace
+
+uint64_t ChainstateHealthRebuildCount() { return g_chainstate_health_rebuilds.load(std::memory_order_relaxed); }
+
 bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params& params,
                                 const CanonicalTxLookup& lookup,
                                 ChainstateHealth& health, std::string& error,
@@ -103,6 +127,7 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
                                 CAmount* circulating_supply,
                                 const std::function<void(uint64_t, uint64_t)>& progress)
 {
+    g_chainstate_health_rebuilds.fetch_add(1, std::memory_order_relaxed);
     try {
         ChainstateHealth rebuilt;
         rebuilt.genesis_hash = params.hashGenesisBlock;

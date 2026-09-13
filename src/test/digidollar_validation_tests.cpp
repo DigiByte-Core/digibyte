@@ -3889,4 +3889,46 @@ BOOST_FIXTURE_TEST_CASE(bug4_collateral_release_nullptr_fallback, DigiDollarVali
     BOOST_CHECK_MESSAGE(result, "Nullptr coins fallback should pass, got: " + state.GetRejectReason());
 }
 
+BOOST_FIXTURE_TEST_CASE(mint_without_dd_opreturn_is_refused_even_with_huge_collateral, DigiDollarValidationTestSetup)
+{
+    // A mint transaction that has a collateral output and a DigiDollar token
+    // output, but no DigiDollar OP_RETURN, reaches the code that works out a
+    // DigiDollar amount from the collateral and the oracle price.
+    //
+    // One collateral output of 15 million DGB, at a DGB price near today's,
+    // makes that multiply larger than a 64-bit money amount can hold. It used
+    // to be done in 64 bits, so it wrapped round. That is undefined behaviour
+    // inside a rule the whole network has to agree on, and a build with
+    // overflow trapping turned on stops the node dead there.
+    //
+    // The transaction is refused either way: a mint with no DigiDollar
+    // OP_RETURN has no lock height. This pins both halves of that. The reason
+    // must still be the missing lock height, and working out the amount must
+    // not wrap round on the way to it.
+
+    CKey collateralKey;
+    collateralKey.MakeNewKey(true);
+    const XOnlyPubKey collateralXOnlyKey{collateralKey.GetPubKey()};
+
+    CMutableTransaction mtx;
+    mtx.nVersion = 0x01000770; // DigiDollar mint
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(uint256S("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 0);
+
+    // Collateral: a plain Taproot output holding 15 million DGB.
+    mtx.vout.push_back(CTxOut(15000000LL * COIN, CScript() << OP_1 << ToByteVector(collateralXOnlyKey)));
+    // DigiDollar token: a plain Taproot output holding no DGB.
+    mtx.vout.push_back(CTxOut(0, CScript() << OP_1 << ToByteVector(testXOnlyKey)));
+    // No OP_RETURN on purpose.
+
+    // 6500 micro-USD is about $0.0065 per DGB, close to the mainnet price.
+    DigiDollar::ValidationContext ctx(mockHeight, 6500, mockSystemCollateral, Params());
+
+    CTransaction tx(mtx);
+    TxValidationState state;
+
+    BOOST_CHECK(!DigiDollar::ValidateMintTransaction(tx, ctx, state));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-mint-lock-height");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -28,6 +28,8 @@ public:
 private Q_SLOTS:
     void mintSavesItsRecordBeforeSendingTheTransaction();
     void mintDoesNotSendWhenTheWalletCannotSaveIt();
+    void mintStoppedByAChangedPriceLeavesNothingBehind();
+    void mintStoppedByANewBlockLeavesNothingBehind();
 };
 
 #endif // DIGIBYTE_QT_TEST_DIGIDOLLARMINTRECORDTESTS_H

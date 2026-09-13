@@ -275,12 +275,29 @@ void Shutdown(NodeContext& node)
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
     if (node.stempool) node.stempool->AddTransactionsUpdated(1);
 
-    // Shut down oracle services before tearing down networking and before
-    // process-exit library cleanup can invalidate libcurl/OpenSSL state.
-    OracleSigningOrchestrator::Shutdown();
-    OracleManager::StopOracleService();
+    // Stop the oracle price threads now. They fetch prices from exchanges over
+    // the network and hand messages to the connection manager, so they have to
+    // be gone before networking is torn down and before the process starts
+    // cleaning up the network and encryption libraries they use.
+    //
+    // Only the threads stop here. The oracles and the manager that holds them
+    // stay alive until the end of this function, because the remote procedure
+    // call server, the peer-to-peer message handler and the block
+    // notifications all look oracles up through that manager and are all still
+    // running at this point.
+    //
+    // The signing orchestrator is likewise only told here to stop listening
+    // for new blocks. Unregistering stops new notifications; it does not wait
+    // for a notification that is already running. Block notifications run on
+    // the scheduler thread and hold a plain pointer to the orchestrator and to
+    // the oracle they sign with, so freeing either one here leaves that thread
+    // reading freed memory. When that happened the scheduler thread waited
+    // forever on a lock inside freed memory, the shutdown thread waited
+    // forever for the scheduler thread, and the node did not finish shutting
+    // down.
+    OracleSigningOrchestrator::StopBlockNotifications();
+    OracleManager::StopOraclePriceThreads();
     g_get_oracle_consensus_price = nullptr;
-    OracleBundleManager::Shutdown();
 
     StopHTTPRPC();
     StopREST();
@@ -308,6 +325,15 @@ void Shutdown(NodeContext& node)
     // destruct and reset all to nullptr.
     node.peerman.reset();
     node.connman.reset();
+    // The signing orchestrator and the bundle manager each hold a plain pointer
+    // to the connection manager. It has just been destroyed, and both objects
+    // live on for the rest of this function, so clear the pointers now rather
+    // than leave them aimed at freed memory. Test each global instead of asking
+    // for it: the accessor for the bundle manager builds one on demand, and
+    // building anything while shutting down would be worse than the dangling
+    // pointer this avoids.
+    if (g_signing_orchestrator) g_signing_orchestrator->SetConnman(nullptr);
+    if (g_oracle_bundle_manager) g_oracle_bundle_manager->SetConnman(nullptr);
     node.banman.reset();
     node.addrman.reset();
     node.netgroupman.reset();
@@ -378,6 +404,18 @@ void Shutdown(NodeContext& node)
 
     node.chain_clients.clear();
     UnregisterAllValidationInterfaces();
+
+    // Destroy the oracle objects only now, when nothing is left that calls into
+    // them. The remote procedure call server, the connection manager, the
+    // scheduler thread, the indexes and the wallets have all stopped, and every
+    // queued block notification has already been run. Destroying them any
+    // earlier leaves another thread holding a pointer into freed memory.
+    //
+    // The oracle manager and the oracles it holds go last, because the signing
+    // orchestrator and the bundle manager both look oracles up through it.
+    OracleSigningOrchestrator::Shutdown();
+    OracleBundleManager::Shutdown();
+    OracleManager::StopOracleService();
     GetMainSignals().UnregisterBackgroundSignalScheduler();
     // init::UnsetGlobals();  // Not needed in v26.2
     node.kernel.reset();
@@ -2008,6 +2046,33 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 #endif
 
+    // The signing orchestrator is built, given its connection manager, published
+    // and registered for block notifications here: after the chainstate is
+    // loaded, and before the import thread below starts or networking takes any
+    // peer.
+    //
+    // Eight places read this global pointer without a lock, on several threads:
+    // the peer message handlers, block validation, mining, the command server and
+    // bundle assembly. Publishing it while any of them can already be running is a
+    // race on the pointer itself, and publishing it before its connection manager
+    // arrives leaves it taking block notifications with nowhere to send anything.
+    //
+    // It was moved twice. Putting it before the connection manager starts closed
+    // the peer readers. That was not enough: the import thread below loads the
+    // saved mempool, and a DigiDollar transaction in it reaches this pointer
+    // through the oracle quote check while accepting the transaction. Publishing
+    // above that thread closes the last reader, and closes it by ordering rather
+    // than by putting a lock around eight call sites, two of which are block
+    // validation and mining.
+    //
+    // The oracle bundle manager is deliberately left where it is, below. Its
+    // setup is followed by a full chain scan whose position relative to import
+    // is deliberate. The block notification this registers for does reach it,
+    // through the context proposal it builds, but only to take a locked snapshot
+    // that needs nothing the later setup adds. Its own publication is a separate
+    // problem and is written down rather than fixed here.
+    OracleSigningOrchestrator::Initialize(node.connman.get());
+
     std::vector<fs::path> vImportFiles;
     for (const std::string& strFile : args.GetArgs("-loadblock")) {
         vImportFiles.push_back(fs::PathFromString(strFile));
@@ -2220,9 +2285,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // Initialize Oracle Bundle Manager with consensus parameters
     OracleBundleManager::Initialize();
-    // Initialize MuSig2 signing orchestrator for V1 oracle bundles
-    OracleSigningOrchestrator::Initialize();
-    g_signing_orchestrator->SetConnman(node.connman.get());
     // Initialize oracle P2P connection for broadcasting
     OracleBundleManager::GetInstance().SetConnman(node.connman.get());
     // Keep required reconstruction synchronous and publish only a complete scan.

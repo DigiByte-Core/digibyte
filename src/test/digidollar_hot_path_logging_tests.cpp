@@ -26,10 +26,10 @@
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 
 #include <boost/test/unit_test.hpp>
 
-#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -37,7 +37,6 @@
 #include <utility>
 #include <vector>
 
-namespace fs_test = std::filesystem;
 
 namespace {
 
@@ -120,21 +119,6 @@ struct VolatilityLogSetup : public HotPathLogSetup {
         DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
     }
 };
-
-// Resolve the src/ root from __FILE__ so the invariant test can read
-// the hot-path .cpp files regardless of the cwd chosen by `make check`.
-fs_test::path ResolveSrcRoot()
-{
-    fs_test::path p = fs_test::absolute(fs_test::path(__FILE__)).parent_path().parent_path();
-    if (fs_test::exists(p / "digidollar" / "validation.cpp")) return p;
-    fs_test::path cwd = fs_test::current_path();
-    for (fs_test::path d = cwd; !d.empty(); d = d.parent_path()) {
-        if (fs_test::exists(d / "digidollar" / "validation.cpp")) return d;
-        if (fs_test::exists(d / "src" / "digidollar" / "validation.cpp")) return d / "src";
-        if (d == d.parent_path()) break;
-    }
-    return {};
-}
 
 } // namespace
 
@@ -343,58 +327,65 @@ BOOST_AUTO_TEST_CASE(get_current_oracle_price_no_price_log_visible_when_digidoll
 // friend access to force from a unit test).
 BOOST_AUTO_TEST_CASE(rc30_hot_path_logs_are_gated_in_source)
 {
-    const fs_test::path src_root = ResolveSrcRoot();
-    BOOST_REQUIRE_MESSAGE(!src_root.empty(),
-                          "could not locate src/ from __FILE__ or cwd");
-
+    // The paths are given from the top of the checkout. The shared helper finds
+    // the checkout the test program was built from, so this works whatever
+    // directory the test program is started in.
     struct Site {
-        fs_test::path file;
+        const char* file;
         std::string marker;
     };
     const std::vector<Site> sites = {
-        {src_root / "digidollar" / "validation.cpp",
+        {"src/digidollar/validation.cpp",
          "DigiDollar: Validating %s transaction (txid: %s)"},
-        {src_root / "digidollar" / "validation.cpp",
+        {"src/digidollar/validation.cpp",
          "Could not determine input DD amounts for conservation check"},
-        {src_root / "oracle" / "bundle_manager.cpp",
+        {"src/oracle/bundle_manager.cpp",
          "Rejecting stale cached price %lld micro-USD"},
-        {src_root / "oracle" / "bundle_manager.cpp",
+        {"src/oracle/bundle_manager.cpp",
          "No oracle price available in GetCurrentOraclePriceMicroUSD"},
         // ATMP wrapper site missed by the original gating pass. Fires from
         // AcceptToMemoryPool → BroadcastTransaction → Dandelion stempool on
         // every rejected DD tx; matches shenger's repro log line exactly.
-        {src_root / "validation.cpp",
+        {"src/validation.cpp",
          "DigiDollar: Transaction validation failed (txid: %s): %s"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: TickEpochSession h=%d epoch=%d state=%d is_oracle=%d"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Step 1 - local_ids.size()=%zu for epoch %d"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Step 1 - all_oracle_ids.size()=%zu"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Step 1 - key aggregation succeeded for %zu oracle IDs"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
-         "Oracle: Skipping oracle %d epoch %d - already broadcast"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
+         "Oracle: Skipping oracle %d epoch %d - nonce already generated"},
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Skipping oracle %d - GetOracleNode returned null"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Skipping oracle %d - invalid private key"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: oracle %d pubkey size=%d hex=%s"},
-        {src_root / "oracle" / "signing_orchestrator.cpp",
+        {"src/oracle/signing_orchestrator.cpp",
          "Oracle: Skipping oracle %d - secp256k1_ec_pubkey_parse failed"},
+        // Round nine. These three run inside TickEpochSession, so they fire on every
+        // block while a node has no peer to send to. They are pinned here because the
+        // three the round before had to be gated on merit: this test only guards
+        // markers it already lists, so a new hot-path line is unguarded until it is
+        // added. The one-shot "Sent the held ..." recovery lines beside them are
+        // deliberately ungated and are not pinned.
+        {"src/oracle/signing_orchestrator.cpp",
+         "Oracle: MuSig2 nonce for oracle=%d epoch=%d still has no peer to go to"},
+        {"src/oracle/signing_orchestrator.cpp",
+         "Oracle: MuSig2 context proposal epoch=%d proposer=%u still has no peer to go to"},
+        {"src/oracle/signing_orchestrator.cpp",
+         "Oracle: MuSig2 partial sig for oracle=%d epoch=%d still has no peer to go to"},
     };
 
     for (const auto& site : sites) {
-        std::ifstream f(site.file);
-        BOOST_REQUIRE_MESSAGE(f.is_open(), "cannot open " << site.file.string());
-        std::stringstream buf;
-        buf << f.rdbuf();
-        const std::string content = buf.str();
+        const std::string content = ReadRepositoryFile(site.file);
 
         const size_t marker_pos = content.find(site.marker);
         BOOST_REQUIRE_MESSAGE(marker_pos != std::string::npos,
-                              "marker not found in " << site.file.filename().string()
+                              "marker not found in " << site.file
                               << ": '" << site.marker << "'");
 
         // Inspect the ~200 chars preceding the marker. The enclosing
@@ -414,11 +405,11 @@ BOOST_AUTO_TEST_CASE(rc30_hot_path_logs_are_gated_in_source)
         BOOST_CHECK_MESSAGE(
             !wrapped_in_logprintf,
             "RC30 incident regression: '" << site.marker << "' in "
-            << site.file.filename().string()
+            << site.file
             << " is emitted through LogPrintf — must use LogPrint(BCLog::DIGIDOLLAR, ...)");
         BOOST_CHECK_MESSAGE(
             wrapped_in_logprint,
-            "'" << site.marker << "' in " << site.file.filename().string()
+            "'" << site.marker << "' in " << site.file
             << " must be wrapped in LogPrint(BCLog::DIGIDOLLAR, ...)");
     }
 }

@@ -1401,7 +1401,59 @@ bool CWallet::AbandonTransaction(const uint256& hashTx)
     // Note: If the reorged coinbase is re-added to the main chain, the descendants that have not had their
     // states change will remain abandoned and will require manual broadcast if the user wants them.
 
-    RecursiveUpdateTxState(hashTx, try_updating_state);
+    // Abandoning one transaction can change several rows of the wallet file: the
+    // transaction itself and every descendant of it this wallet holds. The file
+    // has to take all of those rows or none of them, so they are written inside
+    // one database transaction. A file left holding half the change would say
+    // one transaction's inputs are free while another's are still committed to
+    // it, and the next start would believe the file, not this wallet.
+    {
+        // Do not flush the wallet here for performance reasons
+        WalletBatch batch(GetDatabase(), false);
+        if (!batch.TxnBegin()) {
+            // Without a database transaction the rows can only go in one at a
+            // time, and a refusal part way through would leave the file holding
+            // half the change. Nothing has been written yet, so stop here and
+            // say so. Whatever asked for this can ask again.
+            WalletLogPrintf("Could not abandon transaction %s: the wallet file would not begin a database transaction\n",
+                            hashTx.ToString());
+            return false;
+        }
+
+        // However this leaves, the wallet's own copy has to end up saying what
+        // its file says. The walk below can throw part way through, and then the
+        // batch rolls the file back as it goes away while this puts memory back
+        // as the stack unwinds. It holds the list of previous states for the
+        // same reason: a list the walk returned by value would already be gone.
+        TxStateRollback rollback{*this};
+
+        RecursiveUpdateTxState(batch, hashTx, try_updating_state, rollback.changes);
+        if (!rollback.changes.all_writes_stored || !batch.TxnCommit()) {
+            // Nothing reached the file. Aborting puts back every row this walk
+            // wrote, so put this wallet's own copy back to match and tell the
+            // caller nothing was abandoned. Reporting success here would let the
+            // wallet hand out coins again that its own file still says are
+            // committed to this transaction, and a restart would bring the
+            // transaction back as live.
+            if (!batch.TxnAbort()) {
+                // Some wallet files end the database transaction themselves when
+                // a commit fails, so there is nothing left to abort and they say
+                // so. A rollback that was attempted and failed reports false as well, and
+                // this cannot tell the two apart, so it does not claim the file
+                // was left untouched.
+                WalletLogPrintf("Nothing left to abort for transaction %s; the wallet file kept what it had\n",
+                                hashTx.ToString());
+            }
+            rollback.Restore();
+            WalletLogPrintf("Could not abandon transaction %s: the wallet file refused the change\n",
+                            hashTx.ToString());
+            return false;
+        }
+
+        // The wallet file has taken the change, so memory is right as it is and
+        // there is nothing to put back.
+        rollback.Keep();
+    }
 
     if (m_dd_wallet) {
         // The wallet lock is held for the whole of this function, so only the
@@ -1428,9 +1480,19 @@ size_t CWallet::AbandonStaleDigiDollarRedeems()
         if (GetDigiDollarTxType(*wtx.tx) != DD_TX_REDEEM) continue;
         if (wtx.isAbandoned() || wtx.isConflicted() || wtx.isConfirmed() || wtx.InMempool()) continue;
 
+        const TxState state_before = wtx.m_state;
         wtx.m_state = TxStateInactive{/*abandoned=*/true};
         wtx.MarkDirty();
-        batch.WriteTx(wtx);
+        if (!batch.WriteTx(wtx)) {
+            // The wallet file would not take it. Leave this redemption as it was
+            // rather than count it: its DigiDollar inputs are still committed to
+            // it everywhere the file is read.
+            wtx.m_state = state_before;
+            wtx.MarkDirty();
+            WalletLogPrintf("DigiDollar: could not save abandoning stale redeem transaction %s; it is unchanged\n",
+                            txid.ToString());
+            continue;
+        }
         MarkInputsDirty(wtx.tx);
         NotifyTransactionChanged(txid, CT_UPDATED);
         ++abandoned;
@@ -1472,10 +1534,19 @@ void CWallet::MarkConflicted(const uint256& hashBlock, int conflicting_height, c
 
 }
 
-void CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
+CWallet::TxStateChanges CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
     // Do not flush the wallet here for performance reasons
     WalletBatch batch(GetDatabase(), false);
+    // Each row goes into the wallet file on its own here, with no database
+    // transaction around them, so a throw part way through leaves the rows
+    // already written in the file. Memory is left alone so that it still matches
+    // them, which is why this list is not put back on the way out.
+    TxStateChanges changes;
+    RecursiveUpdateTxState(batch, tx_hash, try_updating_state, changes);
+    return changes;
+}
 
+void CWallet::RecursiveUpdateTxState(WalletBatch& batch, const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state, TxStateChanges& changes) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) {
     std::set<uint256> todo;
     std::set<uint256> done;
 
@@ -1489,10 +1560,28 @@ void CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingSt
         assert(it != mapWallet.end());
         CWalletTx& wtx = it->second;
 
+        // Record how to put this transaction back before anything changes it.
+        // The call below changes the state in place, and appending to this list
+        // afterwards can throw, which would leave the state changed with nothing
+        // left to restore it from while the database transaction rolls back.
+        // Recording first and dropping the record when nothing changed cannot
+        // lose it that way. The list belongs to the caller, so records already
+        // in it survive a throw from anywhere later in this walk.
+        changes.previous_states.emplace_back(now, wtx.m_state);
         TxUpdate update_state = try_updating_state(wtx);
+        if (update_state == TxUpdate::UNCHANGED) {
+            changes.previous_states.pop_back();
+        }
         if (update_state != TxUpdate::UNCHANGED) {
             wtx.MarkDirty();
-            batch.WriteTx(wtx);
+            if (!batch.WriteTx(wtx)) {
+                // Report it. A state the wallet file never took is one the
+                // wallet loses at the next start, so the caller has to decide
+                // what to do rather than carry on as if it were saved.
+                changes.all_writes_stored = false;
+                WalletLogPrintf("Could not save the new state of transaction %s to the wallet file\n",
+                                now.ToString());
+            }
             // Iterate over all its outputs, and update those tx states as well (if applicable)
             for (unsigned int i = 0; i < wtx.tx->vout.size(); ++i) {
                 std::pair<TxSpends::const_iterator, TxSpends::const_iterator> range = mapTxSpends.equal_range(COutPoint(now, i));
@@ -1514,7 +1603,44 @@ void CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingSt
     }
 }
 
-void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& state, bool update_tx, bool rescanning_old_block)
+void CWallet::RestoreTxStatesInMemory(const std::vector<std::pair<uint256, TxState>>& previous_states)
+{
+    // Nothing is written here. The states being put back were written inside a
+    // database transaction that has been aborted, so the file already holds what
+    // it held before, and this only brings the wallet's own copy back to match.
+    //
+    // This can run while the stack unwinds, so it must not throw. Every state
+    // goes back first: a state is a handful of plain numbers copied into a
+    // transaction the wallet already holds, which allocates nothing and cannot
+    // fail.
+    for (const auto& entry : previous_states) {
+        auto it = mapWallet.find(entry.first);
+        if (it == mapWallet.end()) continue;
+        CWalletTx& wtx = it->second;
+        wtx.m_state = entry.second;
+        wtx.MarkDirty();
+        MarkInputsDirty(wtx.tx);
+    }
+
+    // Only then is anything told about it. Telling goes out to listeners this
+    // wallet does not control, and one of them can throw. Every state is back by
+    // now, so a listener that throws is counted and the rest are still told,
+    // rather than the transactions later in the list being left changed.
+    size_t listeners_threw{0};
+    for (const auto& entry : previous_states) {
+        if (mapWallet.find(entry.first) == mapWallet.end()) continue;
+        try {
+            NotifyTransactionChanged(entry.first, CT_UPDATED);
+        } catch (...) {
+            ++listeners_threw;
+        }
+    }
+    if (listeners_threw > 0) {
+        WalletLogPrintf("Put transaction states back: %zu listener(s) threw and were ignored\n", listeners_threw);
+    }
+}
+
+void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& state, bool update_tx, bool rescanning_old_block, int64_t rescan_block_time)
 {
     // FIX #4: Process incoming DigiDollar transactions FIRST
     // DD transfer outputs have 0 DGB value, which causes IsMine() to return false
@@ -1530,7 +1656,7 @@ void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& sta
                 block_height = conf->confirmed_block_height;
             }
             if (block_height >= 0) {
-                m_dd_wallet->ProcessDDTxForRescan(ptx, block_height);
+                m_dd_wallet->ProcessDDTxForRescan(ptx, block_height, rescan_block_time);
             }
         } else if (!std::holds_alternative<TxStateInactive>(state)) {
             // Normal operation (not rescanning): use ProcessIncomingDDTransaction
@@ -2142,7 +2268,10 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                     break;
                 }
                 for (size_t posInBlock = 0; posInBlock < block.vtx.size(); ++posInBlock) {
-                    SyncTransaction(block.vtx[posInBlock], TxStateConfirmed{block_hash, block_height, static_cast<int>(posInBlock)}, fUpdate, /*rescanning_old_block=*/true);
+                    // The block's own timestamp is passed on so the DigiDollar
+                    // wallet does not have to ask the chain for it while this
+                    // loop holds the wallet lock.
+                    SyncTransaction(block.vtx[posInBlock], TxStateConfirmed{block_hash, block_height, static_cast<int>(posInBlock)}, fUpdate, /*rescanning_old_block=*/true, /*rescan_block_time=*/block.GetBlockTime());
                 }
                 // scan succeeded, record block as most recent successfully scanned
                 result.last_scanned_block = block_hash;

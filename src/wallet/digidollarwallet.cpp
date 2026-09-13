@@ -239,6 +239,12 @@ DDTransaction::DDTransaction()
 // DigiDollarWallet Implementation
 // =============================================================================
 
+void DigiDollarWallet::RequireNoWalletLockForChainQuery(const char* file, int line) const
+{
+    if (m_wallet) AssertLockNotHeldInternal("cs_wallet", file, line, &m_wallet->cs_wallet);
+    AssertLockNotHeldInternal("cs_dd_wallet", file, line, &cs_dd_wallet);
+}
+
 DigiDollarWallet::DigiDollarWallet() : mockBalance(0), total_dd_balance(0), locked_collateral(0), m_wallet(nullptr) {
     // Initialize with some test data for development
     LogPrintf("DigiDollar: Wallet initialized\n");
@@ -368,6 +374,11 @@ size_t DigiDollarWallet::LoadPositionsFromDatabase()
     // Clear in-memory positions
     collateral_positions.clear();
 
+    // Remember which positions came out of the file. The automatic cleanup of
+    // records for a mint that was never sent only touches these, so it can
+    // never take the records of a mint this run is still building.
+    m_positions_read_at_open.clear();
+
     // Iterate through database using cursor
     std::unique_ptr<wallet::DatabaseCursor> cursor = batch.GetNewCursor();
     if (!cursor) {
@@ -395,6 +406,7 @@ size_t DigiDollarWallet::LoadPositionsFromDatabase()
             value >> position;
 
             collateral_positions[dd_timelock_id] = position;
+            m_positions_read_at_open.insert(dd_timelock_id);
             count++;
 
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollarWallet: Loaded position %s\n",
@@ -1054,13 +1066,52 @@ bool DigiDollarWallet::StoreOwnerKey(const uint256& dd_timelock_id, const CKey& 
         return true;
     }
 
+    // One transaction holds at most one DigiDollar output that this wallet
+    // built for itself: the token output of a mint, or the DigiDollar change of
+    // a transfer or a redemption. That single key is what this record is.
+    // A transfer that pays one of the wallet's own addresses has a second
+    // output the wallet owns, but that output is found by its own key, held
+    // with the wallet's ordinary keys, so it never needs a record here. The
+    // caller walks every output it owns and offers the same key each time, so
+    // the second offer is a repeat of a record already made. Saying so and
+    // writing nothing keeps an ordinary payment to yourself out of the error
+    // log, where it looked like the wallet had failed to save a key.
+    const CPubKey pubkey = key.GetPubKey();
+    if (m_wallet->IsCrypted()) {
+        const auto stored = dd_crypted_owner_keys.find(dd_timelock_id);
+        if (stored != dd_crypted_owner_keys.end() && stored->second.first == pubkey) {
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollarWallet: DD owner key for timelock %s is already saved\n",
+                     dd_timelock_id.ToString());
+            return true;
+        }
+        if (stored != dd_crypted_owner_keys.end()) {
+            // A different key under the same transaction id would replace the
+            // wallet's record of who owns that vault, and the collateral would
+            // become unspendable. Refuse, and say so plainly.
+            LogPrintf("DigiDollarWallet: ERROR - a different DD owner key is already saved for timelock %s; "
+                      "refusing to replace it\n", dd_timelock_id.ToString());
+            return false;
+        }
+    } else {
+        const auto stored = dd_owner_keys.find(dd_timelock_id);
+        if (stored != dd_owner_keys.end() && stored->second.GetPubKey() == pubkey) {
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollarWallet: DD owner key for timelock %s is already saved\n",
+                     dd_timelock_id.ToString());
+            return true;
+        }
+        if (stored != dd_owner_keys.end()) {
+            LogPrintf("DigiDollarWallet: ERROR - a different DD owner key is already saved for timelock %s; "
+                      "refusing to replace it\n", dd_timelock_id.ToString());
+            return false;
+        }
+    }
+
     // The key is written to the database first and only kept in memory once
     // that write has succeeded. A mint must not be sent on the strength of a
     // key that exists only in memory: a crash would leave collateral this
     // wallet cannot redeem until the chain is rescanned. An encrypted wallet
     // encrypts the key before it is written.
     if (m_wallet->IsCrypted()) {
-        CPubKey pubkey = key.GetPubKey();
         wallet::CKeyingMaterial vchSecret(key.begin(), key.end());
         std::vector<unsigned char> vchCryptedSecret;
 
@@ -2663,7 +2714,19 @@ bool DigiDollarWallet::GetMintDDTokenOutpoint(const uint256& position_id, COutPo
     return true;
 }
 
-void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int block_height) {
+void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int block_height, int64_t block_time) {
+    // This runs with both wallet locks held, because a rescan holds the main
+    // wallet lock for the whole of every block it reads. So nothing here may
+    // ask the chain a question: the chain takes its own lock and then calls
+    // into the wallet, and a thread holding a wallet lock while it waits for
+    // the chain can meet a thread going the other way and leave the node
+    // stuck. The timestamp the DigiDollar history records needs is therefore
+    // handed in by the caller, which reads it off the block it already has
+    // before it takes the wallet lock. The wallet's own transaction records
+    // cannot supply it, because a rescan processes DigiDollar transactions
+    // before it adds them to the wallet.
+    if (block_height < 0) block_time = 0;
+
     auto locks = LockDDWallet();
     if (!m_wallet) return;
 
@@ -2803,12 +2866,6 @@ void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int bloc
                     DDTransaction ddtx;
                     ddtx.txid = txid_str;
                     ddtx.amount = pos.dd_minted;
-                    // Get timestamp from block time (mapWallet may not be populated during rescan)
-                    int64_t block_time = 0;
-                    if (block_height >= 0) {
-                        uint256 block_hash = m_wallet->chain().getBlockHash(block_height);
-                        m_wallet->chain().findBlock(block_hash, interfaces::FoundBlock().time(block_time));
-                    }
                     ddtx.timestamp = block_time;
                     ddtx.blockheight = block_height;
                     ddtx.fee = 0;
@@ -3102,12 +3159,6 @@ void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int bloc
                 DDTransaction ddtx;
                 ddtx.txid = txid_str;
                 ddtx.amount = transfer_amount;
-                // Get timestamp from block time (mapWallet may not be populated during rescan)
-                int64_t block_time = 0;
-                if (block_height >= 0) {
-                    uint256 block_hash = m_wallet->chain().getBlockHash(block_height);
-                    m_wallet->chain().findBlock(block_hash, interfaces::FoundBlock().time(block_time));
-                }
                 ddtx.timestamp = block_time;
                 ddtx.confirmations = 0;  // Will be recalculated
                 ddtx.incoming = false;
@@ -3254,12 +3305,6 @@ void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int bloc
                             DDTransaction ddtx;
                             ddtx.txid = txid_str;
                             ddtx.amount = received_dd;
-                            // Get timestamp from block time (mapWallet may not be populated during rescan)
-                            int64_t block_time = 0;
-                            if (block_height >= 0) {
-                                uint256 block_hash = m_wallet->chain().getBlockHash(block_height);
-                                m_wallet->chain().findBlock(block_hash, interfaces::FoundBlock().time(block_time));
-                            }
                             ddtx.timestamp = block_time;
                             ddtx.confirmations = 0;
                             ddtx.incoming = true;
@@ -3457,12 +3502,6 @@ void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int bloc
                     DDTransaction ddtx;
                     ddtx.txid = txid_str;
                     ddtx.amount = restored_redeemed_dd;
-                    // Get timestamp from block time (mapWallet may not be populated during rescan)
-                    int64_t block_time = 0;
-                    if (block_height >= 0) {
-                        uint256 block_hash = m_wallet->chain().getBlockHash(block_height);
-                        m_wallet->chain().findBlock(block_hash, interfaces::FoundBlock().time(block_time));
-                    }
                     ddtx.timestamp = block_time;
                     ddtx.blockheight = block_height;
                     ddtx.fee = 0;
@@ -4500,7 +4539,31 @@ DigiDollarWallet::MintAttemptState DigiDollarWallet::GetMintAttemptState(const u
     return MintAttemptState::Local;
 }
 
-bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::string& error)
+DigiDollarWallet::SavedMintCleanup::~SavedMintCleanup()
+{
+    if (m_keep_records) return;
+    // This runs while a mint is giving up, which is usually while an error is
+    // already on its way out to the caller, so nothing here may throw.
+    try {
+        std::string error;
+        if (m_dd_wallet.ReleaseMintAttempt(m_position_id, error)) {
+            LogPrintf("%s: released the mint %s, which was not sent\n",
+                      m_whose_mint, m_position_id.ToString());
+        } else {
+            LogPrintf("%s: could not release the mint %s, which was not sent: %s\n",
+                      m_whose_mint, m_position_id.ToString(), error);
+        }
+    } catch (const std::exception& failure) {
+        LogPrintf("%s: could not release the mint %s, which was not sent: %s\n",
+                  m_whose_mint, m_position_id.ToString(), failure.what());
+    } catch (...) {
+        LogPrintf("%s: could not release the mint %s, which was not sent\n",
+                  m_whose_mint, m_position_id.ToString());
+    }
+}
+
+bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::string& error,
+                                         MintReleaseCaller caller)
 {
     error.clear();
     if (!m_wallet) {
@@ -4537,6 +4600,20 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
             return false;
         }
 
+        // The automatic cleanup chose this mint a moment ago and let these
+        // locks go in between. Ask again, here, while the locks that protect
+        // the answer are held. A block that disconnected in that gap puts the
+        // height back, and a mint that was finished then can be mined after
+        // all; giving it up would abandon a transaction a block can still
+        // include and hand back the coins it spends. Nothing is lost by
+        // waiting, because a mint that really is finished is still there for
+        // the next sweep.
+        if (caller == MintReleaseCaller::AutomaticSweep &&
+            !MintAttemptCanBeSwept(dd_timelock_id, state)) {
+            error = "the mint could be included in a block again, so nothing was released";
+            return false;
+        }
+
         // Work out which two outputs this attempt reserved. Consensus finds them by
         // structure, so read the indexes from the transaction when it is known.
         const auto tx_it = m_wallet->mapWallet.find(dd_timelock_id);
@@ -4552,28 +4629,96 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
             // The transaction never entered the wallet (the mint stopped before it
             // was committed), so there is no attempt to recover later. Drop the
             // records that were written for it; the owner key is kept because it is
-            // harmless and cheap. dd_utxos is rebuilt from wallet transactions, so
-            // only the database rows need attention.
-            bool ok = true;
+            // harmless and cheap, and it is the one thing that could not be worked
+            // out again if a signed copy of the mint ever did reach a block.
+            //
+            // Every change goes into the wallet file first and is checked, and only
+            // then is anything dropped here. A refused write leaves this wallet and
+            // its file exactly as they were, so the same cleanup can be run again.
+            // Dropping the records from memory first was how a refused write turned
+            // into "no position record for this mint" on the next attempt, while the
+            // rows themselves came back from the file at the next start.
             wallet::WalletBatch batch(m_wallet->GetDatabase());
+
+            // The file takes all of these changes together or none of them. Both
+            // kinds of wallet file can do that, so a file that will not start a
+            // transaction is reporting a real problem, and this stops instead of
+            // writing part of the change. Part of it is the worst outcome: the file
+            // would hold some of these rows and not others, with nothing left to say
+            // which, while this wallet still shows all of them. Stopping costs only
+            // a retry, and the cleanup runs again at the next block and the next
+            // time this wallet is opened.
+            if (!batch.TxnBegin()) {
+                error = "could not start a wallet database transaction, so nothing was removed";
+                return false;
+            }
+
+            // The locked collateral total this wallet will have once this position
+            // is gone, worked out before anything here changes so that the number
+            // written matches the rows that are kept.
+            CAmount locked_without_this_mint = 0;
+            for (const auto& [other_id, other_position] : collateral_positions) {
+                if (other_id != dd_timelock_id && other_position.is_active) {
+                    locked_without_this_mint += other_position.dgb_collateral;
+                }
+            }
+
+            // The coin locks this attempt put on its own collateral and token
+            // outputs go with the rest of its records. Opening the wallet again
+            // puts those locks back for every active position, so a lock left here
+            // would outlive the position that explains it and stay for ever. They
+            // are removed in the same transaction as the position record, so the
+            // file can never hold one without the other.
+            std::vector<COutPoint> locks_to_remove;
+            for (const COutPoint& locked_coin : {collateral_outpoint, dd_token_outpoint}) {
+                if (m_wallet->IsLockedCoin(locked_coin)) {
+                    locks_to_remove.push_back(locked_coin);
+                }
+            }
+
+            const char* refused = nullptr;
+            if (!batch.EraseDDUTXO(dd_token_outpoint)) {
+                refused = "the DigiDollar token output";
+            } else if (!batch.EraseDDTransaction(dd_timelock_id)) {
+                refused = "the mint history record";
+            } else if (!batch.EraseDDTimeLock(dd_timelock_id)) {
+                refused = "the position record";
+            } else if (!batch.WriteDDMetadata("locked_collateral",
+                                              std::to_string(locked_without_this_mint))) {
+                refused = "the locked collateral total";
+            }
+            for (const COutPoint& locked_coin : locks_to_remove) {
+                if (refused != nullptr) break;
+                if (!batch.EraseLockedUTXO(locked_coin)) {
+                    refused = "a coin lock";
+                }
+            }
+            if (refused != nullptr) {
+                batch.TxnAbort();
+                error = strprintf("could not remove %s from the wallet database", refused);
+                return false;
+            }
+            if (!batch.TxnCommit()) {
+                error = "could not save the removal of the mint records to the wallet database";
+                return false;
+            }
+
+            // The file no longer holds these rows, so they go from here too. The
+            // coin locks only leave memory here; their rows went with the
+            // transaction above.
             dd_utxos.erase(dd_token_outpoint);
-            batch.EraseDDUTXO(dd_token_outpoint);
             transaction_history.erase(
                 std::remove_if(transaction_history.begin(), transaction_history.end(),
                                [&](const DDTransaction& row) {
                                    return row.category == "mint" && row.txid == dd_timelock_id.GetHex();
                                }),
                 transaction_history.end());
-            batch.EraseDDTransaction(dd_timelock_id);
             collateral_positions.erase(pos_it);
-            if (!batch.EraseDDTimeLock(dd_timelock_id)) {
-                error = "could not remove the position record from the wallet database";
-                ok = false;
+            for (const COutPoint& locked_coin : locks_to_remove) {
+                m_wallet->UnlockCoin(locked_coin);
             }
-            RefreshLockedCollateral();
-            batch.WriteDDMetadata("locked_collateral", std::to_string(locked_collateral));
             RecalculateTotals();
-            return ok;
+            return true;
         }
 
         // A conflicted transaction already holds nothing, and one that is
@@ -4583,33 +4728,76 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
                          !tx_it->second.isAbandoned();
     }
 
-    bool ok = true;
-
     // 1. Abandon the wallet transaction so the DGB inputs it spent are usable
     //    again. This is done with no DigiDollar lock held.
     if (abandon_needed) {
         if (!m_wallet->TransactionCanBeAbandoned(dd_timelock_id) || !m_wallet->AbandonTransaction(dd_timelock_id)) {
-            error = "could not abandon the mint transaction";
-            ok = false;
+            // The wallet still treats the transaction as live, so the coins it
+            // spends are still committed to it. Stop here and keep every
+            // protection this position has: the coin locks stay, the token
+            // output stays tracked, and the position stays active. Freeing them
+            // now would hand back coins that a mint which can still be mined is
+            // spending. Whatever asked for this release asks again later.
+            error = "could not abandon the mint transaction, so nothing was released";
+            return false;
         }
     }
 
+    bool ok = true;
+
     {
         auto locks = LockDDWallet();
+
+        // No wallet lock was held while the transaction was abandoned, so in
+        // that gap the mint may have reached a block or this node's mempool.
+        // Read its state again before anything is released. A mint that is live
+        // keeps its coin locks, its token output and its active position,
+        // because its collateral is committed and its token is real.
+        const MintAttemptState state_now = GetMintAttemptState(dd_timelock_id);
+        if (state_now == MintAttemptState::Confirmed) {
+            error = "the mint confirmed while it was being released, so nothing was released";
+            return false;
+        }
+        if (state_now == MintAttemptState::InMempool) {
+            error = "the mint reached the mempool while it was being released, so nothing was released";
+            return false;
+        }
+
+        // For the automatic cleanup the mint also has to be exactly the
+        // finished thing it was when this release started. It was chosen
+        // because no block could include it any more, and that is the reason
+        // its transaction was abandoned above. If the height moved back while
+        // that happened, the reason is gone, so this stops here instead of
+        // also removing what protects the collateral and the token.
+        if (caller == MintReleaseCaller::AutomaticSweep && state_now != state) {
+            error = "the mint changed while it was being released, so nothing more was released";
+            return false;
+        }
+
         wallet::WalletBatch batch(m_wallet->GetDatabase());
+
+        // Each change below goes into the wallet file first and is only then
+        // made in memory. A refused write stops the release, so what this
+        // wallet shows always matches what its file says and the release can be
+        // tried again.
 
         // 2. The DD token output of an attempt that cannot confirm is not a balance.
         //    (Abandoning above already rebuilt dd_utxos from live transactions;
         //    this covers the conflicted and already-abandoned cases too.)
+        if (!batch.EraseDDUTXO(dd_token_outpoint)) {
+            error = "could not remove the DigiDollar token output from the wallet database";
+            return false;
+        }
         dd_utxos.erase(dd_token_outpoint);
-        batch.EraseDDUTXO(dd_token_outpoint);
 
         // 3. Remove the coin locks that were protecting the collateral and token.
-        if (m_wallet->IsLockedCoin(collateral_outpoint)) {
-            m_wallet->UnlockCoin(collateral_outpoint, &batch);
-        }
-        if (m_wallet->IsLockedCoin(dd_token_outpoint)) {
-            m_wallet->UnlockCoin(dd_token_outpoint, &batch);
+        for (const COutPoint& locked_coin : {collateral_outpoint, dd_token_outpoint}) {
+            if (!m_wallet->IsLockedCoin(locked_coin)) continue;
+            if (!batch.EraseLockedUTXO(locked_coin)) {
+                error = "could not remove a coin lock from the wallet database";
+                return false;
+            }
+            m_wallet->UnlockCoin(locked_coin);
         }
 
         // 4. The position stays on record but is no longer active. The owner key
@@ -4617,14 +4805,19 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
         //    confirmation can reactivate it.
         auto pos_it = collateral_positions.find(dd_timelock_id);
         if (pos_it != collateral_positions.end() && pos_it->second.is_active) {
-            pos_it->second.is_active = false;
-            if (!batch.WriteDDTimeLock(pos_it->second)) {
+            WalletCollateralPosition released = pos_it->second;
+            released.is_active = false;
+            if (!batch.WriteDDTimeLock(released)) {
                 error = "could not save the released position to the wallet database";
-                ok = false;
+                return false;
             }
+            pos_it->second.is_active = false;
         }
         RefreshLockedCollateral();
-        batch.WriteDDMetadata("locked_collateral", std::to_string(locked_collateral));
+        if (!batch.WriteDDMetadata("locked_collateral", std::to_string(locked_collateral))) {
+            error = "could not save the locked collateral total to the wallet database";
+            ok = false;
+        }
         RecalculateTotals();
     }
 
@@ -4636,22 +4829,96 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
     return ok;
 }
 
+bool DigiDollarWallet::UnsentMintRecordsCanBeReleased(const uint256& dd_timelock_id) const
+{
+    auto locks = LockDDWallet();
+    if (!m_wallet) return false;
+
+    // Only records that were already in the wallet file when this wallet was
+    // opened. A mint saves its position record before it hands the transaction
+    // to the wallet, so a mint being built right now also has a record and no
+    // transaction. Those records belong to that mint: it may still send the
+    // transaction, and it releases them itself if it gives up. Giving them up
+    // here would take the vault out from under a mint that can still be mined.
+    if (m_positions_read_at_open.count(dd_timelock_id) == 0) return false;
+
+    const auto pos_it = collateral_positions.find(dd_timelock_id);
+    if (pos_it == collateral_positions.end()) return false;
+
+    // Second check, in case a signed copy of the mint did leave this node
+    // before it stopped: wait until no block on this chain could include the
+    // mint any more. Without a height there is nothing to compare against, so
+    // nothing is released.
+    if (!m_wallet->HasLastBlockHeight()) return false;
+    return MintLockWindowHasPassed(pos_it->second, m_wallet->GetLastBlockHeight() + 1);
+}
+
+bool DigiDollarWallet::MintAttemptCanBeSwept(const uint256& dd_timelock_id,
+                                            MintAttemptState state) const
+{
+    auto locks = LockDDWallet();
+    if (!m_wallet) return false;
+
+    const auto pos_it = collateral_positions.find(dd_timelock_id);
+    if (pos_it == collateral_positions.end()) return false;
+
+    // Only real mints of this wallet reserve anything; received DD has no
+    // collateral and nothing to release.
+    if (pos_it->second.dgb_collateral <= 0) return false;
+
+    // Records of a mint that was never sent, left behind by an earlier run.
+    const bool unsent_orphan = state == MintAttemptState::NotInWallet &&
+                               UnsentMintRecordsCanBeReleased(dd_timelock_id);
+
+    // The inactive flag cannot be used to filter those out. Startup marks a
+    // position inactive when its collateral is not in the coin view, and a mint
+    // that was never sent looks exactly like that: it is in no block, in no
+    // mempool and in no wallet transaction. So startup marks these inactive
+    // and, before this, the check here then skipped them and nothing ever
+    // cleaned them up. Every other reason to release still requires an active
+    // position.
+    if (!pos_it->second.is_active && !unsent_orphan) return false;
+
+    // A mint that missed its lock window, one that was already given up, and
+    // one a conflicting transaction beat into a block are all finished here.
+    // The first is the only one that still has coins committed to it, so it is
+    // also the only one the release abandons.
+    return unsent_orphan ||
+           state == MintAttemptState::Expired ||
+           state == MintAttemptState::Abandoned ||
+           state == MintAttemptState::Conflicted;
+}
+
 size_t DigiDollarWallet::ReconcileExpiredMintAttempts()
 {
     if (!m_wallet) {
         return 0;
     }
+
+    // Hold the main wallet lock across the choice and the releases together.
+    // The height that decides whether a block could still include a mint only
+    // moves while this lock is held, and so does every transaction state read
+    // below. So no block can connect or disconnect in the middle and turn a
+    // mint that was finished back into one that can still be mined. Connecting
+    // a block already ran this with the lock held; opening the wallet and
+    // reconciling positions did not.
+    //
+    // The DigiDollar lock is a different matter. Each release has to let that
+    // one go while it abandons a transaction, so it takes and releases it
+    // itself.
+    LOCK(m_wallet->cs_wallet);
+
     std::vector<uint256> to_release;
     {
         auto locks = LockDDWallet();
         for (const auto& [id, pos] : collateral_positions) {
             // Only real mints of this wallet reserve anything; received DD has
             // no collateral and nothing to release.
-            if (!pos.is_active || pos.dgb_collateral <= 0) continue;
-            const MintAttemptState state = GetMintAttemptState(id);
-            if (state == MintAttemptState::Expired ||
-                state == MintAttemptState::Abandoned ||
-                state == MintAttemptState::Conflicted) {
+            if (pos.dgb_collateral <= 0) continue;
+
+            // One rule decides this, and the release asks the same rule again
+            // before it changes anything, so the two can never disagree.
+            if (MintAttemptCanBeSwept(id, GetMintAttemptState(id))) {
                 to_release.push_back(id);
             }
         }
@@ -4659,7 +4926,7 @@ size_t DigiDollarWallet::ReconcileExpiredMintAttempts()
     size_t released = 0;
     for (const uint256& id : to_release) {
         std::string error;
-        if (ReleaseMintAttempt(id, error)) {
+        if (ReleaseMintAttempt(id, error, MintReleaseCaller::AutomaticSweep)) {
             ++released;
         } else {
             LogPrintf("DigiDollar: could not release mint attempt %s: %s\n", id.ToString(), error);
@@ -5013,7 +5280,7 @@ size_t DigiDollarWallet::ValidatePositionStates()
         }
     }
 
-    if (!m_wallet->chain().isReadyToBroadcast()) {
+    if (!ChainForQuery(__FILE__, __LINE__).isReadyToBroadcast()) {
         LogPrintf("DigiDollar: ValidatePositionStates skipped while chainstate is not ready\n");
         LOCK(cs_dd_wallet);
         m_position_state_validation_pending = true;
@@ -5024,7 +5291,7 @@ size_t DigiDollarWallet::ValidatePositionStates()
               position_ids.size());
 
     // Query the UTXO set (chainstate + mempool) for all collateral outpoints
-    m_wallet->chain().findCoins(coins_to_check);
+    ChainForQuery(__FILE__, __LINE__).findCoins(coins_to_check);
 
     size_t corrected = 0;
     auto locks = LockDDWallet();
@@ -5131,7 +5398,7 @@ size_t DigiDollarWallet::ReconcilePositionStates()
         return 0;
     }
 
-    if (!m_wallet->chain().isReadyToBroadcast()) {
+    if (!ChainForQuery(__FILE__, __LINE__).isReadyToBroadcast()) {
         LogPrintf("DigiDollar: ReconcilePositionStates skipped while chainstate is not ready\n");
         LOCK(cs_dd_wallet);
         m_position_state_validation_pending = true;
@@ -5144,7 +5411,7 @@ size_t DigiDollarWallet::ReconcilePositionStates()
     // Do not hold cs_wallet/cs_dd_wallet while entering node::FindCoins; it
     // takes cs_main and mempool locks and debug builds abort on the inverted
     // wallet->chain lock order. Re-lock below only to apply/persist changes.
-    m_wallet->chain().findCoins(coins_to_check);
+    ChainForQuery(__FILE__, __LINE__).findCoins(coins_to_check);
 
     size_t corrected = 0;
     {
@@ -5540,19 +5807,34 @@ bool DigiDollarWallet::MintDigiDollar(const CAmount& dd_amount, uint32_t lock_ti
     }
 }
 
-bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount amount, CTransactionRef& tx_out) {
+bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount amount, CTransactionRef& tx_out,
+                                         std::string* error) {
+    // Every way out of here that returns false also says why, so a caller can
+    // put the reason in front of the user instead of a bare "it did not work".
+    const auto refuse = [error](const std::string& reason) {
+        if (error != nullptr) *error = reason;
+        return false;
+    };
+    if (error != nullptr) error->clear();
     auto locks = LockDDWallet();
     try {
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: TransferDigiDollar called - to: %s, amount: %lld\n", to.ToString(), static_cast<long long>(amount));
         if (!m_wallet || m_wallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
             LogPrintf("DigiDollar: TransferDigiDollar blocked because wallet cannot sign DD spends\n");
-            return false;
+            return refuse("This wallet cannot sign DigiDollar payments because its private keys are turned off.");
         }
 
         // Validate transfer parameters
         if (!ValidateTransferParams(to, amount)) {
             LogPrintf("DigiDollar: TransferDigiDollar validation failed\n");
-            return false;
+            if (!to.IsValidForCurrentNetwork()) {
+                return refuse("That is not a DigiDollar address for this network.");
+            }
+            return refuse(strprintf("The wallet cannot send %lld cents. It holds %lld cents, and a "
+                                    "DigiDollar output has to be at least %lld cents.",
+                                    static_cast<long long>(amount),
+                                    static_cast<long long>(GetTotalDDBalance()),
+                                    static_cast<long long>(Params().GetDigiDollarParams().minOutputAmount)));
         }
 
         // Phase 2.1: Select DD UTXOs to cover the amount
@@ -5561,7 +5843,7 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
         if (!SelectDDCoins(amount, dd_utxos, selectedDDTotal)) {
             LogPrintf("DigiDollar: Insufficient DD balance for transfer (need %lld, have %lld)\n",
                       static_cast<long long>(amount), static_cast<long long>(GetTotalDDBalance()));
-            return false;
+            return refuse("The wallet could not gather enough DigiDollar coins to make this payment.");
         }
 
         // Phase 2.1: Create mock transaction structure for fee estimation
@@ -5610,7 +5892,7 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: TransferDigiDollar - Starting key lookup, dd_utxos.size()=%d\n", dd_utxos.size());
         if (dd_utxos.empty()) {
             LogPrintf("DigiDollar: No DD UTXOs available for transfer\n");
-            return false;
+            return refuse("The wallet holds no DigiDollar coins to spend.");
         }
 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: TransferDigiDollar - First DD UTXO: %s:%d\n", dd_utxos[0].hash.ToString(), dd_utxos[0].n);
@@ -5787,7 +6069,8 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
         if (!found_key) {
             LogPrintf("DigiDollar: Could not find spending key for DD UTXO %s:%d\n",
                      dd_utxos[0].hash.ToString(), dd_utxos[0].n);
-            return false;
+            return refuse(strprintf("The wallet could not find the key that spends the DigiDollar coin %s:%d.",
+                                    dd_utxos[0].hash.ToString(), dd_utxos[0].n));
         }
 
         params.spenderKey = spenderKey;
@@ -5823,7 +6106,7 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
 
         if (!result.success) {
             LogPrintf("DigiDollar: Transfer transaction build failed - %s\n", result.error);
-            return false;
+            return refuse(result.error);
         }
 
         // Create transaction reference
@@ -5833,7 +6116,7 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
             std::string commit_error;
             if (!CommitDDTransaction(tx_out, commit_error)) {
                 LogPrintf("DigiDollar: Commit failed - %s\n", commit_error);
-                return false;
+                return refuse(commit_error);
             }
 
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transaction committed successfully - txid: %s\n",
@@ -5901,15 +6184,23 @@ bool DigiDollarWallet::TransferDigiDollar(const CDigiDollarAddress& to, CAmount 
 
     } catch (const std::exception& e) {
         LogPrintf("DigiDollar: TransferDigiDollar exception - %s\n", e.what());
-        return false;
+        return refuse(e.what());
     }
 }
 
-bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAmount& amount, CTransactionRef& tx_out) {
+bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAmount& amount, CTransactionRef& tx_out,
+                                       std::string* error) {
+    // Every way out of here that returns false also says why, so a caller can
+    // put the reason in front of the user instead of a bare "it did not work".
+    const auto refuse = [error](const std::string& reason) {
+        if (error != nullptr) *error = reason;
+        return false;
+    };
+    if (error != nullptr) error->clear();
     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: RedeemDigiDollar called - position: %s, amount: %lld\n", dd_timelock_id.ToString(), static_cast<long long>(amount));
     if (!m_wallet || m_wallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
         LogPrintf("DigiDollar: RedeemDigiDollar blocked because wallet cannot sign DD redemptions\n");
-        return false;
+        return refuse("This wallet cannot sign DigiDollar redemptions because its private keys are turned off.");
     }
 
     // The positions are checked against the chain before the wallet is locked,
@@ -5952,27 +6243,28 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         if (!RefreshPositionMetadataFromMintTx(dd_timelock_id)) {
             LogPrintf("DigiDollar: RedeemDigiDollar blocked because mint metadata could not be verified for %s\n",
                       dd_timelock_id.ToString());
-            return false;
+            return refuse(strprintf("The wallet could not confirm vault %s from the transaction that created it.",
+                                    dd_timelock_id.ToString()));
         }
 
         // Validation
         if (!ValidateRedeemParams(dd_timelock_id, amount)) {
             LogPrintf("DigiDollar: RedeemDigiDollar validation failed\n");
-            return false;
+            return refuse("The vault or the amount was refused.");
         }
 
         // Get position details
         auto it = collateral_positions.find(dd_timelock_id);
         if (it == collateral_positions.end() || !it->second.is_active) {
             LogPrintf("DigiDollar: Position not found or inactive\n");
-            return false;
+            return refuse("The wallet has no open vault with that identifier.");
         }
 
         // Construction uses the candidate height once canonical health rules apply.
         int currentHeight = canonical_health ? candidate.height : m_wallet->GetLastBlockHeight();
         if ((!node_ctx || !node_ctx->chainman) && DigiDollar::IsThawDayActive(Params().GetConsensus(), currentHeight + 1)) {
             LogPrintf("DigiDollar: candidate chain state unavailable for redemption\n");
-            return false;
+            return refuse("The wallet could not read the chain, so it cannot work out what this redemption has to burn.");
         }
         const int candidateHealth = candidate.health;
         CAmount oraclePrice = OracleBundleManager::GetInstance().GetLatestPrice();
@@ -5983,13 +6275,15 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         if (canonical_health) {
             if (!candidate.ready) {
                 LogPrintf("DigiDollar: redemption state not ready: %s\n", candidate.error);
-                return false;
+                return refuse(candidate.error.empty()
+                                  ? std::string("The chain is not ready for a redemption yet.")
+                                  : candidate.error);
             }
             oraclePrice = candidate.price;
         }
         if (oraclePrice <= 0) {
             LogPrintf("DigiDollar: RedeemDigiDollar blocked because no oracle price is available\n");
-            return false;
+            return refuse("There is no oracle price to redeem at.");
         }
 
         DigiDollar::RedeemTxBuilder builder(Params(), currentHeight, oraclePrice);
@@ -5999,7 +6293,8 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         if (!GetMintCollateralOutpoint(dd_timelock_id, params.collateralOutpoint)) {
             LogPrintf("DigiDollar: RedeemDigiDollar blocked because collateral outpoint could not be resolved for %s\n",
                       dd_timelock_id.ToString());
-            return false;
+            return refuse(strprintf("The wallet could not find the locked DigiByte of vault %s.",
+                                    dd_timelock_id.ToString()));
         }
         params.ddToRedeem = amount;
         params.path = builder.DetermineRedemptionPath(params);
@@ -6011,11 +6306,14 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         if (!GetOwnerKey(dd_timelock_id, ownerKey)) {
             if (m_wallet && m_wallet->IsCrypted() && m_wallet->IsLocked()) {
                 LogPrintf("DigiDollar: RedeemDigiDollar blocked because encrypted wallet is locked and DD owner key cannot be decrypted\n");
+                return refuse("The wallet is locked, so it cannot read the key that owns this vault. "
+                              "Unlock the wallet and try again.");
             } else {
                 LogPrintf("DigiDollar: RedeemDigiDollar blocked because no DD owner key is available for position %s\n",
                          dd_timelock_id.ToString());
             }
-            return false;
+            return refuse(strprintf("The wallet does not hold the key that owns vault %s.",
+                                    dd_timelock_id.ToString()));
         }
         params.ownerKey = ownerKey;
 
@@ -6025,6 +6323,9 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         params.collateralAmount = it->second.dgb_collateral;
         params.ddMinted = it->second.dd_minted;
         params.unlockHeight = static_cast<uint32_t>(it->second.unlock_height);
+        // Copied out now, because the DigiDollar lock is let go for a moment
+        // further down and the entry this points at could move in that gap.
+        const int redeemed_lock_tier = static_cast<int>(it->second.lock_tier);
 
         // CRITICAL FIX: Get wallet addresses for BOTH collateral return AND DGB change
         // This ensures collateral and change are SEPARATE outputs, not merged
@@ -6044,7 +6345,6 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
                 params.collateralDest = *op_dest;
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using wallet destination for returned collateral\n");
             } else {
-                LogPrintf("DigiDollar: WARNING - Could not get wallet address for collateral, using owner key (wallet may not recognize)\n");
                 LogPrintf("DigiDollar: Error: %s\n", util::ErrorString(op_dest).original);
             }
 
@@ -6064,6 +6364,15 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
             }
         }
 
+        // A redemption hands back the whole vault in one output. Without an
+        // address to send it to, that money would go somewhere no wallet can
+        // spend from, so stop here instead. A wallet that cannot hand out an
+        // address is usually locked, watch-only, or out of spare addresses.
+        if (!params.collateralDest.has_value()) {
+            LogPrintf("DigiDollar: RedeemDigiDollar blocked because this wallet could not give an address for the collateral the redemption unlocks\n");
+            return false;
+        }
+
         // DigiDollar transactions MUST pay at least 0.1 DGB fee to miners
         params.feeRate = 35000000; // 0.35 DGB/kB = 0.105 DGB for 300 byte tx
 
@@ -6074,7 +6383,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         CAmount selectedTotal = 0;
         if (!SelectDDCoins(requiredBurn, params.ddUtxos, selectedTotal, &params.ddAmounts)) {
             LogPrintf("DigiDollar: Insufficient DD balance for redemption\n");
-            return false;
+            return refuse("The wallet does not hold enough DigiDollars to burn for this redemption.");
         }
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Selected %zu DD UTXOs totaling %lld cents for redemption of %lld cents\n",
                   params.ddUtxos.size(), static_cast<long long>(selectedTotal), static_cast<long long>(amount));
@@ -6105,7 +6414,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         std::vector<CAmount> fee_amounts;
         if (!SelectFeeCoins(estimatedFee, params.feeUtxos, selectedFeeTotal, &fee_amounts, &exclude_utxos)) {
             LogPrintf("DigiDollar: Insufficient DGB balance for fees\n");
-            return false;
+            return refuse("The wallet does not hold enough DigiByte to pay the fee for this redemption.");
         }
         params.feeAmounts = fee_amounts;  // TxBuilder needs per-UTXO amounts for fee inputs
 
@@ -6131,7 +6440,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
                   result.success, result.error.c_str());
         if (!result.success) {
             LogPrintf("DigiDollar: Redemption transaction build failed - %s\n", result.error);
-            return false;
+            return refuse(result.error);
         }
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: BuildRedemptionTransaction SUCCESS, transaction has %d inputs and %d outputs\n",
                   result.tx.vin.size(), result.tx.vout.size());
@@ -6144,7 +6453,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
             mtx = result.tx;
             if (!SignRedemptionTransaction(mtx, params.collateralOutpoint, params.ddUtxos, params.feeUtxos, ownerKey)) {
                 LogPrintf("DigiDollar: Failed to sign redemption transaction\n");
-                return false;
+                return refuse("The wallet could not sign the redemption.");
             }
             if (!canonical_health) break;
             const CAmount signedFee = std::max<CAmount>(10000000,
@@ -6154,27 +6463,44 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
             result = buildFundedRedemption();
             if (!result.success) {
                 LogPrintf("DigiDollar: redemption fee funding failed: %s\n", result.error);
-                return false;
+                return refuse(result.error);
             }
         }
 
         tx_out = MakeTransactionRef(mtx);
 
         if (canonical_health) {
-            // Wallet -> chain matches rebroadcast; capture releases the chain lock before commit.
-            const auto current = capture_candidate();
-            if (!current.ready || current.height != candidate.height ||
-                current.state != candidate.state || current.price != candidate.price) {
-                LogPrintf("DigiDollar: redemption state or quote changed; retry construction: %s\n", current.error);
-                return false;
+            // Checking that the chain has not moved since this redemption was
+            // built waits for the chain's own lock. The chain takes that lock
+            // before it calls into the wallet, so waiting for it with a wallet
+            // lock held can meet a thread going the other way and leave the
+            // node stuck. Let both wallet locks go for the length of the
+            // question and take them back straight after, in the same order.
+            // Nothing read out of the wallet is still being pointed at here.
+            bool state_moved = false;
+            std::string moved_error;
+            {
+                REVERSE_LOCK(locks.second);
+                REVERSE_LOCK(locks.first);
+                RequireNoWalletLockForChainQuery(__FILE__, __LINE__);
+                const auto current = capture_candidate();
+                state_moved = !current.ready || current.height != candidate.height ||
+                    current.state != candidate.state || current.price != candidate.price;
+                moved_error = current.error;
+            }
+            if (state_moved) {
+                LogPrintf("DigiDollar: redemption state or quote changed; retry construction: %s\n", moved_error);
+                return refuse(moved_error.empty()
+                                  ? std::string("The chain moved while the redemption was being built. Try again.")
+                                  : moved_error);
             }
         }
 
         // Broadcast transaction
-        std::string error;
-        if (!CommitDDTransaction(tx_out, error)) {
-            LogPrintf("DigiDollar: Failed to broadcast redemption transaction - %s\n", error);
-            return false;
+        std::string commit_error;
+        if (!CommitDDTransaction(tx_out, commit_error)) {
+            LogPrintf("DigiDollar: Failed to broadcast redemption transaction - %s\n", commit_error);
+            return refuse(commit_error);
         }
 
         // Track DD change output if there was any
@@ -6227,7 +6553,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
         ddtx.address = "";
         ddtx.category = "redeem";
         ddtx.fee = result.totalFees;  // Bug #17 fix: record actual fee paid
-        ddtx.lock_tier = static_cast<int>(it->second.lock_tier);  // Set lock tier from redeemed position
+        ddtx.lock_tier = redeemed_lock_tier;
 
         wallet::WalletBatch batch(m_wallet->GetDatabase());
         if (!batch.WriteDDTransaction(ddtx)) {
@@ -6238,7 +6564,7 @@ bool DigiDollarWallet::RedeemDigiDollar(const uint256& dd_timelock_id, const CAm
 
     } catch (const std::exception& e) {
         LogPrintf("DigiDollar: RedeemDigiDollar exception - %s\n", e.what());
-        return false;
+        return refuse(e.what());
     }
 }
 
@@ -8309,9 +8635,13 @@ bool DigiDollarWallet::CommitDDTransaction(const CTransactionRef& tx, std::strin
             error = commit_error.empty() ? "Transaction rejected by mempool" : commit_error;
             LogPrintf("DigiDollar: CommitDDTransaction - REJECTED: %s\n", error);
             if (m_wallet->TransactionCanBeAbandoned(txid)) {
-                m_wallet->AbandonTransaction(txid);
-                LogPrintf("DigiDollar: CommitDDTransaction - Abandoned rejected local transaction %s\n",
-                          txid.ToString());
+                if (m_wallet->AbandonTransaction(txid)) {
+                    LogPrintf("DigiDollar: CommitDDTransaction - Abandoned rejected local transaction %s\n",
+                              txid.ToString());
+                } else {
+                    LogPrintf("DigiDollar: CommitDDTransaction - could not abandon rejected local transaction %s; "
+                              "the coins it spends stay committed to it\n", txid.ToString());
+                }
             }
             return false;
         }

@@ -56,10 +56,15 @@ public:
     // Block-tick orchestration
     void OnBlockConnected(const std::shared_ptr<const CBlock>& block, int32_t block_height);
 
-    // P2P broadcast
-    bool BroadcastMusigNonce(const OracleMusigNonceMsg& msg);
-    bool BroadcastMusigContext(const OracleMusigContextMsg& msg);
-    bool BroadcastMusigPartialSig(const OracleMusigPartialSigMsg& msg);
+    // P2P broadcast.
+    //
+    // Each of these returns the number of connected peers it handed the
+    // message to. Zero means nobody got it, whether that is because there is
+    // no connection manager or because no peer is connected yet. A caller that
+    // records a message as sent must check for zero first.
+    size_t BroadcastMusigNonce(const OracleMusigNonceMsg& msg);
+    size_t BroadcastMusigContext(const OracleMusigContextMsg& msg);
+    size_t BroadcastMusigPartialSig(const OracleMusigPartialSigMsg& msg);
     void SetConnman(CConnman* connman) { m_connman = connman; }
 
     // Query completed session for block assembly
@@ -109,7 +114,28 @@ public:
     void IngestRemotePartialSig(const OracleMusigPartialSigMsg& msg);
 
     static OracleSigningOrchestrator& GetInstance();
-    static void Initialize();
+    //! Build the one orchestrator, fully configured, and publish it. Pass the
+    //! connection manager it should broadcast through, or nullptr in a test
+    //! that never broadcasts. Call this before networking starts taking peers:
+    //! the global is read without a lock from several threads.
+    static void Initialize(CConnman* connman);
+
+    /**
+     * Stop delivering connected-block notifications to the orchestrator.
+     * Does nothing if there is no orchestrator. Call this early in shutdown so
+     * no new block work starts, then call Shutdown() once the scheduler thread
+     * that delivers those notifications has stopped.
+     */
+    static void StopBlockNotifications();
+
+    /**
+     * Destroy the orchestrator.
+     *
+     * Only call this once nothing can still be inside it: the scheduler thread
+     * that delivers block notifications must have stopped, and the remote
+     * procedure call server and the connection manager must be stopped too,
+     * because their threads also call in.
+     */
     static void Shutdown();
 
 protected:
@@ -145,6 +171,12 @@ private:
                                   MuSig2SigningSession& session) const;
     void BufferPendingPartialSig(const OracleMusigPartialSigMsg& msg);
     size_t DrainPendingPartialSigsForEpoch(int32_t epoch, MuSig2SigningSession& session);
+    /** Send again any nonce of ours for this epoch that no peer has yet. */
+    void ResendUnsentNonces(int32_t epoch);
+    /** Send our context proposal for this epoch again if no peer has it yet. */
+    void ResendUnsentContexts(int32_t epoch);
+    /** Send again any partial signature of ours for this epoch that no peer has. */
+    void ResendUnsentPartialSigs(int32_t epoch);
 
     CConnman* m_connman{nullptr};
     std::map<int32_t, std::unique_ptr<MuSig2SigningSession>> m_signing_sessions;
@@ -157,6 +189,23 @@ private:
     std::map<int32_t, uint256> m_epoch_selection_seeds;
     std::map<int32_t, uint8_t> m_epoch_attempts;
     std::map<int32_t, std::map<uint8_t, OracleMusigNonceMsg>> m_nonce_evidence;
+    // Our own oracle ids whose nonce for that epoch was generated and stored
+    // but has not reached a single peer yet. The session refuses to generate a
+    // second nonce for an oracle it already holds one for, so the message kept
+    // in m_nonce_evidence is the only copy that can still go out. An id leaves
+    // this list as soon as one peer has it.
+    std::map<int32_t, std::set<uint8_t>> m_unsent_nonces;
+    // The context id of our own proposal for that epoch, when the send reached no
+    // peer. The proposal itself stays in m_pending_contexts, so this holds only the
+    // key. BuildLocalContextProposal marks the proposer before the send happens and
+    // the proposer search skips anyone already marked, so without this the proposal
+    // is never offered again.
+    std::map<int32_t, uint256> m_unsent_contexts;
+    // Our own partial signatures that reached no peer, kept whole. Nothing else
+    // keeps them: the local path adds the signature to the session and sends the
+    // message without storing a copy, and it cannot be made again because signing
+    // consumes and removes the secret nonce.
+    std::map<int32_t, std::map<uint8_t, OracleMusigPartialSigMsg>> m_unsent_partialsigs;
     // Buffer context-bound partial sigs that arrive before local session enters SIGNING.
     std::map<int32_t, std::map<uint256, std::vector<OracleMusigPartialSigMsg>>> m_pending_partialsigs;
     mutable std::unique_ptr<CKey> m_cached_oracle_key;

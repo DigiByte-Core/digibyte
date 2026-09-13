@@ -443,8 +443,10 @@ BOOST_AUTO_TEST_CASE(p2tr_script_creation_through_transaction)
 
     TxBuilderResult result = builder.BuildMintTransaction(mintParams);
 
-    BOOST_CHECK(result.success);
-    BOOST_CHECK(result.tx.vout.size() >= 3); // Collateral + DD + OP_RETURN
+    // These two have to stop the test, not just record a failure. The checks
+    // below read the first outputs, and a build that was refused has none.
+    BOOST_REQUIRE(result.success);
+    BOOST_REQUIRE(result.tx.vout.size() >= 3); // Collateral + DD + OP_RETURN
 
     // First output should be collateral P2TR script (OP_1 + 32 bytes)
     BOOST_CHECK(result.tx.vout[0].scriptPubKey.size() == 34);

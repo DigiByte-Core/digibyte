@@ -71,11 +71,8 @@ class DigiDollarExpiredMintTest(DigiByteTestFramework):
         return {(entry["txid"], entry["vout"]) for entry in node.listlockunspent()}
 
     def mint_inputs(self, node, txid):
-        # The raw transaction is read here instead of through
-        # decoderawtransaction: that RPC returns a "digidollar" field it does
-        # not declare in its help, and a node started with -rpcdoccheck (which
-        # this test framework does) refuses the call for any DigiDollar
-        # transaction.
+        # The inputs are read out of the raw bytes rather than through
+        # decoderawtransaction, which saves a second round trip to the node.
         tx = tx_from_hex(node.gettransaction(txid)["hex"])
         return {("%064x" % vin.prevout.hash, vin.prevout.n) for vin in tx.vin}
 

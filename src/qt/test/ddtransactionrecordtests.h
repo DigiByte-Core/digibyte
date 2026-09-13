@@ -31,8 +31,12 @@ private Q_SLOTS:
     // The details window for a mint must name the DigiDollar amount, the
     // locked collateral, the lock period, the unlock height and the vault.
     void mintDetailsShowDigiDollarFacts();
-    // A transfer must produce the same rows it did before the mint work.
-    void transferRowsUnchanged();
+    // A transfer must show the DigiDollars on one row and the DigiByte fee on
+    // a row of its own, whichever of the two ways the wallet breaks it up.
+    void transferRowsShowDollarsAndFeeSeparately();
+    // A transfer's fee row must not be given the number of a real row in the
+    // same transaction.
+    void transferFeeRowNumberCannotClashWithARealRow();
     // The details window for a transfer must name the DigiDollar amounts.
     void transferDetailsShowDigiDollarAmounts();
     // A redemption keeps its two DGB rows and gains one row for DigiDollars

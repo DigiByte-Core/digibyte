@@ -40,6 +40,13 @@ CTxDestination CreateChangeDestination() {
     return CTxDestination{WitnessV0KeyHash(CreateTestKey().GetPubKey())};
 }
 
+// Where a redemption sends the collateral it unlocks. A wallet always names
+// this address. Without it the build refuses, because the whole vault would
+// otherwise go somewhere no wallet can spend from.
+CTxDestination CreateCollateralDestination() {
+    return CTxDestination{WitnessV1Taproot(XOnlyPubKey(CreateTestKey().GetPubKey()))};
+}
+
 // Helper function to create test UTXOs
 std::vector<COutPoint> CreateTestUTXOs(size_t count) {
     std::vector<COutPoint> utxos;
@@ -404,6 +411,7 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_basic)
     redeemParams.unlockHeight = 500; // Unlock at height 500 (current height is 1000, so timelock expired)
     // EXACT-AMOUNT REDEMPTION: DD UTXOs must contain exactly the amount being redeemed
     redeemParams.ddAmounts = {10000}; // DD UTXO contains exactly 10000 cents (matches ddMinted)
+    redeemParams.collateralDest = CreateCollateralDestination();
     redeemParams.dgbChangeDest = CreateChangeDestination();
 
     // Build redeem transaction
@@ -446,6 +454,7 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_requires_fee_inputs)
     redeemParams.ddMinted = 10000;
     redeemParams.unlockHeight = 500;
     redeemParams.ddAmounts = {10000};
+    redeemParams.collateralDest = CreateCollateralDestination();
 
     TxBuilderResult result = builder.BuildRedemptionTransaction(redeemParams);
 
@@ -479,9 +488,11 @@ TxBuilderRedeemParams MakeRedeemParams(CAmount feeRate = PRODUCTION_DD_FEE_RATE)
     params.feeRate = feeRate;
     params.ddUtxos = CreateTestUTXOs(1);
     params.ddAmounts = {10000};
-    // A wallet always tells the builder where to send the DGB left over after
-    // the fee. Without it the build refuses, rather than paying that money to
-    // an address nobody keeps the key for.
+    // A wallet always tells the builder where to send the collateral it
+    // unlocks, and where to send the DGB left over after the fee. Without
+    // those the build refuses, rather than paying that money to an address
+    // nobody keeps the key for.
+    params.collateralDest = CreateCollateralDestination();
     params.dgbChangeDest = CreateChangeDestination();
     params.collateralAmount = 30000000000; // 300 DGB
     params.ddMinted = 10000;
@@ -537,7 +548,6 @@ BOOST_AUTO_TEST_CASE(redeem_fee_estimate_matches_build_fee)
     TestRedeemTxBuilder builder(Params(), 1000, 10000);
     const CKey destKey = CreateTestKey();
     const std::vector<std::optional<CTxDestination>> destinations{
-        std::nullopt, // owner-key Taproot fallback
         CTxDestination{WitnessV1Taproot(XOnlyPubKey(destKey.GetPubKey()))},
         CTxDestination{WitnessV0KeyHash(destKey.GetPubKey())},
         CTxDestination{PKHash(destKey.GetPubKey())},
@@ -755,6 +765,7 @@ BOOST_AUTO_TEST_CASE(redeem_transaction_different_paths)
         redeemParams.unlockHeight = 500; // Unlock at height 500 (current height is 1000, so timelock expired)
         // EXACT-AMOUNT REDEMPTION: DD UTXOs must contain exactly the amount being redeemed
         redeemParams.ddAmounts = {10000}; // DD UTXO contains exactly 10000 cents (matches ddMinted)
+        redeemParams.collateralDest = CreateCollateralDestination();
         redeemParams.dgbChangeDest = CreateChangeDestination();
 
         TxBuilderResult result = builder.BuildRedemptionTransaction(redeemParams);

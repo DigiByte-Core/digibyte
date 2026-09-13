@@ -115,6 +115,9 @@ private Q_SLOTS:
     void mintWidgetRejectsUnsupportedWalletBeforeConfirmation_data();
     void mintWidgetRejectsUnsupportedWalletBeforeConfirmation();
     void mintWidgetPreservesEncryptedWalletUnlockFlow();
+    void redeemResultAlwaysReachesTheUser();
+    void transactionsConfirmationsColumnIsAlwaysACount();
+    void sendWidgetSaysWhyAnAmountIsRefused();
 };
 
 #endif // DIGIBYTE_QT_TEST_DIGIDOLLARWIDGETTESTS_H

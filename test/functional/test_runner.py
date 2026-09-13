@@ -291,6 +291,7 @@ BASE_SCRIPTS = [
     'digidollar_health_restart_consensus.py --legacy',
     'digidollar_thawday_integration.py',
     'digidollar_thawday_fresh_sync.py',
+    'digidollar_thawday_sync_state.py',
     'digidollar_thawday_node_matrix.py',
     'digidollar_oracle_startup_consensus.py',
     'digidollar_activation.py',
@@ -511,6 +512,7 @@ BASE_SCRIPTS = [
     'feature_dirsymlinks.py',
     'feature_help.py',
     'feature_shutdown.py',
+    'feature_shutdown_stopatheight.py',
     'wallet_migration.py',
     'p2p_ibd_txrelay.py',
     # Don't append tests at the end to avoid merge conflicts

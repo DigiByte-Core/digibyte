@@ -15,6 +15,7 @@
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <key_io.h>
+#include <node/interface_ui.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
 #include <pow.h>
@@ -660,9 +661,18 @@ void DigiDollarWidgetTests::mintWidgetUsesChainParamMintLimits()
     pos = 0;
     QCOMPARE(amountEdit->validator()->validate(maxAmount, pos), QValidator::Acceptable);
 
+    // An amount over the limit can be typed but is never acceptable, the same
+    // way an amount under the limit behaves. If the box refused the keystroke
+    // the number would silently change under the user's hands, and the warning
+    // line below the box would never get a chance to say what is wrong.
     QString aboveMax = QString::number((ddParams.maxMintAmount + 1) / 100.0, 'f', 2);
     pos = 0;
-    QCOMPARE(amountEdit->validator()->validate(aboveMax, pos), QValidator::Invalid);
+    QCOMPARE(amountEdit->validator()->validate(aboveMax, pos), QValidator::Intermediate);
+    amountEdit->setText(aboveMax);
+    QCoreApplication::processEvents();
+    QCOMPARE(amountEdit->text(), aboveMax);
+    QVERIFY2(warningLabel->text().contains("Maximum mint amount is $"),
+             qPrintable(warningLabel->text()));
 }
 
 void DigiDollarWidgetTests::mintConfirmationCopyExplainsConfirmationBuffer()
@@ -4933,7 +4943,8 @@ void DigiDollarWidgetTests::transactionsWidgetDoubleClickShowsDetailsDialog()
     QVERIFY2(plainDetails.contains(QString::fromStdString(tx.txid)), "details text must include the full transaction id");
     QVERIFY2(plainDetails.contains(QStringLiteral("Mint 1-yr")), "details text must include the transaction type");
     QVERIFY2(plainDetails.contains(QStringLiteral("+43.21 $DD")), "details text must include the signed $DD amount");
-    QVERIFY2(plainDetails.contains(QStringLiteral("Status:")), "details text must include the confirmation status");
+    QVERIFY2(plainDetails.contains(QStringLiteral("Confirmations:")),
+             "the details dialog must label the confirmation count for what it is");
     QVERIFY2(plainDetails.contains(QStringLiteral("detail dialog note")), "details text must include the local note");
 }
 
@@ -5732,4 +5743,97 @@ void DigiDollarWidgetTests::customTooltipRenderersNormalizeQtRichTextEnvelope()
              "OverviewPage should use GUIUtil::TooltipToHtml for custom tooltip rendering");
     QVERIFY2(transactionOverviewWidget.contains(QStringLiteral("GUIUtil::TooltipToHtml")),
              "TransactionOverviewWidget should use GUIUtil::TooltipToHtml for custom tooltip rendering");
+}
+
+
+void DigiDollarWidgetTests::redeemResultAlwaysReachesTheUser()
+{
+    // The wallet window turns a widget message into a dialog only when the
+    // message style carries the modal flag. Without that flag the words are
+    // handed to the desktop notification service, so on a machine with no
+    // notification service, or with notifications switched off, a user who
+    // redeems sees nothing at all: no transaction id, no confirmation, and no
+    // reason when the redemption is refused.
+    const unsigned int done = DigiDollarRedeemWidget::resultMessageStyle(true);
+    const unsigned int refused = DigiDollarRedeemWidget::resultMessageStyle(false);
+
+    QVERIFY2(done & CClientUIInterface::MODAL,
+             "a finished redemption must open a dialog, not a desktop notification");
+    QVERIFY2(refused & CClientUIInterface::MODAL,
+             "a refused redemption must open a dialog, not a desktop notification");
+    QVERIFY2(refused & CClientUIInterface::ICON_ERROR,
+             "a refused redemption must be shown as an error");
+
+    const QString txid = QStringLiteral("eba20fe261ed7f7c0000000000000000000000000000000000000000004c610f");
+    const QString text = DigiDollarRedeemWidget::redemptionBroadcastText(txid);
+    QVERIFY2(text.contains(txid), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("broadcast"), Qt::CaseInsensitive), qPrintable(text));
+}
+
+void DigiDollarWidgetTests::transactionsConfirmationsColumnIsAlwaysACount()
+{
+    // The Confirmations column used to print the number for the first five
+    // blocks and the word "Confirmed" after that, so one list held both a
+    // number and a word. It now shows the count for anything in a block, and a
+    // word only where there is no count to show.
+    DigiDollarTransactionsWidget widget;
+
+    QCOMPARE(widget.confirmationsTextForTesting(1), QStringLiteral("1"));
+    QCOMPARE(widget.confirmationsTextForTesting(5), QStringLiteral("5"));
+    QCOMPARE(widget.confirmationsTextForTesting(6), QStringLiteral("6"));
+    QCOMPARE(widget.confirmationsTextForTesting(1440), QStringLiteral("1440"));
+
+    QCOMPARE(widget.confirmationsTextForTesting(0), QStringLiteral("Pending"));
+    QCOMPARE(widget.confirmationsTextForTesting(0, false, true), QStringLiteral("Local"));
+    QCOMPARE(widget.confirmationsTextForTesting(-1), QStringLiteral("Conflicted"));
+    QCOMPARE(widget.confirmationsTextForTesting(3, true), QStringLiteral("Abandoned"));
+}
+
+void DigiDollarWidgetTests::sendWidgetSaysWhyAnAmountIsRefused()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget sendWidget(platformStyle.get());
+
+    QLineEdit* amountEdit = sendWidget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(amountEdit != nullptr);
+    QLabel* amountMessage = sendWidget.findChild<QLabel*>("amountValidationLabel");
+    QVERIFY2(amountMessage != nullptr, "the amount box must have a line under it that explains itself");
+
+    // With nothing typed the form says what it will take.
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("1.00")), qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("100000.00")), qPrintable(amountMessage->text()));
+
+    // Below the minimum. This used to turn the box red and say nothing.
+    amountEdit->setText(QStringLiteral("0.50"));
+    QCoreApplication::processEvents();
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("smallest"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("1.00")), qPrintable(amountMessage->text()));
+
+    // Over the limit. The box takes the number so the user can see what they
+    // typed, and the line under it says which limit was passed.
+    amountEdit->setText(QStringLiteral("200000"));
+    QCoreApplication::processEvents();
+    QCOMPARE(amountEdit->text(), QStringLiteral("200000"));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("most you can send"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("100000.00")), qPrintable(amountMessage->text()));
+
+    // More than the wallet holds. With no wallet model the balance is zero, so
+    // any amount inside the limits is more than the balance.
+    amountEdit->setText(QStringLiteral("25.00"));
+    QCoreApplication::processEvents();
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("only have"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+
+    // The Send button stays off for every one of those.
+    QPushButton* sendButton = sendWidget.findChild<QPushButton*>("sendButton");
+    QVERIFY(sendButton != nullptr);
+    QVERIFY2(!sendButton->isEnabled(), "an amount the form refuses must leave the Send button off");
 }

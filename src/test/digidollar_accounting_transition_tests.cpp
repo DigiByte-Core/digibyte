@@ -10,6 +10,7 @@
 #include <key.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
+#include <txdb.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -396,6 +397,112 @@ BOOST_AUTO_TEST_CASE(failed_helper_updates_preserve_the_complete_previous_state)
     BOOST_CHECK(!DigiDollar::CalculateCirculatingSupplyChange(
         *redeem.tx, {}, redeem.height, params, lookup, delta, error));
     BOOST_CHECK_EQUAL(delta, 123);
+}
+
+
+// A mint that is already in the chain but whose amount cannot be read is not the
+// same thing as a block the node has lost. Every node reading the same block gets
+// the same answer, so such an output is simply not a collateral vault. Treating it
+// as missing data would stop every upgraded node at the Thaw Day height with no
+// way out, because the "restore the block" advice is about a block it already has.
+BOOST_AUTO_TEST_CASE(unreadable_legacy_mint_is_not_a_vault)
+{
+    // A mint whose DigiDollar OP_RETURN carries no amount at all.
+    CMutableTransaction no_amount;
+    no_amount.nVersion = MakeDigiDollarVersion(DD_TX_MINT);
+    no_amount.vin.emplace_back(COutPoint{uint256S("11"), 0});
+    no_amount.vout.emplace_back(500 * COIN, FreshTaproot());
+    no_amount.vout.emplace_back(0, CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+        << CScriptNum(1));
+    const auto unreadable = Store(no_amount, 20, {});
+    const auto unreadable_vault = Output(unreadable, 0);
+
+    // A mint with two positive canonical Taproot outputs, so no single output can
+    // be named as the collateral.
+    CMutableTransaction two_vaults;
+    two_vaults.nVersion = MakeDigiDollarVersion(DD_TX_MINT);
+    two_vaults.vin.emplace_back(COutPoint{uint256S("12"), 0});
+    two_vaults.vout.emplace_back(300 * COIN, FreshTaproot());
+    two_vaults.vout.emplace_back(200 * COIN, FreshTaproot());
+    two_vaults.vout.emplace_back(0, CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+        << CScriptNum(1) << CScriptNum(100000) << CScriptNum(500) << CScriptNum(0));
+    const auto ambiguous = Store(two_vaults, 20, {});
+    const auto ambiguous_vault = Output(ambiguous, 0);
+
+    for (const auto& source : {unreadable_vault, ambiguous_vault}) {
+        DigiDollar::CanonicalVault vault;
+        std::string error;
+        BOOST_CHECK(DigiDollar::LookupCanonicalVault(source.outpoint, source.coin, params, lookup, vault, error) ==
+                    DigiDollar::VaultLookupResult::NOT_VAULT);
+        BOOST_CHECK(vault.outpoint.IsNull());
+        BOOST_CHECK_EQUAL(vault.principal, 0);
+        BOOST_CHECK_EQUAL(vault.collateral, 0);
+    }
+
+    // The same coins in a reconstruction: left out of the totals, and the
+    // reconstruction still finishes instead of reporting that data is missing.
+    CCoinsViewDB db{{.path = m_args.GetDataDirNet() / "dd-unreadable-mint", .cache_bytes = 1 << 20, .memory_only = true}, {}};
+    CCoinsViewCache cache{&db};
+    cache.SetBestBlock(uint256S("21"));
+    for (const auto& source : {unreadable_vault, ambiguous_vault}) {
+        cache.AddCoin(source.outpoint, Coin{source.coin}, false);
+    }
+    const auto good = Mint(100000, 1000 * COIN);
+    const auto good_vault = Output(good, 1);
+    cache.AddCoin(good_vault.outpoint, Coin{good_vault.coin}, false);
+    DigiDollar::ChainstateHealth health;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(cache, params, lookup, health, error), error);
+    BOOST_CHECK_EQUAL(health.active_vaults, 1U);
+    BOOST_CHECK_EQUAL(health.open_vault_principal, 100000);
+    BOOST_CHECK_EQUAL(health.collateral, 1000 * COIN);
+
+    // A creating block the node really cannot read is still a readiness failure.
+    DigiDollar::CanonicalVault vault;
+    BOOST_CHECK(DigiDollar::LookupCanonicalVault(good_vault.outpoint, good_vault.coin, params, {}, vault, error) ==
+                DigiDollar::VaultLookupResult::NOT_READY);
+    BOOST_CHECK(!error.empty());
+}
+
+BOOST_AUTO_TEST_CASE(spent_vault_is_not_recounted_before_cache_flush)
+{
+    const CAmount principal = 100000;
+    const CAmount collateral = 1000 * COIN;
+    const auto original = Mint(principal, collateral);
+    CMutableTransaction tx{*original.tx};
+    tx.vout.assign(16513, CTxOut{1, CScript{} << OP_TRUE});
+    tx.vout[256] = original.tx->vout[1];
+    tx.vout[0] = original.tx->vout[2];
+    tx.vout[1] = original.tx->vout[3];
+    const auto mint = Store(tx, original.height, original.inputs);
+    const auto vault = Output(mint, 256);
+    DigiDollar::CanonicalVault canonical;
+    std::string error;
+    BOOST_REQUIRE(DigiDollar::LookupCanonicalVault(vault.outpoint, vault.coin, params, lookup, canonical, error) ==
+                  DigiDollar::VaultLookupResult::VAULT);
+
+    CCoinsViewDB db{{.path = m_args.GetDataDirNet() / "dd-spent-vault", .cache_bytes = 1 << 20, .memory_only = true}, {}};
+    CCoinsViewCache cache{&db};
+    cache.SetBestBlock(uint256S("21"));
+    for (uint32_t index : {128, 256, 16512}) {
+        const auto output = Output(mint, index);
+        cache.AddCoin(output.outpoint, Coin{output.coin}, false);
+    }
+    BOOST_REQUIRE(cache.Flush());
+    DigiDollar::ChainstateHealth health;
+    BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(cache, params, lookup, health, error), error);
+    BOOST_CHECK_EQUAL(health.active_vaults, 1U);
+    BOOST_CHECK_EQUAL(health.open_vault_principal, principal);
+    BOOST_CHECK_EQUAL(health.collateral, collateral);
+
+    BOOST_REQUIRE(cache.SpendCoin(vault.outpoint));
+    for (bool flush : {false, true}) {
+        if (flush) BOOST_REQUIRE(cache.Flush());
+        BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(cache, params, lookup, health, error), error);
+        BOOST_CHECK_EQUAL(health.active_vaults, 0U);
+        BOOST_CHECK_EQUAL(health.open_vault_principal, 0);
+        BOOST_CHECK_EQUAL(health.collateral, 0);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

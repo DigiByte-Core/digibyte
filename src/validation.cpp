@@ -3495,7 +3495,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 }
 
                 // Create validation context with current blockchain state
-                // IMPORTANT: During block connect, skip oracle-dependent validation.
+                // IMPORTANT: below the Thaw Day height, block connect skips
+                // oracle-dependent validation.
                 // Historical blocks were already validated when first mined with the oracle
                 // price that was valid at that time. We cannot re-validate them with current
                 // prices as that would cause consensus failures on valid historical blocks.
@@ -3516,7 +3517,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                     pindex->nHeight < m_chainman.m_best_header->nHeight;
                 const DigiDollar::DigiDollarTxType ddTxType = DigiDollar::GetDigiDollarTxType(tx);
                 const bool fPriceIndependentTransfer = ddTxType == DigiDollar::DD_TX_TRANSFER && blockOraclePrice <= 0;
-                const bool fSkipOracle = fInIBD || (fCatchingUp && blockOraclePrice <= 0) || fPriceIndependentTransfer;
+                // From the Thaw Day height on, none of the above may reach the
+                // DigiDollar checks: how far this node has synced is its own
+                // business and must never decide whether a block is valid. Below
+                // that height the old value is kept exactly, because the blocks
+                // already on the chain were accepted with it.
+                const bool fSkipOracle = !canonical &&
+                    (fInIBD || (fCatchingUp && blockOraclePrice <= 0) || fPriceIndependentTransfer);
 
                 DigiDollar::ValidationContext ddContext(
                     pindex->nHeight,
@@ -3652,15 +3659,30 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             canonical_health->history_checked = true;
             view.SetDigiDollarState(canonical_health);
         } else {
-            view.SetDigiDollarState(std::nullopt);
-            if (pindex->nHeight < std::numeric_limits<int>::max() &&
+            // Below the Thaw Day height a block has no accounting record of its own.
+            // The one block before that height is the exception: its record is the
+            // starting point the first Thaw Day block is checked against, so it is
+            // built here.
+            //
+            // Only do that when the block is really being connected. Building the
+            // record walks the whole coin database and reads a block from disk for
+            // every unspent DigiDollar output. A mining template and a database
+            // verification pass throw their coins view away afterwards, so doing it
+            // there would repeat that walk for nothing - once for every template,
+            // while miners ask for work several times a second. Both of those paths
+            // reach the record they need from the connected block instead.
+            bool prepared{false};
+            if (!fJustCheck && pindex->nHeight < std::numeric_limits<int>::max() &&
                 DigiDollar::IsThawDayActive(params.GetConsensus(), pindex->nHeight + 1)) {
                 std::string reason;
                 // Preparation cannot add an invalidity rule to the legacy block.
-                if (!PrepareDigiDollarParent(view, pindex, params.GetConsensus(), m_blockman, reason,
-                        [this] { return static_cast<bool>(m_chainman.m_interrupt); }))
-                    LogPrintf("%s\n", reason);
+                prepared = PrepareDigiDollarParent(view, pindex, params.GetConsensus(), m_blockman, reason,
+                        [this] { return static_cast<bool>(m_chainman.m_interrupt); });
+                if (!prepared) LogPrintf("%s\n", reason);
             }
+            // Clearing after the attempt, not before it, lets a record that already
+            // belongs to this exact block be kept instead of rebuilt from scratch.
+            if (!prepared) view.SetDigiDollarState(std::nullopt);
         }
     };
     if (fJustCheck) {

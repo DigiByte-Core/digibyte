@@ -669,12 +669,12 @@ void DigiDollarMintWidget::onLockTierChanged()
 void DigiDollarMintWidget::onMintClicked()
 {
     if (!m_walletModel) {
-        Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+        Q_EMIT message(tr("Error"), tr("No wallet model available"), CClientUIInterface::MSG_ERROR);
         return;
     }
     const QString capability_error = m_walletModel->getDigiDollarMintWalletError();
     if (!capability_error.isEmpty()) {
-        Q_EMIT message(tr("Cannot Mint DigiDollar"), capability_error, QMessageBox::Warning);
+        Q_EMIT message(tr("Cannot Mint DigiDollar"), capability_error, CClientUIInterface::MSG_WARNING);
         return;
     }
 
@@ -692,7 +692,12 @@ void DigiDollarMintWidget::onMintClicked()
     // Refresh oracle price (updates m_oraclePrice)
     updateOraclePrice(); // also calls updateCollateralCalculation()
 
-    // Re-validate after refresh — balance may no longer cover new collateral
+    // Re-validate after refresh — balance may no longer cover new collateral.
+    // The style below decides how the wallet window shows this. Only a style
+    // carrying the modal flag opens a dialog; anything else is handed to the
+    // desktop notification service, which may be missing or switched off, and
+    // then a refused mint tells the user nothing. Every message from this form
+    // uses a modal style for that reason.
     if (!validateCollateral()) {
         Q_EMIT message(tr("Insufficient Collateral"),
                        tr("The oracle price has changed and you no longer have "
@@ -700,7 +705,7 @@ void DigiDollarMintWidget::onMintClicked()
                           "Required: %1\nAvailable: %2")
                        .arg(formatDGBAmount(m_requiredCollateral))
                        .arg(formatDGBAmount(m_availableDGBBalance)),
-                       QMessageBox::Warning);
+                       CClientUIInterface::MSG_WARNING);
         return;
     }
 
@@ -742,7 +747,7 @@ void DigiDollarMintWidget::onMintClicked()
         if (!validateAmount()) {
             Q_EMIT message(tr("Invalid Amount"),
                            tr("The mint amount is no longer valid under the active chain limits."),
-                           QMessageBox::Warning);
+                           CClientUIInterface::MSG_WARNING);
             return false;
         }
 
@@ -753,7 +758,7 @@ void DigiDollarMintWidget::onMintClicked()
                               "Required: %1\nAvailable: %2")
                            .arg(formatDGBAmount(m_requiredCollateral))
                            .arg(formatDGBAmount(m_availableDGBBalance)),
-                           QMessageBox::Warning);
+                           CClientUIInterface::MSG_WARNING);
             return false;
         }
 
@@ -768,7 +773,7 @@ void DigiDollarMintWidget::onMintClicked()
                            .arg(formatDGBAmount(previousCollateral))
                            .arg(formatUSDAmount(m_oraclePrice))
                            .arg(formatUSDAmount(previousOraclePrice)),
-                           QMessageBox::Information);
+                           CClientUIInterface::MSG_INFORMATION | CClientUIInterface::BTN_OK | CClientUIInterface::MODAL);
             return false;
         }
 
@@ -879,7 +884,7 @@ void DigiDollarMintWidget::onMintClicked()
         }
 
         if (!m_walletModel) {
-            Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+            Q_EMIT message(tr("Error"), tr("No wallet model available"), CClientUIInterface::MSG_ERROR);
             return;
         }
 
@@ -953,7 +958,7 @@ void DigiDollarMintWidget::onMintClicked()
                 break;
             }
 
-            Q_EMIT message(errorTitle, errorMessage, QMessageBox::Critical);
+            Q_EMIT message(errorTitle, errorMessage, CClientUIInterface::MSG_ERROR);
         }
     }
 }

@@ -139,6 +139,21 @@ static bool ReadCanonicalTokenAmount(const COutPoint& outpoint, const Coin& coin
     return true;
 }
 
+// Whether the oracle-dependent checks are being skipped for this candidate.
+//
+// The skip flag is set from how far the node doing the checking has got: a node
+// that is still downloading blocks sets it, a node that is up to date does not.
+// That means two honest nodes could reach different answers about the same
+// block, which is a chain split. Below the Thaw Day height the flag is still
+// honoured, and must be: the blocks already on the chain were accepted under it
+// and every existing node would disagree with a new one if that moved. From the
+// Thaw Day height on the flag is ignored, so whether a block is valid depends
+// only on that block and the chain it builds on.
+static bool OracleChecksSkipped(const ValidationContext& ctx)
+{
+    return ctx.skipOracleValidation && !IsThawDayActive(ctx.params.GetConsensus(), ctx.nHeight);
+}
+
 static std::optional<int> ResolveCanonicalHealth(const ValidationContext& ctx,
                                                  const char* operation)
 {
@@ -1554,7 +1569,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
 
     // 4. Calculate DD amount if not extracted from metadata (skip for historical blocks)
     // For mint transactions, DD amount = (collateral * oracle_price * 100) / (collateral_ratio * COIN)
-    if (!ctx.skipOracleValidation && hasDDOutput && totalDD == 0 && totalCollateral > 0) {
+    if (!OracleChecksSkipped(ctx) && hasDDOutput && totalDD == 0 && totalCollateral > 0) {
         // Calculate DD amount from collateral and oracle price
         CAmount oraclePrice = ctx.oraclePriceMicroUSD;
         if (oraclePrice <= 0) {
@@ -1562,15 +1577,32 @@ bool ValidateMintTransaction(const CTransaction& tx,
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "invalid-oracle-price");
         }
 
-        // Calculate max DD that can be minted with this collateral at minimum ratio
-        // Oracle price is in cents (100 = $1.00), DD is in cents (100 = $1.00)
-        // DD_cents = (collateral_sats * price_cents) / (min_ratio * COIN)
-        // But we don't know the tier/ratio yet, so use a conservative 200% (tier 1)
-        int minRatio = 200;
-        totalDD = (totalCollateral * oraclePrice) / (minRatio * COIN);
-
-        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculated DD amount from collateral: %d cents ($%.2f) from %d DGB at %d cents\n",
-                  totalDD, totalDD / 100.0, totalCollateral / COIN, oraclePrice);
+        // Work out roughly how much DigiDollar this collateral could back, so
+        // the log has a figure in it. The lock tier is not known here, so this
+        // uses the strictest ratio, 200%.
+        //
+        // This figure never decides anything. Reaching this point means the
+        // transaction carries no DigiDollar OP_RETURN, and the lock height check
+        // a few lines below refuses every such transaction.
+        //
+        // The multiply is done in a 128-bit type on purpose. One collateral
+        // output of about 14.2 million DGB, at a DGB price near today's, does
+        // not fit in a 64-bit money amount once multiplied by the price. In
+        // 64 bits that multiply wraps round, which is undefined behaviour in
+        // a rule the whole network has to agree on.
+        const int minRatio = 200;
+        const __int128 estimate = (static_cast<__int128>(totalCollateral) * oraclePrice)
+                                  / (static_cast<__int128>(minRatio) * COIN);
+        if (estimate < 0 || estimate > std::numeric_limits<CAmount>::max()) {
+            // The numbers are far outside anything real, so there is no amount
+            // to report. Leave it at zero; the checks below refuse this
+            // transaction either way.
+            LogPrintf("DigiDollar: Collateral and price are too large to work out a DigiDollar amount\n");
+        } else {
+            totalDD = static_cast<CAmount>(estimate);
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Calculated DD amount from collateral: %d cents ($%.2f) from %d DGB at %d cents\n",
+                     totalDD, totalDD / 100.0, totalCollateral / COIN, oraclePrice);
+        }
     }
 
     // 5. Ensure we have both required output types
@@ -2355,9 +2387,13 @@ bool ValidateNormalRedemptionConditions(const CTransaction& tx,
                                     ctx.nHeight, tx.nLockTime));
     }
 
-    // Check if ERR (Emergency Redemption Ratio) is active (skip for historical blocks)
-    // Use systemCollateral from context (percentage, where 100 = 100% collateralized)
-    if (!ctx.skipOracleValidation && ctx.systemCollateral < 100) {
+    // A redemption that burns only the original amount is not allowed while
+    // system health is below 100 per cent; the owner has to burn extra
+    // DigiDollars instead. Below the Thaw Day height this check is skipped when
+    // the oracle checks are skipped, exactly as it always has been. From the
+    // Thaw Day height on it always runs, so a node still downloading blocks and
+    // a node that is up to date give the same answer for the same block.
+    if (!OracleChecksSkipped(ctx) && ctx.systemCollateral < 100) {
         LogPrintf("DigiDollar: Normal redemption rejected - ERR active (system health: %d%%)\n", ctx.systemCollateral);
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "redemption-err-active",
                             strprintf("ERR active - system health %d%% (normal redemptions blocked)", ctx.systemCollateral));

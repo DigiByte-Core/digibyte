@@ -1,4 +1,21 @@
 DigiByte Core version 9.26.6
+
+> **THIS IS A DEVELOPMENT CANDIDATE, NOT THE FINISHED RELEASE.**
+>
+> No public network has a Thaw Day height set in this source. Every network ships with the field disabled, and
+> the option that would set one is refused on any public network. So installing this build activates nothing.
+>
+> That is correct for testing and wrong for distribution. The plan requires the agreed heights to be in the
+> source that is tagged and shipped, as one coordinated release, because an announcement cannot activate binaries
+> that people have already installed. Shipping these notes as written would leave every fix that waits on Thaw
+> Day inactive on every node that installed it.
+>
+> Before distribution: the release owner puts the approved heights into the tagged source, keeps one height per
+> network, retains the promised upgrade window, and the resulting candidate is tested again. These notes are then
+> finalised around that release.
+>
+> The independent review of this candidate said **no go** for release, for replacing a live wallet, and for
+> starting the final reindex. Its report and the open items are in the private review tree.
 ============================
 
 DigiByte Core v9.26.6 is a repair release. It fixes crashes and hangs, repairs

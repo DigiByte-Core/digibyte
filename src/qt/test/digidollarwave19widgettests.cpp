@@ -502,6 +502,58 @@ void DigiDollarWave19WidgetTests::walletModelAndSendValidatorRejectCrossNetworkD
              "DD-FA-FUNC-063: send widget validator must reject checksum-corrupted DD address");
 }
 
+// A DigiDollar address must be typeable, not just pasteable. The box used to
+// refuse the 42nd character, so anyone typing an address got stuck at 41 and
+// the form told them the address was invalid.
+void DigiDollarWave19WidgetTests::sendAddressValidatorTakesAnAddressTypedOneCharacterAtATime()
+{
+    if (MaybeSkipMacMinimal()) return;
+    BasicTestingSetup setup{ChainType::REGTEST};
+
+    const QString address = QString::fromStdString(
+        Wave19EncodeDigiDollarAddressFor(CChainParams::DIGIDOLLAR_ADDRESS_REGTEST));
+    QVERIFY2(address.length() == 52,
+             qPrintable(QString("a DigiDollar address is 52 characters, this one is %1")
+                            .arg(address.length())));
+
+    DigiDollarAddressValidator validator;
+
+    // Every keystroke on the way to a whole address must be taken.
+    for (int typed = 1; typed < address.length(); ++typed) {
+        QString sofar = address.left(typed);
+        int pos = typed;
+        QVERIFY2(validator.validate(sofar, pos) != QValidator::Invalid,
+                 qPrintable(QString("the address box refused character %1 of %2 ('%3')")
+                                .arg(typed)
+                                .arg(address.length())
+                                .arg(sofar)));
+    }
+
+    // The finished address is accepted.
+    QString whole = address;
+    int pos = whole.length();
+    QCOMPARE(validator.validate(whole, pos), QValidator::Acceptable);
+
+    // Text that does not start the way an address starts can never become one,
+    // so it is refused.
+    QString wrongStart("XD3");
+    pos = wrongStart.length();
+    QCOMPARE(validator.validate(wrongStart, pos), QValidator::Invalid);
+
+    // Text longer than an address can never become one either.
+    QString tooLong = address + QStringLiteral("A");
+    pos = tooLong.length();
+    QCOMPARE(validator.validate(tooLong, pos), QValidator::Invalid);
+
+    // A finished address with a mistake in it is kept, not refused, so the
+    // person can correct it in place and the form can say what is wrong. It is
+    // never acceptable.
+    QString typo = address;
+    typo[20] = (typo.at(20) == QChar('a')) ? QChar('b') : QChar('a');
+    pos = typo.length();
+    QCOMPARE(validator.validate(typo, pos), QValidator::Intermediate);
+}
+
 void DigiDollarWave19WidgetTests::sendAmountValidatorUsesCentsPrecisionAndBounds()
 {
     AmountValidator validator(1.00, 100000.00, 2);
@@ -516,8 +568,13 @@ void DigiDollarWave19WidgetTests::sendAmountValidatorUsesCentsPrecisionAndBounds
     QString extraPrecision("1.00000001");
     QCOMPARE(validator.validate(extraPrecision, pos), QValidator::Invalid);
     pos = 0;
-    QString oldMax("999999999");
-    QCOMPARE(validator.validate(oldMax, pos), QValidator::Invalid);
+    // An amount over the limit can be typed but can never be sent. If the box
+    // refused the keystroke, typing 200000 would leave 20000 sitting there and
+    // nothing would say why, so the form takes the number and then explains it.
+    QString overMax("999999999");
+    QCOMPARE(validator.validate(overMax, pos), QValidator::Intermediate);
+    QVERIFY2(validator.validate(overMax, pos) != QValidator::Acceptable,
+             "an amount over the limit must never be acceptable");
 }
 
 void DigiDollarWave19WidgetTests::mintWidgetUsdEquivalentUsesCentsPrecision()

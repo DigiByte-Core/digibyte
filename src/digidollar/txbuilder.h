@@ -90,14 +90,15 @@ struct TxBuilderRedeemParams {
     std::vector<COutPoint> feeUtxos; // DGB UTXOs for fees
     std::vector<CAmount> feeAmounts; // Amounts of fee UTXOs
 
-    // Optional: Destination for returned collateral (if not set, uses ownerKey pubkey)
+    // Where the collateral this redemption unlocks is paid. That is the whole
+    // vault, so it always gets its own output. Set this to an address the
+    // wallet owns, or to the address the user asked for. If it is not set the
+    // build fails and no transaction is made.
     std::optional<CTxDestination> collateralDest;
 
     // Where leftover fee money goes. Set this to an address the wallet owns so
     // it stays in its own output, separate from the returned collateral. If it
-    // is not set, the collateral address above is used instead. If neither is
-    // set and there is change to pay, the build fails and no transaction is
-    // made.
+    // is not set, the collateral address above is used instead.
     std::optional<CTxDestination> dgbChangeDest;
 
     // Optional pre-queried position data (caller can provide to avoid UTXO lookups)

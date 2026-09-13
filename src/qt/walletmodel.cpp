@@ -1182,6 +1182,13 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Step 10 - Saved position %s (%d DD cents) and its owner key before broadcast\n",
                   positionId.GetHex(), ddAmount);
 
+        // From here until the transaction has been committed, anything that
+        // stops this mint must not leave those records behind, because they
+        // would describe a transaction that was never sent. This releases them
+        // whichever way the mint gives up, including the check below that the
+        // chain and the oracle quote have not moved.
+        DigiDollarWallet::SavedMintCleanup saved_mint_cleanup(*ddWallet, positionId, "DigiDollar Qt Mint");
+
         // Step 11: Commit through the wallet relay path, which broadcasts once
         // and updates wallet/mempool state from the same code path.
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Step 11 - Committing transaction through wallet relay...\n");
@@ -1202,25 +1209,21 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         }
         if (!commit_success) {
             LogPrintf("DigiDollar Qt: ERROR - Failed to commit transaction: %s\n", commit_error);
-            // The mempool (or the wallet itself) refused the transaction.
-            // Release what this attempt reserved: its DGB inputs, the coin
-            // locks on the collateral and token outputs, and its active
-            // status. The owner key and the record of the attempt stay, so a
-            // reorg or a late confirmation can bring the vault back.
-            // Abandoning the transaction also keeps a refused mint out of the
-            // transaction list, which otherwise shows any DigiDollar-shaped
-            // wallet transaction as collateral lock activity that never
-            // happened.
-            std::string cleanup_error;
-            if (!ddWallet->ReleaseMintAttempt(positionId, cleanup_error)) {
-                LogPrintf("DigiDollar Qt: could not release rejected mint %s: %s\n",
-                          positionId.GetHex(), cleanup_error);
-            } else {
-                LogPrintf("DigiDollar Qt: Released rejected mint transaction %s\n", positionId.GetHex());
-            }
+            // The mempool (or the wallet itself) refused the transaction. The
+            // cleanup set up above releases what this attempt reserved as the
+            // mint gives up: its DGB inputs, the coin locks on the collateral
+            // and token outputs, and its active status. The owner key and the
+            // record of the attempt stay, so a reorg or a late confirmation can
+            // bring the vault back. Abandoning the transaction also keeps a
+            // refused mint out of the transaction list, which otherwise shows
+            // any DigiDollar-shaped wallet transaction as collateral lock
+            // activity that never happened.
             return DigiDollarMintResult(TransactionCreationFailed, "", "",
                 QString("Failed to broadcast transaction: %1").arg(QString::fromStdString(commit_error)));
         }
+        // The transaction is in the wallet now, so the records saved above
+        // describe something real. Keep them.
+        saved_mint_cleanup.KeepRecords();
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Transaction broadcast successful!\n");
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Position stored in wallet - ID: %s, DD: %d, DGB: %d, Tier: %d\n",
                   positionId.GetHex(), ddAmount, result.collateralRequired, lockTier);

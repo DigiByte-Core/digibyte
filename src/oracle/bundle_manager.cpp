@@ -1687,6 +1687,11 @@ OracleBundleManager::OracleStats OracleBundleManager::GetStats() const
 
 OracleBundleManager& OracleBundleManager::GetInstance()
 {
+    // The same race the oracle manager had: two callers arriving together both saw
+    // no manager, both built one, and the loser's reference pointed at a destroyed
+    // object. Build it once.
+    static std::mutex creation;
+    std::lock_guard<std::mutex> lock(creation);
     if (!g_oracle_bundle_manager) {
         g_oracle_bundle_manager = std::make_unique<OracleBundleManager>();
     }

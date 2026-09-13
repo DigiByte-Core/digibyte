@@ -25,6 +25,7 @@
 #include <array>
 #include <cstring>
 #include <vector>
+#include <mutex>
 
 // Global instance pointer
 MockOracleManager* MockOracleManager::instance = nullptr;
@@ -177,6 +178,13 @@ CKey MockOracleManager::GetTestKey(uint32_t oracle_id) const
 
 MockOracleManager& MockOracleManager::GetInstance()
 {
+    // Two callers arriving together both used to see no manager and both build one.
+    // Nothing is ever deleted here, so the loser keeps a usable pointer rather than a
+    // freed one, but the two would then hold different managers and disagree about the
+    // mock price. Build it once. This is the same shape that had to be fixed in the
+    // real oracle manager, where it was a use-after-free rather than a leak.
+    static std::mutex creation;
+    std::lock_guard<std::mutex> lock(creation);
     if (!instance) {
         instance = new MockOracleManager();
     }

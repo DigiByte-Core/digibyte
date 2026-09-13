@@ -30,11 +30,15 @@
 #include <txmempool.h>
 #include <util/chaintype.h>
 #include <validation.h>
+#include <validationinterface.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <cstddef>
 #include <memory>
+#include <string_view>
+#include <thread>
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -133,6 +137,42 @@ size_t CountLiveMintTransactions(wallet::CWallet& wallet)
         if (GetDigiDollarTxType(*wtx.tx) == DigiDollarTxType::DD_TX_MINT) ++live;
     }
     return live;
+}
+
+//! True when a wallet database key belongs to a record of this kind. Keys start
+//! with the record's name, for example "ddposition" or "ddownerkey".
+bool KeyIsRecord(Span<const std::byte> key, std::string_view name)
+{
+    const std::string_view text{reinterpret_cast<const char*>(key.data()), key.size()};
+    return text.find(name) != std::string_view::npos;
+}
+
+//! How many DigiDollar owner keys the wallet file holds. A mint that is given
+//! up on keeps its owner key, because that is the one thing that could not be
+//! worked out again if the transaction somehow reached a block after all.
+size_t CountOwnerKeysInWalletFile(wallet::CWallet& wallet)
+{
+    size_t rows = 0;
+    for (const auto& [key, value] : GetMockableDatabase(wallet).m_records) {
+        if (KeyIsRecord(Span{key.data(), key.size()}, "ddownerkey")) ++rows;
+    }
+    return rows;
+}
+
+//! Nothing may be left of a mint that was never sent. A leftover token record
+//! counts towards this wallet's DigiDollar balance and is offered for spending,
+//! so the owner would be shown DigiDollars that cannot be spent.
+void CheckNothingIsLeftOfTheMint(wallet::CWallet& wallet, CTxMemPool& mempool)
+{
+    DigiDollarWallet* dd_wallet = wallet.GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+    QCOMPARE(dd_wallet->GetDDTimeLocks(/*active_only=*/false).size(), static_cast<size_t>(0));
+    QCOMPARE(dd_wallet->GetTotalDDBalance(), CAmount(0));
+    QCOMPARE(dd_wallet->GetDDUTXOs(/*include_unconfirmed=*/true).size(), static_cast<size_t>(0));
+    QCOMPARE(dd_wallet->GetLockedCollateral(), CAmount(0));
+    QCOMPARE(CountLiveMintTransactions(wallet), static_cast<size_t>(0));
+    QCOMPARE(mempool.size(), static_cast<size_t>(0));
+    QCOMPARE(CountOwnerKeysInWalletFile(wallet), static_cast<size_t>(1));
 }
 
 } // namespace
@@ -249,6 +289,103 @@ void DigiDollarMintRecordTests::mintDoesNotSendWhenTheWalletCannotSaveIt()
     DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
     QVERIFY(dd_wallet != nullptr);
     QCOMPARE(dd_wallet->GetDDTimeLocks(/*active_only=*/false).size(), static_cast<size_t>(0));
+
+    MockOracleManager::GetInstance().Reset();
+}
+
+void DigiDollarMintRecordTests::mintStoppedByAChangedPriceLeavesNothingBehind()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarMintRecordTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    // The mint writes its owner key and its position record before it sends
+    // the transaction, and only then checks that the chain has not moved under
+    // it. A new oracle price arriving in between means the collateral the mint
+    // worked out is not what the next block would require, so the mint gives
+    // up. Nothing may be left behind for a transaction that was never sent.
+    //
+    // The new price is published at the moment the wallet writes the position
+    // record, which is inside the mint, after the save and before the send.
+    TestChain100Setup test{ChainType::REGTEST, {"-digidollaractivationheight=100", "-ddthawdayheight=100"}};
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    std::shared_ptr<wallet::CWallet> wallet = PrepareMintableWallet(m_node, test);
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    mini_gui.walletModel->pollBalanceChanged();
+
+    const int next_height = WITH_LOCK(cs_main, return Assert(test.m_node.chainman)->ActiveChain().Tip()->nHeight + 1);
+    bool records_were_saved = false;
+    GetMockableDatabase(*wallet).m_on_write = [&](Span<const std::byte> key) {
+        if (records_were_saved || !KeyIsRecord(key, "ddposition")) return;
+        records_were_saved = true;
+        MockOracleManager& mock_oracle = MockOracleManager::GetInstance();
+        mock_oracle.SetMockPrice(510000);
+        OracleBundleManager::GetInstance().UpdateBundle(mock_oracle.CreateMockMuSig2Bundle(next_height));
+    };
+
+    WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
+    GetMockableDatabase(*wallet).m_on_write = nullptr;
+
+    QVERIFY2(records_were_saved,
+             qPrintable(QString("the mint never saved its records, so this test proved nothing: %1")
+                            .arg(result.reasonFailed)));
+    QVERIFY2(result.status != WalletModel::OK, "the mint was expected to stop because the price changed");
+    CheckNothingIsLeftOfTheMint(*wallet, *Assert(test.m_node.mempool));
+
+    MockOracleManager::GetInstance().Reset();
+}
+
+void DigiDollarMintRecordTests::mintStoppedByANewBlockLeavesNothingBehind()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarMintRecordTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    // The same window, reached the other way: a block arrives while the mint is
+    // being built, so the mint was built for a block that has already been
+    // decided and it gives up.
+    //
+    // The block is connected from another thread. The mint holds the wallet
+    // lock while the wallet writes its records, and connecting a block takes
+    // the chain lock, so connecting it on this thread would take those two
+    // locks in the order that can leave a node stuck with no way out.
+    TestChain100Setup test{ChainType::REGTEST, {"-digidollaractivationheight=100", "-ddthawdayheight=100"}};
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    std::shared_ptr<wallet::CWallet> wallet = PrepareMintableWallet(m_node, test);
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    mini_gui.walletModel->pollBalanceChanged();
+
+    bool records_were_saved = false;
+    GetMockableDatabase(*wallet).m_on_write = [&](Span<const std::byte> key) {
+        if (records_were_saved || !KeyIsRecord(key, "ddposition")) return;
+        records_were_saved = true;
+        std::thread miner{[&test] {
+            test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+        }};
+        miner.join();
+    };
+
+    WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
+    GetMockableDatabase(*wallet).m_on_write = nullptr;
+    SyncWithValidationInterfaceQueue();
+
+    QVERIFY2(records_were_saved,
+             qPrintable(QString("the mint never saved its records, so this test proved nothing: %1")
+                            .arg(result.reasonFailed)));
+    QVERIFY2(result.status != WalletModel::OK, "the mint was expected to stop because a block arrived");
+    CheckNothingIsLeftOfTheMint(*wallet, *Assert(test.m_node.mempool));
 
     MockOracleManager::GetInstance().Reset();
 }

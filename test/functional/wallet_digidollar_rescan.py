@@ -915,6 +915,16 @@ class DigiDollarRescanTest(DigiByteTestFramework):
             sorted((tx["address"], tx["amount"]) for tx in original_rows),
         )
 
+        # A rescan has no wallet record to read a timestamp from, so it takes
+        # the timestamp of the block the transaction is in. The rescan is not
+        # allowed to ask the chain for that block while it holds the wallet
+        # lock, so the block time is handed to it instead. Check the figure that
+        # arrives is the right one.
+        block_hash = self.nodes[1].getrawtransaction(txid, True)["blockhash"]
+        block_time = self.nodes[1].getblock(block_hash)["time"]
+        for tx in restored_rows:
+            assert_equal(tx["time"], block_time)
+
         try:
             self.nodes[1].unloadwallet("dd_receive_history_restored")
         except Exception:

@@ -206,6 +206,11 @@ private:
 
     bool m_position_state_validation_pending GUARDED_BY(cs_dd_wallet){false};
 
+    // The mint positions that were in the wallet file when this wallet was
+    // opened. It is how the automatic cleanup tells records left behind by an
+    // earlier run from records a mint in this run is still working on.
+    std::set<uint256> m_positions_read_at_open GUARDED_BY(cs_dd_wallet);
+
     /**
      * Take the main wallet lock, when there is a wallet, and then the
      * DigiDollar one, always in that order.
@@ -224,6 +229,33 @@ private:
             std::forward_as_tuple(m_wallet ? &m_wallet->cs_wallet : nullptr,
                                   "cs_wallet", __FILE__, __LINE__),
             std::forward_as_tuple(&cs_dd_wallet, "cs_dd_wallet", __FILE__, __LINE__));
+    }
+
+    /**
+     * Stop the node at once, naming the lock and the line that took it, if a
+     * wallet lock is held where the chain is about to be asked a question.
+     *
+     * The chain takes its own lock and then calls into the wallet. So a thread
+     * that holds a wallet lock and then waits for the chain, running against a
+     * thread going the other way, leaves the node stuck with no way out. This
+     * check turns that into an immediate, named stop while a build with lock
+     * checking is under test. It does nothing in a release build.
+     *
+     * It is a plain function rather than the AssertLockNotHeld macro so that a
+     * compiler which tracks locks does not object to checking a lock it
+     * believes is held, which is exactly the case worth checking.
+     */
+    void RequireNoWalletLockForChainQuery(const char* file, int line) const;
+
+    /**
+     * The chain behind this wallet, for a question that has to wait for the
+     * chain's own lock. Every such question goes through here so the rule
+     * above is checked in one place.
+     */
+    interfaces::Chain& ChainForQuery(const char* file, int line) const
+    {
+        RequireNoWalletLockForChainQuery(file, line);
+        return m_wallet->chain();
     }
 
 public:
@@ -600,6 +632,44 @@ public:
     static bool MintLockWindowHasPassed(const WalletCollateralPosition& position, int next_block_height);
 
     /**
+     * Whether the automatic cleanup may give up the records of a mint whose
+     * transaction is not in the wallet at all.
+     *
+     * True only for a position that was already in the wallet file when this
+     * wallet was opened, and only once no block on this chain could include the
+     * mint any more. A mint writes its position record before it hands the
+     * transaction to the wallet, so records with no transaction are also what a
+     * mint being built right now looks like, and that mint releases its own
+     * records if it gives up. Callers of ReleaseMintAttempt are not held to
+     * this, because a mint releasing its own records knows it has stopped.
+     */
+    bool UnsentMintRecordsCanBeReleased(const uint256& dd_timelock_id) const;
+
+    /**
+     * Whether the automatic cleanup may give up this mint attempt, given what
+     * the wallet knows about its transaction right now.
+     *
+     * The cleanup asks this to choose, and the release asks it again before it
+     * changes anything, so the two can never drift apart. Every part of the
+     * answer is read from the wallet's own height, its transactions and its
+     * position records, so it is only true for as long as the wallet locks are
+     * held.
+     */
+    bool MintAttemptCanBeSwept(const uint256& dd_timelock_id, MintAttemptState state) const;
+
+    /** Who is asking for a mint attempt to be released. */
+    enum class MintReleaseCaller {
+        //! A mint giving up its own records. It has stopped, and it is the only
+        //! thing that could still send the transaction, so its records are
+        //! released at once, whatever the height says.
+        StoppedMint,
+        //! The cleanup that runs on its own, on every block and when the wallet
+        //! is opened. It decided this mint was finished a moment earlier, with
+        //! the DigiDollar lock let go in between, so the release asks again.
+        AutomaticSweep,
+    };
+
+    /**
      * Give up on a mint attempt that can no longer confirm here and release
      * only what this attempt reserved: the wallet transaction is abandoned so
      * its DGB inputs are spendable again, the collateral and DD token coin
@@ -608,8 +678,57 @@ public:
      * position record stay, so a reorg or a late confirmation can bring the
      * vault back. Refuses (returns false) while the mint is confirmed or still
      * in the mempool.
+     *
+     * The caller says who is asking. The automatic cleanup chose this mint
+     * earlier and its decision can have gone stale, so for that caller the
+     * release checks again, under the locks, that the mint is still one it may
+     * give up, and refuses if a block could include the mint once more. A mint
+     * giving up its own records is not held to that: it knows it has stopped.
      */
-    bool ReleaseMintAttempt(const uint256& dd_timelock_id, std::string& error);
+    bool ReleaseMintAttempt(const uint256& dd_timelock_id, std::string& error,
+                            MintReleaseCaller caller = MintReleaseCaller::StoppedMint);
+
+    /**
+     * Undoes a mint that was saved but never sent.
+     *
+     * A mint writes its owner key and its position record before it hands the
+     * transaction to the wallet. It has to: once the transaction is out it can
+     * be mined whether or not this process survives, and those records are the
+     * only things that let the owner redeem the vault.
+     *
+     * Between that save and the commit the mint can still stop. A block can
+     * arrive, the price the oracle would sign for the next block can change, a
+     * check can fail, or the wallet itself can refuse the transaction. Records
+     * left behind then describe a transaction that does not exist: the wallet
+     * counts the token towards its DigiDollar balance and offers it for
+     * spending, so the owner is shown DigiDollars that cannot be spent.
+     *
+     * Create one of these as soon as the records are saved. If it goes out of
+     * scope before KeepRecords() has been called, for any reason at all, it
+     * releases what the attempt reserved. The owner key stays, because keeping
+     * it costs nothing and it is the one thing that could not be worked out
+     * again if a signed transaction did reach a block after all.
+     */
+    class SavedMintCleanup
+    {
+    public:
+        SavedMintCleanup(DigiDollarWallet& dd_wallet, const uint256& position_id, const char* whose_mint)
+            : m_dd_wallet(dd_wallet), m_position_id(position_id), m_whose_mint(whose_mint) {}
+        ~SavedMintCleanup();
+
+        SavedMintCleanup(const SavedMintCleanup&) = delete;
+        SavedMintCleanup& operator=(const SavedMintCleanup&) = delete;
+
+        //! The transaction reached the wallet, so the records describe
+        //! something real. Keep them.
+        void KeepRecords() { m_keep_records = true; }
+
+    private:
+        DigiDollarWallet& m_dd_wallet;
+        const uint256 m_position_id;
+        const char* const m_whose_mint;
+        bool m_keep_records{false};
+    };
 
     /**
      * Release every active position whose mint attempt is expired, abandoned
@@ -637,18 +756,24 @@ public:
      * @param to Recipient DD address
      * @param amount Amount to transfer in cents
      * @param tx_out Output transaction reference
+     * @param error Optional. When this returns false it is filled in with the
+     *              reason, in words a caller can show the user.
      * @return true if transaction created successfully
      */
-    bool TransferDigiDollar(const CDigiDollarAddress& to, CAmount amount, CTransactionRef& tx_out);
+    bool TransferDigiDollar(const CDigiDollarAddress& to, CAmount amount, CTransactionRef& tx_out,
+                            std::string* error = nullptr);
 
     /**
      * Create redemption transaction using transaction builders
      * @param dd_timelock_id Position to redeem
      * @param amount Amount of DD to redeem
      * @param tx_out Output transaction reference
+     * @param error Optional. When this returns false it is filled in with the
+     *              reason, in words a caller can show the user.
      * @return true if transaction created successfully
      */
-    bool RedeemDigiDollar(const uint256& dd_timelock_id, const CAmount& amount, CTransactionRef& tx_out);
+    bool RedeemDigiDollar(const uint256& dd_timelock_id, const CAmount& amount, CTransactionRef& tx_out,
+                          std::string* error = nullptr);
 
     /**
      * Transfer DigiDollars to another address
@@ -742,10 +867,15 @@ public:
      * Called by wallet.cpp SyncTransaction() when rescanning_old_block=true
      * Reconstructs position data from MINT transactions and marks positions
      * inactive when REDEEM transactions are found.
+     * Runs with the main wallet lock already held, so it asks the chain
+     * nothing. The block's timestamp has to be handed in for that reason.
+     *
      * @param ptx Transaction reference
      * @param block_height Block height of the transaction
+     * @param block_time Timestamp of that block, read by the caller from the
+     *                   block it already has, before it took the wallet lock
      */
-    void ProcessDDTxForRescan(const CTransactionRef& ptx, int block_height);
+    void ProcessDDTxForRescan(const CTransactionRef& ptx, int block_height, int64_t block_time);
 
     /**
      * Refresh cached position metadata from the authoritative mint transaction.

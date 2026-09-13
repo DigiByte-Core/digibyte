@@ -8,6 +8,7 @@
 #include <wallet/walletdb.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
+#include <addresstype.h>
 #include <base58.h>
 #include <hash.h>
 #include <key.h>
@@ -16,7 +17,9 @@
 #include <util/time.h>
 #include <util/strencodings.h>
 #include <streams.h>
+#include <support/allocators/secure.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 
 namespace wallet {
 
@@ -709,6 +712,222 @@ BOOST_AUTO_TEST_CASE(mint_attempt_state_follows_the_lock_window)
     BOOST_CHECK(!error.empty());
     BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 0);
     BOOST_CHECK_EQUAL(dd_wallet.GetDDTimeLocks(/*active_only=*/true).size(), 1);
+}
+
+// =============================================================================
+// Paying DigiDollar to an address in your own wallet
+// =============================================================================
+
+namespace {
+
+/** A zero value taproot output whose key is the taproot tweak of owner_key. */
+CTxOut MakeDDTokenOutput(const CKey& owner_key)
+{
+    const XOnlyPubKey owner_xonly(owner_key.GetPubKey());
+    const auto tweaked = owner_xonly.CreateTapTweak(nullptr);
+    BOOST_REQUIRE(tweaked.has_value());
+    CTxOut out;
+    out.nValue = 0;
+    out.scriptPubKey << OP_1 << ToByteVector(tweaked->first);
+    return out;
+}
+
+/** The key that can spend one DigiDollar output, found the way the wallet finds
+ *  it when it signs: by the output's own key first, then by the key saved for
+ *  the transaction, which is only used when it really does control the output. */
+bool FindSpendingKey(DigiDollarWallet& dd_wallet, const CTxOut& out, const uint256& txid, CKey& found)
+{
+    const std::vector<unsigned char> output_key_bytes(out.scriptPubKey.begin() + 2, out.scriptPubKey.end());
+    const XOnlyPubKey output_key(output_key_bytes);
+
+    if (dd_wallet.GetAddressKey(output_key, found)) {
+        return true;
+    }
+    CKey candidate;
+    if (dd_wallet.GetOwnerKey(txid, candidate)) {
+        const XOnlyPubKey candidate_xonly(candidate.GetPubKey());
+        const auto tweaked = candidate_xonly.CreateTapTweak(nullptr);
+        if (tweaked && tweaked->first == output_key) {
+            found = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(self_send_saves_one_owner_key_and_keeps_both_outputs_spendable)
+{
+    // Paying DigiDollar to an address in your own wallet makes two outputs the
+    // wallet owns: what was sent, and the change. The wallet walks both and
+    // offers the same key for the transaction each time. The second offer is a
+    // repeat of a record already made, so it must succeed quietly instead of
+    // failing and writing errors into the log.
+    DigiDollarWallet dd_wallet(&m_wallet);
+
+    CKey recipient_key;
+    recipient_key.MakeNewKey(true);
+    CKey change_key;
+    change_key.MakeNewKey(true);
+
+    const CTxOut recipient_out = MakeDDTokenOutput(recipient_key);
+    const CTxOut change_out = MakeDDTokenOutput(change_key);
+
+    // The address the payment went to is one this wallet handed out, so its key
+    // is held against the output, not against the transaction.
+    const std::vector<unsigned char> recipient_key_bytes(recipient_out.scriptPubKey.begin() + 2,
+                                                         recipient_out.scriptPubKey.end());
+    BOOST_REQUIRE(dd_wallet.StoreAddressKey(XOnlyPubKey(recipient_key_bytes), recipient_key));
+
+    uint256 txid;
+    GetRandBytes(txid);
+
+    // Both offers of the same key succeed, and only one record is kept.
+    BOOST_CHECK(dd_wallet.StoreOwnerKey(txid, change_key));
+    BOOST_CHECK_MESSAGE(dd_wallet.StoreOwnerKey(txid, change_key),
+                        "saving the same owner key again for the second owned output must not fail");
+
+    CKey saved;
+    BOOST_REQUIRE(dd_wallet.GetOwnerKey(txid, saved));
+    BOOST_CHECK(saved.GetPubKey() == change_key.GetPubKey());
+
+    // The wallet still knows both outputs are its own.
+    BOOST_CHECK(dd_wallet.IsDDOutputMine(recipient_out, txid));
+    BOOST_CHECK(dd_wallet.IsDDOutputMine(change_out, txid));
+
+    // And it can still produce the right private key for each of them, which is
+    // what it needs to spend or redeem them.
+    CKey for_recipient;
+    BOOST_REQUIRE(FindSpendingKey(dd_wallet, recipient_out, txid, for_recipient));
+    BOOST_CHECK(for_recipient.GetPubKey() == recipient_key.GetPubKey());
+
+    CKey for_change;
+    BOOST_REQUIRE(FindSpendingKey(dd_wallet, change_out, txid, for_change));
+    BOOST_CHECK(for_change.GetPubKey() == change_key.GetPubKey());
+
+    // A different key under the same transaction id would throw away the record
+    // of who owns that vault, so it is still refused.
+    CKey stranger;
+    stranger.MakeNewKey(true);
+    BOOST_CHECK(!dd_wallet.StoreOwnerKey(txid, stranger));
+    BOOST_REQUIRE(dd_wallet.GetOwnerKey(txid, saved));
+    BOOST_CHECK(saved.GetPubKey() == change_key.GetPubKey());
+
+    // Everything survives a reload from the wallet database.
+    DigiDollarWallet reloaded(&m_wallet);
+    CKey after_restart;
+    BOOST_REQUIRE(reloaded.GetOwnerKey(txid, after_restart));
+    BOOST_CHECK(after_restart.GetPubKey() == change_key.GetPubKey());
+    CKey recipient_after_restart;
+    BOOST_REQUIRE(FindSpendingKey(reloaded, recipient_out, txid, recipient_after_restart));
+    BOOST_CHECK(recipient_after_restart.GetPubKey() == recipient_key.GetPubKey());
+}
+
+BOOST_AUTO_TEST_CASE(self_send_owner_key_is_saved_once_on_an_encrypted_wallet)
+{
+    // On an encrypted wallet the database refuses to replace an owner key that
+    // is already there. A payment to one of your own addresses offers the same
+    // key twice, once for each output the wallet owns, so the second offer used
+    // to come back as a database failure and put two error lines in the log for
+    // what is an ordinary, successful payment.
+    m_wallet.EnsureDDWallet();
+    DigiDollarWallet* dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet != nullptr);
+
+    SecureString passphrase{"self-send-owner-key-passphrase"};
+    BOOST_REQUIRE(m_wallet.EncryptWallet(passphrase));
+    BOOST_REQUIRE(m_wallet.IsCrypted());
+    BOOST_REQUIRE(m_wallet.Unlock(passphrase));
+
+    CKey change_key;
+    change_key.MakeNewKey(true);
+    uint256 txid;
+    GetRandBytes(txid);
+
+    BOOST_CHECK(dd_wallet->StoreOwnerKey(txid, change_key));
+    BOOST_CHECK_MESSAGE(dd_wallet->StoreOwnerKey(txid, change_key),
+                        "saving the same owner key again for the second owned output must not fail");
+
+    CKey saved;
+    BOOST_REQUIRE(dd_wallet->GetOwnerKey(txid, saved));
+    BOOST_CHECK(saved.GetPubKey() == change_key.GetPubKey());
+
+    // A different key would throw away the record of who owns that vault.
+    CKey stranger;
+    stranger.MakeNewKey(true);
+    BOOST_CHECK(!dd_wallet->StoreOwnerKey(txid, stranger));
+    BOOST_REQUIRE(dd_wallet->GetOwnerKey(txid, saved));
+    BOOST_CHECK(saved.GetPubKey() == change_key.GetPubKey());
+}
+
+//! A payment and a redemption that cannot go ahead now say why.
+//!
+//! Both of these used to answer a caller with nothing but "false". The reason
+//! went to the node log and nowhere else, so whatever asked for the payment had
+//! nothing to put in front of the user.
+BOOST_AUTO_TEST_CASE(transfer_and_redeem_say_why_they_were_refused)
+{
+    DigiDollarWallet dd_wallet(&m_wallet);
+
+    CKey recipient_key;
+    recipient_key.MakeNewKey(true);
+    const XOnlyPubKey recipient_xonly(recipient_key.GetPubKey());
+    const CDigiDollarAddress to(EncodeDigiDollarAddress(CTxDestination{WitnessV1Taproot(recipient_xonly)}));
+    BOOST_REQUIRE(to.IsValidForCurrentNetwork());
+
+    CTransactionRef tx_out;
+    std::string error{"not touched yet"};
+
+    // The wallet holds no DigiDollars, so a payment of $100 cannot be made and
+    // the reason says both what was asked for and what is there.
+    BOOST_CHECK(!dd_wallet.TransferDigiDollar(to, 10000, tx_out, &error));
+    BOOST_CHECK_MESSAGE(error.find("cannot send 10000 cents") != std::string::npos,
+                        "a refused payment must say how much it was asked for, got: " << error);
+    BOOST_CHECK_MESSAGE(error.find("holds 0 cents") != std::string::npos,
+                        "a refused payment must say how much the wallet holds, got: " << error);
+
+    // An address from another network is refused by name.
+    const CDigiDollarAddress not_ours("DD1qtest123456789abcdefghijklmnopqrstuvwxyz");
+    error = "not touched yet";
+    BOOST_CHECK(!dd_wallet.TransferDigiDollar(not_ours, 10000, tx_out, &error));
+    BOOST_CHECK_EQUAL(error, "That is not a DigiDollar address for this network.");
+
+    // The wallet has no vault with this identifier, so it cannot redeem one.
+    const uint256 unknown_vault = uint256::ONE;
+    error = "not touched yet";
+    BOOST_CHECK(!dd_wallet.RedeemDigiDollar(unknown_vault, 10000, tx_out, &error));
+    BOOST_CHECK_MESSAGE(!error.empty(), "a refused redemption must say why");
+    BOOST_CHECK(error.find(unknown_vault.ToString()) != std::string::npos);
+
+    // A caller that does not want the reason can still leave it out.
+    BOOST_CHECK(!dd_wallet.TransferDigiDollar(to, 10000, tx_out));
+    BOOST_CHECK(!dd_wallet.RedeemDigiDollar(unknown_vault, 10000, tx_out));
+}
+
+//! Saving the same DigiDollar owner key a second time is the ordinary case.
+//!
+//! A payment to one of your own addresses has two outputs the wallet owns, and
+//! the wallet offers the same owner key for each of them. The second offer is a
+//! repeat of a record already made, which is normal and not a fault, so the
+//! message that says so must not print on a node running with default logging.
+//! Its neighbours in the same function are behind the DigiDollar log category
+//! and this one has to be too.
+BOOST_AUTO_TEST_CASE(the_repeat_owner_key_message_stays_off_by_default)
+{
+    const std::string source = ReadRepositoryFile("src/wallet/digidollarwallet.cpp");
+    const std::string message = "DD owner key for timelock %s is already saved";
+
+    size_t at = source.find(message);
+    BOOST_REQUIRE_MESSAGE(at != std::string::npos, "the message itself has gone: " << message);
+    while (at != std::string::npos) {
+        const size_t line_start = source.rfind('\n', at);
+        const std::string line = source.substr(line_start + 1, at - line_start - 1);
+        BOOST_CHECK_MESSAGE(line.find("LogPrint(BCLog::DIGIDOLLAR,") != std::string::npos,
+                            "this message is the ordinary case, so it must go through the DigiDollar "
+                            "log category instead of printing on every node. Line reads: " << line);
+        at = source.find(message, at + 1);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

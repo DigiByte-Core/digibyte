@@ -17,12 +17,11 @@
 #include <pubkey.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <uint256.h>
 #include <util/chaintype.h>
 
 #include <cstdint>
-#include <fstream>
-#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
@@ -538,24 +537,8 @@ BOOST_AUTO_TEST_CASE(wave7_iscanonical_locktier_table_drives_acceptance)
 
 BOOST_AUTO_TEST_CASE(wave7_locktier_duration_reject_log_includes_txid_and_window)
 {
-    const auto readFile = [](const std::vector<std::string>& candidates) {
-        for (const auto& path : candidates) {
-            std::ifstream file(path);
-            if (!file.is_open()) continue;
-            return std::string(std::istreambuf_iterator<char>(file),
-                               std::istreambuf_iterator<char>());
-        }
-        return std::string();
-    };
+    const std::string source = ReadRepositoryFile("src/digidollar/validation.cpp");
 
-    const std::string source = readFile({
-        "src/digidollar/validation.cpp",
-        "../src/digidollar/validation.cpp",
-        "../../src/digidollar/validation.cpp",
-        "digidollar/validation.cpp",
-    });
-
-    BOOST_REQUIRE_MESSAGE(!source.empty(), "could not locate digidollar/validation.cpp from current working directory");
     BOOST_CHECK_MESSAGE(source.find("Non-canonical lock duration for mint txid=%s") != std::string::npos,
         "bad-mint-lock-tier-duration logs must identify the exact mint txid");
     BOOST_CHECK_MESSAGE(source.find("expected_range=[%lld,%lld]") != std::string::npos,

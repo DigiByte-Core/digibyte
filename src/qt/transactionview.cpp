@@ -154,18 +154,6 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     transactionView->setSortingEnabled(true);
     transactionView->verticalHeader()->hide();
 
-    QSettings settings;
-    if (!transactionView->horizontalHeader()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
-        transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setStretchLastSection(true);
-    }
-
     contextMenu = new QMenu(this);
     contextMenu->setObjectName("contextMenu");
     copyAddressAction = contextMenu->addAction(tr("&Copy address"), this, &TransactionView::copyAddress);
@@ -244,19 +232,40 @@ void TransactionView::setModel(WalletModel *_model)
             }
         }
 
-        // Column sizes only take effect once the view has a model, so the
-        // layout is set here. A layout saved by an older version has one
-        // column fewer, so make sure the DigiDollar amount column is on
-        // screen as well.
+        // Column widths only take effect once the view has a model, because
+        // until then the header has no columns to size. All of this used to run
+        // in the constructor, where every width call did nothing and the layout
+        // the user had saved was thrown away as soon as the model arrived.
+        QHeaderView* header = transactionView->horizontalHeader();
+        header->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
+        QSettings settings;
+        if (!header->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
+            transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
+        }
+
+        // A layout saved by an older version has one column fewer, so make sure
+        // the DigiDollar amount column is on screen as well.
         if (transactionView->isColumnHidden(TransactionTableModel::AmountDD)) {
             transactionView->setColumnHidden(TransactionTableModel::AmountDD, false);
         }
-        transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setStretchLastSection(false);
+        if (transactionView->columnWidth(TransactionTableModel::AmountDD) <= 0) {
+            transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
+        }
+
+        header->setStretchLastSection(false);
         // The DigiByte amount is the one whose width varies most, from a fee of
         // a few thousandths to a whole balance, so it keeps the spare width it
-        // had when it was the right-hand column.
-        transactionView->horizontalHeader()->setSectionResizeMode(TransactionTableModel::Amount, QHeaderView::Stretch);
+        // had when it was the right-hand column. Qt does not check the column
+        // number on this call the way it does on the ones above, so ask first
+        // whether the header really has that column.
+        if (header->count() > TransactionTableModel::Amount) {
+            header->setSectionResizeMode(TransactionTableModel::Amount, QHeaderView::Stretch);
+        }
 
         // show/hide column Watch-only
         updateWatchOnlyColumn(_model->wallet().haveWatchOnly());
@@ -444,7 +453,16 @@ void TransactionView::abandonTx()
     hash.SetHex(hashQStr.toStdString());
 
     // Abandon the wallet transaction over the walletModel
-    model->wallet().abandonTransaction(hash);
+    if (!model->wallet().abandonTransaction(hash)) {
+        // Abandoning can be refused, and when it is, the transaction is left exactly
+        // as it was. Say so. Without this the user is shown nothing and has every
+        // reason to believe the coins it spends have been freed, when they are still
+        // committed to it.
+        Q_EMIT message(tr("Abandoning the transaction failed"),
+            tr("The transaction could not be abandoned. It is unchanged, and the coins "
+               "it spends are still committed to it."),
+            CClientUIInterface::MSG_ERROR);
+    }
 }
 
 void TransactionView::bumpFee([[maybe_unused]] bool checked)

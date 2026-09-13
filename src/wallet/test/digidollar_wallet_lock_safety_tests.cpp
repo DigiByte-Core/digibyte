@@ -8,10 +8,11 @@
 // lock and then waits for the chain, running against a thread going the other
 // way, leaves the node stuck with no way out.
 //
-// Three places in the wallet run with the wallet lock already held and then
+// Four places in the wallet run with the wallet lock already held and then
 // touch DigiDollar state: abandoning a transaction, disconnecting a block
-// during a reorg, and giving up a mint that can no longer be mined when a
-// block is connected. None of them may reach the chain question.
+// during a reorg, giving up a mint that can no longer be mined when a block is
+// connected, and reading a block during a rescan. None of them may reach the
+// chain question.
 //
 // Each test here runs one of those routes with the wallet lock held. On a
 // build with lock checking turned on (configure --enable-debug) the wallet
@@ -170,6 +171,38 @@ BOOST_AUTO_TEST_CASE(releasing_an_expired_mint_under_the_wallet_lock_asks_the_ch
         LOCK(m_wallet.cs_wallet);
         BOOST_CHECK_EQUAL(dd_wallet.ReconcileExpiredMintAttempts(), 0u);
     }
+}
+
+BOOST_AUTO_TEST_CASE(a_rescan_under_the_wallet_lock_asks_the_chain_nothing)
+{
+    // A rescan holds the wallet lock for the whole of every block it reads and
+    // hands each DigiDollar transaction in that block to the DigiDollar wallet
+    // from inside the lock. The DigiDollar wallet then takes its own lock on
+    // top. So this runs with both wallet locks held and must not reach the
+    // chain. It used to ask the chain for the block's timestamp; the timestamp
+    // is passed in instead.
+    m_wallet.EnsureDDWallet();
+    DigiDollarWallet& dd_wallet = *m_wallet.GetDDWallet();
+
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    const CTransactionRef mint_tx = MakeMintShapedTx(owner_key);
+
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK_NO_THROW(
+            dd_wallet.ProcessDDTxForRescan(mint_tx, /*block_height=*/500, /*block_time=*/1600000000));
+    }
+
+    // Same call with no height, which is how a transaction that is not in a
+    // block arrives. Still no chain question, under the lock or not.
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK_NO_THROW(
+            dd_wallet.ProcessDDTxForRescan(mint_tx, /*block_height=*/-1, /*block_time=*/0));
+    }
+    BOOST_CHECK_NO_THROW(
+        dd_wallet.ProcessDDTxForRescan(mint_tx, /*block_height=*/500, /*block_time=*/1600000000));
 }
 
 BOOST_AUTO_TEST_CASE(the_owed_chain_check_is_answered_when_no_wallet_lock_is_held)

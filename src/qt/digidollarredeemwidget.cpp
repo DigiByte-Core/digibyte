@@ -18,6 +18,7 @@
 #include <digidollar/digidollar.h>
 #include <univalue.h>
 #include <logging.h>
+#include <node/interface_ui.h>
 
 #include <algorithm>
 #include <cmath>
@@ -134,6 +135,29 @@ DigiDollarRedeemWidget::DigiDollarRedeemWidget(QWidget *parent) :
 DigiDollarRedeemWidget::~DigiDollarRedeemWidget()
 {
     // Qt will handle cleanup of child widgets
+}
+
+unsigned int DigiDollarRedeemWidget::resultMessageStyle(bool succeeded)
+{
+    // The wallet window opens a real dialog only when the message carries the
+    // modal flag. Without it the words are handed to the desktop notification
+    // service instead, and on a machine with no such service, or with
+    // notifications switched off, the user is told nothing at all. A redemption
+    // moves money, so both the confirmation and the refusal must be a dialog
+    // the user has to close.
+    if (succeeded) {
+        return CClientUIInterface::MSG_INFORMATION | CClientUIInterface::BTN_OK | CClientUIInterface::MODAL;
+    }
+    return CClientUIInterface::MSG_ERROR;
+}
+
+QString DigiDollarRedeemWidget::redemptionBroadcastText(const QString& txid)
+{
+    return tr("Your redemption has been broadcast to the network.\n\n"
+              "Transaction ID:\n%1\n\n"
+              "The vault closes and its locked DGB is released once the "
+              "transaction confirms in a block.")
+        .arg(txid);
 }
 
 void DigiDollarRedeemWidget::setupUI()
@@ -530,7 +554,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
 
     // CRITICAL: Check if user has enough DD balance BEFORE showing confirmation dialog
     if (!m_walletModel) {
-        Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+        Q_EMIT message(tr("Error"), tr("No wallet model available"), resultMessageStyle(false));
         return;
     }
 
@@ -573,14 +597,14 @@ void DigiDollarRedeemWidget::onRedeemClicked()
         }
     } catch (const UniValue& objError) {
         if (candidateHealth) {
-            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), QMessageBox::Warning);
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), resultMessageStyle(false));
             return;
         }
         LogPrintf("DigiDollar Qt: Failed to query system health (RPC error) - assuming normal redemption\n");
         // On error, proceed with normal redemption calculation
     } catch (const std::exception& e) {
         if (candidateHealth) {
-            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), QMessageBox::Warning);
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), resultMessageStyle(false));
             return;
         }
         LogPrintf("DigiDollar Qt: Failed to query system health - %s (assuming normal redemption)\n", e.what());
@@ -611,7 +635,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                 .arg(formatDDAmount(requiredDDBurn - ddBalance));
         }
 
-        Q_EMIT message(tr("Insufficient DigiDollar Balance"), errorMsg, QMessageBox::Warning);
+        Q_EMIT message(tr("Insufficient DigiDollar Balance"), errorMsg, resultMessageStyle(false));
         return; // STOP - Do not show confirmation dialog
     }
 
@@ -641,7 +665,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
 
     if (msgBox.exec() == QMessageBox::Yes) {
         if (!m_walletModel) {
-            Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+            Q_EMIT message(tr("Error"), tr("No wallet model available"), resultMessageStyle(false));
             return;
         }
 
@@ -659,10 +683,9 @@ void DigiDollarRedeemWidget::onRedeemClicked()
         WalletModel::DigiDollarRedeemResult result = m_walletModel->redeemDigiDollar(m_selectedPositionId, amountCents, "");
 
         if (result.status == WalletModel::OK) {
-            Q_EMIT message(tr("Redeem Transaction Created"),
-                        tr("DigiDollar redeem transaction created successfully!\n\nTransaction ID: %1")
-                        .arg(result.txid),
-                        QMessageBox::Information);
+            Q_EMIT message(tr("Redemption Broadcast"),
+                        redemptionBroadcastText(result.txid),
+                        resultMessageStyle(true));
             Q_EMIT redemptionCompleted(); // Notify other widgets
             onClearClicked();
             updateBalance(); // Refresh balance displays
@@ -689,7 +712,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                 break;
             }
 
-            Q_EMIT message(errorTitle, errorMessage, QMessageBox::Critical);
+            Q_EMIT message(errorTitle, errorMessage, resultMessageStyle(false));
         }
     }
 }

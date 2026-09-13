@@ -6,6 +6,7 @@
 
 #include <key.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <uint256.h>
 #include <util/strencodings.h>
 #include <wallet/digidollarwallet.h>
@@ -13,33 +14,14 @@
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
 
-#include <fstream>
-#include <iterator>
 #include <string>
-#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_wallet_hd_tests, wallet::WalletTestingSetup)
 
-namespace {
-
-std::string ReadRepoFile(const std::vector<std::string>& candidates)
-{
-    for (const std::string& path : candidates) {
-        std::ifstream in(path);
-        if (in) {
-            return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-    }
-    BOOST_FAIL("could not read repository source file for Qt/RPC wallet-path test");
-    return {};
-}
-
-} // namespace
-
 BOOST_AUTO_TEST_CASE(wave1_qt_and_rpc_mint_paths_use_hd_owner_derivation)
 {
-    const std::string qt_source = ReadRepoFile({"src/qt/walletmodel.cpp", "qt/walletmodel.cpp"});
-    const std::string rpc_source = ReadRepoFile({"src/rpc/digidollar.cpp", "rpc/digidollar.cpp"});
+    const std::string qt_source = ReadRepositoryFile("src/qt/walletmodel.cpp");
+    const std::string rpc_source = ReadRepositoryFile("src/rpc/digidollar.cpp");
 
     BOOST_CHECK_NE(qt_source.find("GetHDKeyForDigiDollar(\"dd-owner\")"), std::string::npos);
     BOOST_CHECK_NE(rpc_source.find("GetHDKeyForDigiDollar(\"dd-owner\")"), std::string::npos);
@@ -53,7 +35,7 @@ BOOST_AUTO_TEST_CASE(wave1_qt_persists_owner_key_before_broadcast)
     // that it is still called before the send. The behaviour itself is tested
     // in the Qt suite, which can run a real mint
     // (qt/test/digidollarmintrecordtests.cpp).
-    const std::string qt_source = ReadRepoFile({"src/qt/walletmodel.cpp", "qt/walletmodel.cpp"});
+    const std::string qt_source = ReadRepositoryFile("src/qt/walletmodel.cpp");
 
     const size_t mint_pos = qt_source.find("WalletModel::mintDigiDollar");
     BOOST_REQUIRE_NE(mint_pos, std::string::npos);
@@ -90,7 +72,7 @@ BOOST_AUTO_TEST_CASE(wave1_non_hd_wallet_fails_clearly_for_dd_owner_key)
 
 BOOST_AUTO_TEST_CASE(wave1_legacy_wallet_dd_owner_derivation_is_unreachable)
 {
-    const std::string wallet_source = ReadRepoFile({"src/wallet/wallet.cpp", "wallet/wallet.cpp"});
+    const std::string wallet_source = ReadRepositoryFile("src/wallet/wallet.cpp");
     const size_t helper_pos = wallet_source.find("CKey CWallet::GetHDKeyForDigiDollar");
     BOOST_REQUIRE_NE(helper_pos, std::string::npos);
     const size_t helper_end = wallet_source.find("\n}", helper_pos);

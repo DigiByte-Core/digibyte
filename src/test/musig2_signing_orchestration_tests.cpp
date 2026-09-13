@@ -4,15 +4,21 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <addrman.h>
 #include <chainparams.h>
 #include <crypto/sha256.h>
 #include <hash.h>
+#include <net.h>
+#include <netgroup.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/musig2_aggregator.h>
 #include <oracle/musig2_messages.h>
 #include <oracle/signing_orchestrator.h>
 #include <primitives/block.h>
 #include <primitives/oracle.h>
+#include <protocol.h>
+#include <sync.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <util/time.h>
 
@@ -20,6 +26,9 @@
 #include <secp256k1_musig.h>
 
 #include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(musig2_signing_orchestration_tests, RegTestingSetup)
 
@@ -884,6 +893,67 @@ BOOST_AUTO_TEST_CASE(remote_context_proposal_does_not_define_epoch_seed)
     BOOST_REQUIRE(session != nullptr);
     BOOST_CHECK(session->GetEpochSelectionSeed() == Params().GetConsensus().hashGenesisBlock);
     BOOST_CHECK(session->GetEpochSelectionSeed() != remote_seed);
+}
+
+// Message types waiting for a test peer: the one already handed to the
+// transport plus everything still in the send queue.
+static std::vector<std::string> QueuedMessageTypes(CNode& node)
+{
+    std::vector<std::string> types;
+    LOCK(node.cs_vSend);
+    const auto& [to_send, _more, msg_type] = node.m_transport->GetBytesToSend(false);
+    if (!to_send.empty()) types.push_back(msg_type);
+    for (const auto& msg : node.vSendMsg) types.push_back(msg.m_type);
+    return types;
+}
+
+// A nonce that reached nobody must not be reported as sent.
+//
+// BroadcastMusigNonce answers with the number of peers it handed the message
+// to. Reaching nobody has two causes and they mean the same thing to the
+// caller: there is no connection manager at all, or there is one and no peer
+// is connected yet. The second happens on a real node at startup, where a
+// wallet can start a local oracle before the connection manager has taken any
+// peers. The old code returned true for it, the caller wrote the nonce down as
+// sent, and because a session refuses to make a second nonce for the same
+// oracle, that oracle then had no nonce in the epoch at all.
+BOOST_AUTO_TEST_CASE(nonce_broadcast_reports_how_many_peers_it_reached)
+{
+    OracleSigningOrchestrator orch;
+    const OracleMusigNonceMsg msg = MakeSignedMusigNonceMsg(/*epoch=*/7, /*oracle_id=*/0);
+
+    // A send that failed: nothing to send through.
+    orch.SetConnman(nullptr);
+    BOOST_CHECK_EQUAL(orch.BroadcastMusigNonce(msg), 0U);
+
+    // A connection manager with no peers reaches nobody, same as above.
+    auto connman = std::make_unique<ConnmanTestMsg>(0x1337, 0x1337, *m_node.addrman,
+                                                    *m_node.netgroupman, Params());
+    orch.SetConnman(connman.get());
+    BOOST_CHECK_EQUAL(orch.BroadcastMusigNonce(msg), 0U);
+
+    // The same nonce, once a peer is connected, goes to that peer. The
+    // connection manager deletes this node in ClearTestNodes() below.
+    CNode* peer = new CNode(/*id=*/0,
+                            /*sock=*/nullptr,
+                            CAddress(),
+                            /*nKeyedNetGroupIn=*/0,
+                            /*nLocalHostNonceIn=*/0,
+                            CAddress(),
+                            /*pszDest=*/std::string{},
+                            ConnectionType::INBOUND,
+                            /*inbound_onion=*/false);
+    peer->fSuccessfullyConnected = true;
+    connman->AddTestNode(*peer);
+    BOOST_CHECK_EQUAL(orch.BroadcastMusigNonce(msg), 1U);
+
+    // And it is a real nonce message waiting for that peer, not just a count.
+    const std::vector<std::string> queued = QueuedMessageTypes(*peer);
+    BOOST_CHECK(std::find(queued.begin(), queued.end(),
+                          std::string(NetMsgType::ORACLEMUSIGNONCE)) != queued.end());
+
+    orch.SetConnman(nullptr);
+    connman->ClearTestNodes();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

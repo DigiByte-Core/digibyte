@@ -688,7 +688,7 @@ void DigiDollarTransactionsWidget::showDetails()
         const QString lockText = lockItem ? lockItem->text() : QString();
         QString details;
         details += QStringLiteral("<html><body>");
-        details += DetailRow(tr("Status"), confItem ? confItem->text() : QString());
+        details += DetailRow(tr("Confirmations"), confItem ? confItem->text() : QString());
         details += DetailRow(tr("Date"), dateItem ? dateItem->text() : QString());
         details += DetailRow(tr("Type"), typeItem ? typeItem->text() : QString());
         details += DetailRow(tr("Amount"), amountItem ? amountItem->text() : QString());
@@ -766,10 +766,16 @@ QString DigiDollarTransactionsWidget::formatConfirmations(int confirmations, boo
             return tr("Local");
         }
         return tr("Pending");
-    } else if (confirmations >= 6) {
-        return tr("Confirmed");
     }
+    // Once a transaction is in a block this column shows how many blocks deep
+    // it is and nothing else, so every row in the column reads the same way.
+    // A word is used only where there is no count to show.
     return QString::number(confirmations);
+}
+
+QString DigiDollarTransactionsWidget::confirmationsTextForTesting(int confirmations, bool isAbandoned, bool isLocal) const
+{
+    return formatConfirmations(confirmations, isAbandoned, isLocal);
 }
 
 QString DigiDollarTransactionsWidget::formatLockPeriod(int lockTier) const

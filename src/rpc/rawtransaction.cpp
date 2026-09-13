@@ -101,6 +101,16 @@ static std::vector<RPCResult> DecodeTxDoc(const std::string& txid_field_doc)
         {RPCResult::Type::NUM, "weight", "The transaction's weight (between vsize*4-3 and vsize*4)"},
         {RPCResult::Type::NUM, "version", "The version"},
         {RPCResult::Type::NUM_TIME, "locktime", "The lock time"},
+        // Only DigiDollar transactions carry this object. TxToUniv() in
+        // core_write.cpp adds it right after the lock time, so it is declared
+        // here in the same place and marked optional.
+        {RPCResult::Type::OBJ, "digidollar", /*optional=*/true, "DigiDollar details. Only present when the transaction carries the DigiDollar marker in its version field",
+        {
+            {RPCResult::Type::STR, "type", "What the transaction does with DigiDollars: MINT, TRANSFER or REDEEM. A transaction that carries the marker but no known type reads NONE or UNKNOWN"},
+            {RPCResult::Type::NUM, "type_id", "The same thing as a number: 1 for a mint, 2 for a transfer, 3 for a redeem"},
+            {RPCResult::Type::NUM, "flags", "The DigiDollar flag byte taken from the transaction version. No flag has a meaning yet, so this is 0 on every DigiDollar transaction made today"},
+            {RPCResult::Type::STR, "flags_hex", "The same flag byte written in hex, for example 0x00"},
+        }},
         {RPCResult::Type::ARR, "vin", "",
         {
             {RPCResult::Type::OBJ, "", "",

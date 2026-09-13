@@ -89,6 +89,14 @@ public:
         FormattedAmountRole,
         /** Formatted DigiDollar amount, without brackets when unconfirmed */
         FormattedAmountDDRole,
+        /** The one amount a row has, for the places with room for a single
+            figure: the DigiByte amount with its unit, or the DigiDollar amount
+            on a row that carries dollars and no DigiByte. */
+        FormattedSingleAmountRole,
+        /** The number behind FormattedSingleAmountRole: DigiByte in satoshis,
+            or DigiDollar in cents on a row that carries dollars and no
+            DigiByte. Negative when money left the wallet. */
+        SingleAmountRole,
         /** Transaction status (TransactionRecord::Status) */
         StatusRole,
         /** Unprocessed icon */

@@ -85,6 +85,35 @@ static bool ResolveDGBChangeScript(const std::optional<CTxDestination>& changeDe
     return true;
 }
 
+// Work out where the collateral a redemption unlocks should go.
+//
+// This is the whole vault, so it matters more than anything else in the
+// transaction. The caller names the address. The builder must never make one
+// up. An address worked out here from the owner key is not tweaked the way a
+// wallet's taproot addresses are, so no wallet watches it and no wallet can
+// spend from it. When there is no address to use, the build stops and the
+// caller reports the error instead of sending the vault somewhere it can never
+// be spent from again.
+static bool ResolveCollateralReturnScript(const std::optional<CTxDestination>& collateralDest,
+                                          CScript& scriptOut,
+                                          std::string& errorOut)
+{
+    if (!collateralDest.has_value() || !IsValidDestination(*collateralDest)) {
+        errorOut = "No address is available for the collateral this redemption unlocks. "
+                   "Unlock the wallet, or check that it can still hand out addresses, then try again.";
+        return false;
+    }
+
+    const CScript script = GetScriptForDestination(*collateralDest);
+    if (script.empty()) {
+        errorOut = "The address for the collateral this redemption unlocks could not be used.";
+        return false;
+    }
+
+    scriptOut = script;
+    return true;
+}
+
 CAmount ApplyCollateralSafetyMargin(CAmount requiredCollateral)
 {
     if (requiredCollateral <= 0) {
@@ -1276,19 +1305,16 @@ TxBuilderResult RedeemTxBuilder::BuildRedemptionTransaction(const TxBuilderRedee
         }
     }
 
-    // Output 0: Collateral returned to owner (100% of locked DGB)
-    // CRITICAL: This is the FULL collateral amount - must be separate from any DGB change
-    CTxDestination collateralReturnDest;
-    if (params.collateralDest.has_value()) {
-        collateralReturnDest = params.collateralDest.value();
-        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using provided wallet destination for returned collateral\n");
-    } else {
-        // Fallback to owner key (for backwards compatibility)
-        CPubKey pubkey = params.ownerKey.GetPubKey();
-        collateralReturnDest = CTxDestination{WitnessV1Taproot(XOnlyPubKey(pubkey))};
-        LogPrintf("DigiDollar: Using owner key pubkey for returned collateral (wallet may not recognize)\n");
+    // Output 0: the collateral this redemption unlocks, all of it. It is always
+    // its own output, never mixed with the DGB left over after the fee. The
+    // address comes from the caller; the builder never works one out for
+    // itself, because the money would then be unspendable.
+    CScript collateralReturnScript;
+    if (!ResolveCollateralReturnScript(params.collateralDest, collateralReturnScript, result.error)) {
+        LogPrintf("DigiDollar: BuildRedemptionTransaction FAILED - %s\n", result.error);
+        return result;
     }
-    tx.vout.push_back(CTxOut(dgbToRelease, GetScriptForDestination(collateralReturnDest)));
+    tx.vout.push_back(CTxOut(dgbToRelease, collateralReturnScript));
     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added collateral return output: %d sats (100%% of locked collateral)\n", dgbToRelease);
 
     // Calculate DD change - if we selected more DD UTXOs than needed, return the change
@@ -1459,12 +1485,12 @@ RedeemTxBuilder::FeeEstimate RedeemTxBuilder::EstimateRedemptionFee(const TxBuil
     }
 
     // The collateral return goes to the caller's destination, and a legacy
-    // or SegWit v0 address has a different script length than Taproot.
+    // or SegWit v0 address has a different script length than Taproot. With no
+    // destination at all the real build stops, so a taproot-sized placeholder
+    // is enough to finish the measurement.
     CScript collateralReturnScript;
     if (params.collateralDest.has_value()) {
         collateralReturnScript = GetScriptForDestination(params.collateralDest.value());
-    } else if (params.ownerKey.IsValid()) {
-        collateralReturnScript = GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey(params.ownerKey.GetPubKey())));
     } else {
         collateralReturnScript = CScript() << OP_1 << std::vector<unsigned char>(32, 0);
     }

@@ -484,6 +484,21 @@ struct ThawMinerValidationSetup : MinerDDValidationSetup {
     }
 };
 
+struct ThawBoundaryTemplateSetup : MinerDDValidationSetup {
+    static constexpr int THAW_HEIGHT{140};
+
+    // Leaves the tip two blocks below the Thaw Day height, so the next block a
+    // miner builds is the block immediately before the height. That is the block
+    // whose accounting record the first Thaw Day block is checked against.
+    ThawBoundaryTemplateSetup()
+        : MinerDDValidationSetup({"-digidollaractivationheight=100", "-ddthawdayheight=140"})
+    {
+        BOOST_REQUIRE_LT(NextBlockHeight(), THAW_HEIGHT - 1);
+        mineBlocks(THAW_HEIGHT - 1 - NextBlockHeight());
+        BOOST_REQUIRE_EQUAL(NextBlockHeight(), THAW_HEIGHT - 1);
+    }
+};
+
 struct ThawMinerERRValidationSetup : ThawMinerValidationSetup {
     ThawMinerERRValidationSetup() : ThawMinerValidationSetup(true) {}
 
@@ -1516,6 +1531,78 @@ BOOST_FIXTURE_TEST_CASE(thaw_miner_does_not_retry_missing_reference_in_final_val
     BOOST_CHECK_EQUAL(hook_calls, 1);
     unavailable.reset();
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return ancestor->nStatus), previous_status);
+}
+
+
+// Building a block template must not walk the whole coin database. The walk reads
+// a block from disk for every unspent DigiDollar output, and miners ask for a new
+// template constantly, so doing it per template would stall the node for as long
+// as the tip sits one block below the Thaw Day height.
+BOOST_FIXTURE_TEST_CASE(boundary_template_does_not_walk_the_coin_set, ThawBoundaryTemplateSetup)
+{
+    const auto blockman_lookup = [&](const uint256& txid, uint32_t height, CTransactionRef& tx) {
+        AssertLockHeld(cs_main);
+        const auto* tip = m_node.chainman->ActiveChain().Tip();
+        if (!tip || height > static_cast<uint32_t>(tip->nHeight)) return false;
+        const auto* source = tip->GetAncestor(height);
+        CBlock block;
+        if (!source || !m_node.chainman->m_blockman.ReadBlockFromDisk(block, *source)) return false;
+        for (const auto& candidate : block.vtx) {
+            if (candidate->GetHash() == txid) { tx = candidate; return true; }
+        }
+        return false;
+    };
+
+    BlockAssembler::Options options;
+    const auto before_templates = DigiDollar::ChainstateHealthRebuildCount();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        BOOST_REQUIRE(BuildTemplate(options));
+    }
+    BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), before_templates);
+
+    // Actually connecting the block before the height builds the record, once.
+    mineBlocks(1);
+    BOOST_REQUIRE_EQUAL(NextBlockHeight(), THAW_HEIGHT);
+    BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), before_templates + 1);
+
+    // The record the node keeps is the same record a full walk produces.
+    {
+        LOCK(cs_main);
+        auto& chainstate = m_node.chainman->ActiveChainstate();
+        const auto kept = chainstate.CoinsTip().GetDigiDollarState();
+        BOOST_REQUIRE(kept);
+        BOOST_CHECK(kept->Matches(Params().GetConsensus().hashGenesisBlock,
+                                  chainstate.m_chain.Tip()->GetBlockHash(),
+                                  THAW_HEIGHT, Params().GetConsensus().DigiDollarHeight));
+        BOOST_CHECK(!kept->history_checked);
+        DigiDollar::ChainstateHealth fresh;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(DigiDollar::ReconstructChainstateHealth(
+            chainstate.CoinsTip(), Params().GetConsensus(), blockman_lookup, fresh, error), error);
+        BOOST_CHECK(*kept == fresh);
+    }
+
+    // Templates for the first Thaw Day block reuse that record instead of walking again.
+    const auto after_connect = DigiDollar::ChainstateHealthRebuildCount();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        BOOST_REQUIRE(BuildTemplate(options));
+    }
+    BOOST_CHECK_EQUAL(DigiDollar::ChainstateHealthRebuildCount(), after_connect);
+
+    // Connect the first Thaw Day block and a few after it, then re-check the whole
+    // stretch the way "verifychain 4" does. That check reconnects blocks into a
+    // private coins view using the same code path a mining template uses, so it
+    // has to still get the record it needs when it crosses the height.
+    mineBlocks(4);
+    BOOST_REQUIRE_EQUAL(NextBlockHeight(), THAW_HEIGHT + 4);
+    m_node.chainman->ActiveChainstate().ForceFlushStateToDisk();
+    {
+        LOCK(cs_main);
+        auto& chainstate = m_node.chainman->ActiveChainstate();
+        BOOST_CHECK(CVerifyDB(m_node.chainman->GetNotifications()).VerifyDB(
+            chainstate, Params().GetConsensus(), chainstate.CoinsDB(),
+            /*nCheckLevel=*/4, /*nCheckDepth=*/10) == VerifyDBResult::SUCCESS);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

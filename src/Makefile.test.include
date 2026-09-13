@@ -153,6 +153,7 @@ DIGIBYTE_TESTS =\
   test/oracle_rpc_tests.cpp \
   test/oracle_wallet_key_tests.cpp \
   test/oracle_wallet_autostart_tests.cpp \
+  test/oracle_shutdown_order_tests.cpp \
   test/oracle_phase2_tests.cpp \
   test/musig2_basic_tests.cpp \
   test/musig2_bundle_creation_tests.cpp \
@@ -239,6 +240,7 @@ DIGIBYTE_TESTS =\
   test/bloom_tests.cpp \
   test/bswap_tests.cpp \
   test/checkqueue_tests.cpp \
+  test/coins_cursor_tests.cpp \
   test/coins_tests.cpp \
   test/coinstatsindex_tests.cpp \
   test/compilerbug_tests.cpp \
@@ -345,6 +347,7 @@ DIGIBYTE_TESTS += \
   wallet/test/scriptpubkeyman_tests.cpp \
   wallet/test/walletload_tests.cpp \
   wallet/test/group_outputs_tests.cpp \
+  wallet/test/digidollar_mint_cleanup_tests.cpp \
   wallet/test/digidollar_persistence_wallet_tests.cpp \
   wallet/test/digidollar_wallet_lock_safety_tests.cpp \
   wallet/test/digidollar_wallet_security_tests.cpp \
@@ -353,6 +356,7 @@ DIGIBYTE_TESTS += \
   wallet/test/digidollar_wave17_spendability_tests.cpp \
   wallet/test/digidollar_wave17_helper_asymmetry_tests.cpp \
   test/digidollar_rpc_unit_tests.cpp \
+  test/digidollar_mint_cancel_tests.cpp \
   test/digidollar_wallet_candidate_lock_tests.cpp \
   test/digidollar_wave18_rpc_schema_tests.cpp \
   test/digidollar_wallet_hd_tests.cpp
@@ -383,8 +387,14 @@ DIGIBYTE_TEST_SUITE += \
   wallet/test/init_test_fixture.h
 endif # ENABLE_WALLET
 
+# Some tests read a file out of the checkout, for example to confirm that a log
+# line is still in the source. Tell the test program where the checkout is, so
+# those tests work no matter which directory it is started from. See
+# src/test/util/source_root.h.
+TEST_SOURCE_ROOT_DEF = -DDIGIBYTE_TEST_SOURCE_ROOT=\"$(abs_top_srcdir)\"
+
 test_test_digibyte_SOURCES = $(DIGIBYTE_TEST_SUITE) $(DIGIBYTE_TESTS) $(JSON_TEST_FILES) $(RAW_TEST_FILES)
-test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS)
+test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS) $(TEST_SOURCE_ROOT_DEF)
 test_test_digibyte_LDADD = $(LIBTEST_UTIL)
 if ENABLE_WALLET
 test_test_digibyte_LDADD += $(LIBDIGIBYTE_WALLET)

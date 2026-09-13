@@ -196,7 +196,7 @@ BOOST_AUTO_TEST_CASE(completed_session_requires_signed_values_not_live_recovery)
     ScopedMockOracleDisabled mock_disabled;
 
     if (!g_signing_orchestrator) {
-        OracleSigningOrchestrator::Initialize();
+        OracleSigningOrchestrator::Initialize(/*connman=*/nullptr);
     }
     g_signing_orchestrator->Clear();
 
@@ -247,7 +247,7 @@ BOOST_AUTO_TEST_CASE(add_bundle_consumes_session_and_prunes_old_epochs)
 
     // Build a completed session and inject it into the orchestrator
     if (!g_signing_orchestrator) {
-        OracleSigningOrchestrator::Initialize();
+        OracleSigningOrchestrator::Initialize(/*connman=*/nullptr);
     }
     g_signing_orchestrator->Clear();
 

@@ -63,7 +63,10 @@ struct CanonicalVault {
 enum class VaultLookupResult { NOT_VAULT, VAULT, NOT_READY };
 
 /** Resolve identity from the creating transaction on the supplied ancestry.
- * A missing eligible creating transaction is a local readiness failure.
+ * NOT_READY means only one thing: the creating block could not be read here, so
+ * another node with that block may still answer. Whenever the creating
+ * transaction can be read, the answer is VAULT or NOT_VAULT and is the same on
+ * every node, including for a mint that records no readable amount.
  */
 VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& coin,
                                       const Consensus::Params& params,
@@ -79,6 +82,13 @@ bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params
                                 const std::function<bool()>& interrupted = {},
                                 CAmount* circulating_supply = nullptr,
                                 const std::function<void(uint64_t, uint64_t)>& progress = {});
+
+/** How many times the whole coin set has been walked to rebuild the accounting.
+ * This walk reads a block from disk for every unspent DigiDollar output, so it
+ * should happen once when the node needs a new starting point and not again.
+ * Only tests and logs read this number; nothing in validation uses it.
+ */
+uint64_t ChainstateHealthRebuildCount();
 
 /** Apply or undo a transaction using the original amounts of its creating vaults. */
 bool UpdateChainstateHealth(const CTransaction& tx, const std::vector<Coin>& inputs,

@@ -29,9 +29,15 @@ private Q_SLOTS:
     void amountColumnsAreSeparate();
     /** The exported CSV file carries both amount columns. */
     void csvExportHasSeparateAmountColumns();
-    /** A send that spends the wallet's own DigiDollar input keeps its fee in
-        the DigiByte column and its dollars in the DigiDollar column. */
-    void sendFromOwnTokenKeepsFeeInDigiByteColumn();
+    /** A send that spends the wallet's own DigiDollar input puts its dollars on
+        one row and its DigiByte fee on a row of its own. */
+    void sendFromOwnTokenShowsTheFeeOnItsOwnRow();
+    /** The places with room for one figure show the figure the row has: the
+        DigiByte amount, or the dollar amount on a DigiDollar row. */
+    void theSingleAmountIsTheOneTheRowHas();
+    /** The transaction list opens with the column widths the program chooses,
+        and a width the user set is still there next time. */
+    void transactionViewAppliesAndRemembersColumnWidths();
     /** The DigiDollar tab calls returned change what it is and explains it. */
     void changeReturnedLabelExplainsItself();
     /** Every DigiDollar row type has a name, an icon and one amount. */

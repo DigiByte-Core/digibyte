@@ -387,7 +387,11 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
         // Create a single DDSendFee record for the DGB fee portion
         if (nTxFee > 0 || nDebit > 0) {
             TransactionRecord sub(hash, nTime);
-            sub.idx = parts.size();
+            // There is no output for a fee, so this row sorts after the last
+            // real one. Numbering it by how many rows have been built so far
+            // would give it the number of an output, and that number can be
+            // one a real row in the same transaction already has.
+            sub.idx = static_cast<int>(wtx.tx->vout.size());
             sub.involvesWatchAddress = involvesWatchAddress;
             sub.type = TransactionRecord::DDSendFee;
             sub.debit = -nDebit; // Total DGB spent (fee + any non-change DGB outputs)
@@ -428,6 +432,15 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
         }
 
         CAmount nTxFee = nDebit - wtx.tx->GetValueOut();
+
+        // A transfer the wallet paid for entirely out of its own coins comes
+        // through here rather than the transfer code above. Give its fee a row
+        // of its own, the way a mint has one. Added to the first output
+        // instead, the fee lands on a DigiDollar row, whose amount is a dollar
+        // figure, and the DigiByte the user actually paid is not shown as a fee
+        // anywhere.
+        const bool ddTransferFeeHasItsOwnRow =
+            isDDTransaction && ddTxType == DigiDollar::DD_TX_TRANSFER;
 
         for(unsigned int i = 0; i < wtx.tx->vout.size(); i++)
         {
@@ -488,8 +501,11 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 }
 
                 CAmount nValue = txout.nValue;
-                /* Add fee to first output */
-                if (nTxFee > 0)
+                /* Add fee to first output. A DigiDollar transfer is the one
+                   exception: its fee goes on a row of its own below, because
+                   the first output of a transfer is a DigiDollar output whose
+                   amount is shown in dollars. */
+                if (nTxFee > 0 && !ddTransferFeeHasItsOwnRow)
                 {
                     nValue += nTxFee;
                     nTxFee = 0;
@@ -547,6 +563,17 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
 
                 parts.append(sub);
             }
+        }
+
+        if (fAllFromMe && ddTransferFeeHasItsOwnRow && nTxFee > 0) {
+            TransactionRecord sub(hash, nTime);
+            // There is no output for a fee, so this row sorts after the last
+            // real one.
+            sub.idx = static_cast<int>(wtx.tx->vout.size());
+            sub.involvesWatchAddress = involvesWatchAddress;
+            sub.type = TransactionRecord::DDSendFee;
+            sub.debit = -nTxFee;
+            parts.append(sub);
         }
     } else {
         //

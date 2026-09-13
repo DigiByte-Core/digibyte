@@ -530,13 +530,20 @@ QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
     return isDarkTheme ? QColor(255, 255, 255) : QColor(0, 51, 102);
 }
 
+/** True when a row carries DigiDollars and no DigiByte, so the only figure it
+    has to show is the dollar one. */
+static bool rowCarriesOnlyDigiDollar(const TransactionRecord* wtx)
+{
+    return wtx->credit + wtx->debit == 0 && wtx->ddAmount != 0;
+}
+
 /** The DigiByte cell of a row. A row that carries DigiDollars leaves this cell
     empty instead of printing a DigiByte zero, because the DigiByte side of that
     transaction is already on its own row. */
 QString TransactionTableModel::formatAmountDGB(const TransactionRecord *wtx, DigiByteUnit unit, bool showUnconfirmed, DigiByteUnits::SeparatorStyle separators)
 {
     const CAmount amount = wtx->credit + wtx->debit;
-    if (amount == 0 && wtx->ddAmount != 0) {
+    if (rowCarriesOnlyDigiDollar(wtx)) {
         return QString();
     }
     QString str = DigiByteUnits::format(unit, amount, false, separators);
@@ -790,6 +797,22 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return formatAmountDGB(rec, walletModel->getOptionsModel()->getDisplayUnit(), false, DigiByteUnits::SeparatorStyle::NEVER);
     case FormattedAmountDDRole:
         return formatAmountDD(rec, false);
+    case FormattedSingleAmountRole:
+        // The pop-up that announces a new transaction and the short list on the
+        // main overview have room for one figure. A DigiDollar row holds no
+        // DigiByte, so reading the DigiByte figure there would announce a
+        // DigiDollar payment as zero DigiByte.
+        if (rowCarriesOnlyDigiDollar(rec)) {
+            return formatAmountDD(rec, false);
+        }
+        return DigiByteUnits::formatWithUnit(walletModel->getOptionsModel()->getDisplayUnit(),
+                                             rec->credit + rec->debit, true,
+                                             DigiByteUnits::SeparatorStyle::ALWAYS);
+    case SingleAmountRole:
+        if (rowCarriesOnlyDigiDollar(rec)) {
+            return qint64(rec->ddAmount);
+        }
+        return qint64(rec->credit + rec->debit);
     case StatusRole:
         return rec->status.status;
     }

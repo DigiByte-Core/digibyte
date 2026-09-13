@@ -690,11 +690,13 @@ BOOST_FIXTURE_TEST_CASE(test_build_transfer_inputs, DDTransferTestFixture)
     // Act: Build transfer transaction
     TxBuilderResult result = builder.BuildTransferTransaction(params);
 
-    // Assert: Transaction should be created with correct inputs
-    BOOST_CHECK_EQUAL(result.success, true);
+    // Assert: Transaction should be created with correct inputs.
+    // These two have to stop the test, not just record a failure. The checks
+    // below read the first inputs, and a build that was refused has none.
+    BOOST_REQUIRE_EQUAL(result.success, true);
 
     // Verify DD inputs were added (should be first 2 inputs before fee inputs)
-    BOOST_CHECK_GE(result.tx.vin.size(), 2);
+    BOOST_REQUIRE_GE(result.tx.vin.size(), 2u);
     BOOST_CHECK(result.tx.vin[0].prevout == utxo1);
     BOOST_CHECK(result.tx.vin[1].prevout == utxo2);
 }

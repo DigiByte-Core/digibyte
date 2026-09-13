@@ -421,6 +421,47 @@ namespace {
             candidate.error.empty() ? "DigiDollar candidate health state not ready" : candidate.error);
     }
 
+    /**
+     * Held for the whole of a mint or a redemption, so only one of them builds
+     * and sends a transaction from a wallet at a time.
+     *
+     * The wallet locks used to do this job. They were taken before the coins
+     * were chosen and kept until the finished transaction had been handed to
+     * the wallet, and while they were held no other worker could choose the
+     * same coins. They cannot do it any more, because they are let go for a
+     * moment further down so the chain can be asked whether it has moved. In
+     * that moment the coins this transaction spends still look unspent to
+     * everyone else, because the transaction has not reached the wallet yet.
+     * Two mints sent at the same instant chose the same coins and the second
+     * one came back "txn-mempool-conflict".
+     *
+     * This lock is taken before any wallet lock and the chain never takes it,
+     * so asking the chain while holding it cannot leave the node stuck. One
+     * lock is shared by every loaded wallet. A mint and a redemption are rare,
+     * deliberate actions, so waiting behind one on another wallet costs far
+     * less than keeping a separate lock alive for each wallet would.
+     */
+    GlobalMutex g_digidollar_spend_mutex;
+
+    /**
+     * Stop the node at once, naming the lock and the line that took it, if a
+     * wallet lock is held where the chain is about to be asked a question.
+     *
+     * The chain takes its own lock and then calls into the wallet. So a thread
+     * that holds a wallet lock and then waits for the chain, running against a
+     * thread going the other way, leaves the node stuck with no way out. This
+     * turns that into an immediate, named stop while a build with lock checking
+     * is under test. It does nothing in a release build.
+     *
+     * It is a plain function rather than the AssertLockNotHeld macro so that a
+     * compiler which tracks locks does not object to checking a lock it
+     * believes is held, which is exactly the case worth checking.
+     */
+    void RequireNoWalletLockForChainQuery(const char* lock_name, RecursiveMutex& cs, const char* file, int line)
+    {
+        AssertLockNotHeldInternal(lock_name, file, line, &cs);
+    }
+
     void RecheckCandidateHealth(ChainstateManager& chainman, const CandidateHealthQuote& previous)
     {
         if (!previous.active) return;
@@ -1728,6 +1769,12 @@ RPCHelpMan mintdigidollar()
                     "DigiDollar mint requires the wallet to be unlocked. "
                     "Error: Please enter the wallet passphrase with walletpassphrase first.");
             }
+            // A new block is handed to the wallet on another thread. Picking
+            // coins before the wallet has worked through the newest block can
+            // miss coins that just confirmed, or reach for one the block just
+            // spent, so wait for the wallet to catch up first.
+            pwallet->BlockUntilSyncedToCurrentChain();
+
             // Parse parameters
             CAmount ddAmount = request.params[0].getInt<int64_t>();
             int lockTier = request.params[1].getInt<int>();
@@ -1844,7 +1891,15 @@ RPCHelpMan mintdigidollar()
             // persistence. This prevents concurrent mint RPC workers from
             // selecting the same wallet inputs from stale AvailableCoins()
             // snapshots before the first mint is committed.
-            LOCK2(pwallet->cs_wallet, dd_wallet->cs_dd_wallet);
+            //
+            // The two locks are named because they are let go again, briefly,
+            // further down, for the one question this command puts to the chain.
+            // While they are down they cannot keep another worker away from
+            // these coins, so the lock above them does that instead. It is
+            // taken first and kept for the whole command.
+            LOCK(g_digidollar_spend_mutex);
+            WAIT_LOCK(pwallet->cs_wallet, mint_wallet_lock);
+            WAIT_LOCK(dd_wallet->cs_dd_wallet, mint_dd_wallet_lock);
 
             // Get available UTXOs from wallet and build value map
             std::vector<COutPoint> availableUtxos;
@@ -2095,11 +2150,33 @@ RPCHelpMan mintdigidollar()
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Saved position %s (%d DD cents) and its owner key before broadcast\n",
                       positionId.ToString(), ddAmount);
 
+            // From here until the transaction has been committed, anything that
+            // stops this mint must not leave those records behind, because they
+            // would describe a transaction that was never sent. This releases
+            // them whichever way the command gives up, including the check
+            // below that the chain and the oracle quote have not moved.
+            DigiDollarWallet::SavedMintCleanup saved_mint_cleanup(*dd_wallet, positionId, "DigiDollar RPC Mint");
+
             const bool should_broadcast = pwallet->GetBroadcastTransactions();
-            if (should_broadcast) {
-                RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
+            {
+                // Checking that the chain has not moved since this mint was
+                // built waits for the chain's own lock. The chain takes that
+                // lock before it calls into the wallet, so waiting for it with
+                // a wallet lock held can meet a thread going the other way and
+                // leave the node stuck. Let both wallet locks go for the length
+                // of the question and take them back straight after, in the
+                // same order. No other mint or redemption can start in the gap,
+                // because this command still holds the lock that keeps those
+                // apart, so the coins this mint spends stay its own.
+                REVERSE_LOCK(mint_dd_wallet_lock);
+                REVERSE_LOCK(mint_wallet_lock);
+                RequireNoWalletLockForChainQuery("pwallet->cs_wallet", pwallet->cs_wallet, __FILE__, __LINE__);
+                RequireNoWalletLockForChainQuery("dd_wallet->cs_dd_wallet", dd_wallet->cs_dd_wallet, __FILE__, __LINE__);
+                if (should_broadcast) {
+                    RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
+                }
+                RecheckCandidateHealth(*node_ctx->chainman, candidateHealth);
             }
-            RecheckCandidateHealth(*node_ctx->chainman, candidateHealth);
 
             // Commit through the wallet-owned relay path exactly once so the
             // wallet state transition and mempool submission stay in sync.
@@ -2116,16 +2193,10 @@ RPCHelpMan mintdigidollar()
             }
             if (!commit_success) {
                 // The mempool (or the wallet itself) refused the transaction.
-                // Release what this attempt reserved: its inputs, coin locks and
-                // active status. The owner key and the record of the attempt stay.
-                std::string cleanup_error;
-                if (!dd_wallet->ReleaseMintAttempt(positionId, cleanup_error)) {
-                    LogPrintf("DigiDollar RPC Mint: could not release rejected mint %s: %s\n",
-                              positionId.ToString(), cleanup_error);
-                } else {
-                    LogPrintf("DigiDollar RPC Mint: Released rejected mint transaction %s\n",
-                              positionId.ToString());
-                }
+                // The cleanup set up above releases what this attempt reserved
+                // as the command gives up: its inputs, its coin locks and its
+                // active status. The owner key and the record of the attempt
+                // stay.
                 if (should_broadcast) {
                     throw JSONRPCError(RPC_TRANSACTION_REJECTED,
                         strprintf("Mint transaction rejected by mempool: %s", commit_error));
@@ -2133,6 +2204,10 @@ RPCHelpMan mintdigidollar()
                 throw JSONRPCError(RPC_WALLET_ERROR,
                     strprintf("Mint transaction was not committed to the wallet: %s", commit_error));
             }
+
+            // The transaction is in the wallet now, so the records saved above
+            // describe something real. Keep them.
+            saved_mint_cleanup.KeepRecords();
 
             const int baseRatio = DigiDollar::GetCollateralRatioForLockTime(
                 DigiDollar::LockDaysToBlocks(lockDays), ddParams);
@@ -2264,6 +2339,12 @@ RPCHelpMan senddigidollar()
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not initialized");
             }
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: Got DD wallet\n");
+
+            // A new block is handed to the wallet on another thread. Picking
+            // coins before the wallet has worked through the newest block can
+            // miss coins that just confirmed, or reach for one the block just
+            // spent, so wait for the wallet to catch up first.
+            pwallet->BlockUntilSyncedToCurrentChain();
 
             // Parse parameters
             std::string addressStr = request.params[0].get_str();
@@ -2455,6 +2536,12 @@ RPCHelpMan sendmanydigidollar()
             if (!dd_wallet) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not initialized");
             }
+
+            // A new block is handed to the wallet on another thread. Picking
+            // coins before the wallet has worked through the newest block can
+            // miss coins that just confirmed, or reach for one the block just
+            // spent, so wait for the wallet to catch up first.
+            pwallet->BlockUntilSyncedToCurrentChain();
 
             if (OptionalParamIsSet(request, 0) && !request.params[0].get_str().empty()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Dummy value must be set to \"\"");
@@ -2680,7 +2767,13 @@ RPCHelpMan redeemdigidollar()
             auto& healthChainman = *candidate_node->chainman;
             const auto candidateHealth = GetCandidateHealthQuote(healthChainman);
             RequireCandidateHealth(candidateHealth);
-            LOCK(pwallet->cs_wallet);
+            // The lock is named because it is let go again, briefly, further
+            // down, for the one question this command puts back to the chain.
+            // While it is down it cannot keep another worker away from this
+            // position, so the lock above it does that instead. It is taken
+            // first and kept for the whole command.
+            LOCK(g_digidollar_spend_mutex);
+            WAIT_LOCK(pwallet->cs_wallet, redeem_wallet_lock);
             WalletCollateralPosition foundPosition;
             bool found = false;
 
@@ -2869,10 +2962,16 @@ RPCHelpMan redeemdigidollar()
                         actualUnlockAddress = EncodeDestination(*op_dest);
                         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Using wallet destination for returned collateral\n");
                     } else {
-                        CTxDestination ownerFallback{WitnessV1Taproot(XOnlyPubKey(ownerKey.GetPubKey()))};
-                        actualUnlockAddress = EncodeDestination(ownerFallback);
-                        LogPrintf("DigiDollar: WARNING - Could not get wallet address, using owner key (wallet may not recognize)\n");
+                        // A redemption hands back the whole vault. With no
+                        // address to send it to, stop here and say how to
+                        // get a redemption that works. The builder refuses
+                        // this case as well; saying it here gives the caller
+                        // the reason and the remedy.
                         LogPrintf("DigiDollar: Error: %s\n", util::ErrorString(op_dest).original);
+                        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
+                            "This wallet could not create an address for the collateral this redemption unlocks. "
+                            "Refill this wallet's addresses (keypoolrefill) and try again, or pass "
+                            "redemption_address to say where the collateral should go.");
                     }
                 }
 
@@ -3005,10 +3104,24 @@ RPCHelpMan redeemdigidollar()
             CTransactionRef redeemTx = MakeTransactionRef(redeemResult.tx);
 
             const bool should_broadcast = pwallet->GetBroadcastTransactions();
-            if (should_broadcast) {
-                RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
+            {
+                // Checking that the chain has not moved since this redemption
+                // was built waits for the chain's own lock. The chain takes that
+                // lock before it calls into the wallet, so waiting for it with
+                // the wallet lock held can meet a thread going the other way and
+                // leave the node stuck. Let the wallet lock go for the length of
+                // the question and take it back straight after. The redemption
+                // is already built and signed by this point, and nothing read
+                // out of the wallet is still being pointed at. No other mint or
+                // redemption can start in the gap, because this command still
+                // holds the lock that keeps those apart.
+                REVERSE_LOCK(redeem_wallet_lock);
+                RequireNoWalletLockForChainQuery("pwallet->cs_wallet", pwallet->cs_wallet, __FILE__, __LINE__);
+                if (should_broadcast) {
+                    RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
+                }
+                RecheckCandidateHealth(healthChainman, candidateHealth);
             }
-            RecheckCandidateHealth(healthChainman, candidateHealth);
 
             // Commit through the wallet-owned relay path exactly once so the
             // wallet state transition and mempool submission stay in sync.
@@ -3021,9 +3134,14 @@ RPCHelpMan redeemdigidollar()
             if (should_broadcast && !commit_success) {
                 const uint256 redeem_txid = redeemTx->GetHash();
                 if (pwallet->TransactionCanBeAbandoned(redeem_txid)) {
-                    pwallet->AbandonTransaction(redeem_txid);
-                    LogPrintf("DigiDollar RPC Redeem: Abandoned rejected local redemption transaction %s\n",
-                              redeem_txid.ToString());
+                    if (pwallet->AbandonTransaction(redeem_txid)) {
+                        LogPrintf("DigiDollar RPC Redeem: Abandoned rejected local redemption transaction %s\n",
+                                  redeem_txid.ToString());
+                    } else {
+                        LogPrintf("DigiDollar RPC Redeem: could not abandon rejected local redemption "
+                                  "transaction %s; the coins it spends stay committed to it\n",
+                                  redeem_txid.ToString());
+                    }
                 }
                 throw JSONRPCError(RPC_TRANSACTION_REJECTED,
                     strprintf("Redemption transaction rejected by mempool: %s", commit_error));
@@ -3416,6 +3534,12 @@ RPCHelpMan getdigidollaraddress()
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar address generation requires a descriptor/bech32m HD wallet with private keys enabled");
             }
 
+            // This hands out a new address and records it in the wallet. Wait
+            // for the wallet to finish the newest block first, so the command
+            // works on a wallet that is up to date with the chain, the same as
+            // the other DigiDollar wallet commands.
+            pwallet->BlockUntilSyncedToCurrentChain();
+
             LOCK(pwallet->cs_wallet);
 
             if (!pwallet->CanGetAddresses()) {
@@ -3573,6 +3697,12 @@ RPCHelpMan validateddaddress()
                     }
                 }
             }
+
+            // Whether a DigiDollar address belongs to this wallet can change
+            // when a block is processed, and that happens on another thread.
+            // Wait for the wallet to catch up before answering.
+            if (pwallet_check) pwallet_check->BlockUntilSyncedToCurrentChain();
+
             std::string addressStr = request.params[0].get_str();
 
             UniValue result(UniValue::VOBJ);
@@ -3705,6 +3835,12 @@ RPCHelpMan listdigidollaraddresses()
             if (!dd_wallet) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not available");
             }
+
+            // A new block is handed to the wallet on another thread, so the
+            // wallet can still be working through the newest block when this
+            // command runs. Wait for it to catch up first, or the answer
+            // leaves out DigiDollars that are already in a block.
+            pwallet->BlockUntilSyncedToCurrentChain();
 
             // Parse parameters
             bool includeWatchOnly = OptionalParamIsSet(request, 0) ? request.params[0].get_bool() : false;
@@ -4605,6 +4741,12 @@ RPCHelpMan listdigidollartxs()
             if (!dd_wallet) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "DigiDollar wallet not initialized");
             }
+
+            // A new block is handed to the wallet on another thread, so the
+            // wallet can still be working through the newest block when this
+            // command runs. Wait for it to catch up first, or the answer
+            // leaves out DigiDollars that are already in a block.
+            pwallet->BlockUntilSyncedToCurrentChain();
 
             // Parse parameters
             int count = OptionalParamIsSet(request, 0) ? request.params[0].getInt<int>() : 10;

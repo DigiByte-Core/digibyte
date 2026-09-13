@@ -268,7 +268,13 @@ public:
     std::optional<DigiDollar::ChainstateHealth> GetDigiDollarState() const override;
     void SetDigiDollarState(std::optional<DigiDollar::ChainstateHealth> state);
     bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true, const std::optional<DigiDollar::ChainstateHealth>& dd_state = std::nullopt) override;
-    //! Snapshot the cache overlay as well as its backing cursor. Order is unspecified.
+    //! Walk every unspent coin this cache represents, exactly once: the coins
+    //! still held by the backing view, with this cache's unwritten changes laid
+    //! over them. Coins come out in increasing outpoint order, which is the
+    //! coins database's own key order, so the order does not depend on how much
+    //! of the cache has been written to disk. The changed entries are copied
+    //! when the walk starts, so reading a coin from this cache during a walk is
+    //! safe. Returns null if the backing view cannot be walked at all.
     std::unique_ptr<CCoinsViewCursor> Cursor() const override;
 
     /**

@@ -326,7 +326,7 @@ void DDTransactionRecordTests::mintDetailsShowDigiDollarFacts()
     MockOracleManager::GetInstance().Reset();
 }
 
-void DDTransactionRecordTests::transferRowsUnchanged()
+void DDTransactionRecordTests::transferRowsShowDollarsAndFeeSeparately()
 {
     TestChain100Setup test;
     auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
@@ -389,7 +389,12 @@ void DDTransactionRecordTests::transferRowsUnchanged()
     QCOMPARE(TotalDgbOnRows(rows_a), -fee);
 
     // Second shape: the wallet holds the DigiDollar itself, so every input is
-    // its own. Here the fee rides on the send row and there is no fee row.
+    // its own. This shape goes through the ordinary code rather than the
+    // transfer code, and that code used to add the fee to the first output's
+    // amount. On a transfer the first output is a DigiDollar output, so the
+    // DigiByte fee ended up on a row whose amount is a dollar figure and the
+    // user could not see what he paid. The fee now has a row of its own, the
+    // same as a mint's fee does.
     CMutableTransaction funding_b;
     funding_b.vin.resize(1);
     funding_b.vin[0].prevout = COutPoint(uint256::ONE, 1);
@@ -414,12 +419,89 @@ void DDTransactionRecordTests::transferRowsUnchanged()
     QVERIFY(wtx_b.txout_is_change[1]);
 
     QList<TransactionRecord> rows_b = TransactionRecord::decomposeTransaction(wtx_b);
-    QCOMPARE(rows_b.size(), 1);
+    QCOMPARE(rows_b.size(), 2);
     QCOMPARE(CountRowsOfType(rows_b, TransactionRecord::DDSend), 1);
     QCOMPARE(FindRow(rows_b, TransactionRecord::DDSend)->ddAmount, CAmount(-1000));
-    QCOMPARE(FindRow(rows_b, TransactionRecord::DDSend)->debit, -fee);
+    // No DigiByte on the dollar row at all.
+    QCOMPARE(FindRow(rows_b, TransactionRecord::DDSend)->debit, CAmount(0));
+    QCOMPARE(FindRow(rows_b, TransactionRecord::DDSend)->credit, CAmount(0));
+    QCOMPARE(CountRowsOfType(rows_b, TransactionRecord::DDSendFee), 1);
+    QCOMPARE(FindRow(rows_b, TransactionRecord::DDSendFee)->debit, -fee);
+    QCOMPARE(FindRow(rows_b, TransactionRecord::DDSendFee)->ddAmount, CAmount(0));
     QCOMPARE(CountRowsOfType(rows_b, TransactionRecord::DDMint), 0);
+    // The DigiByte across all the rows still adds up to what the transaction
+    // did to the wallet's DigiByte, which is the fee and nothing else.
     QCOMPARE(TotalDgbOnRows(rows_b), wtx_b.credit - wtx_b.debit);
+    QCOMPARE(TotalDgbOnRows(rows_b), -fee);
+}
+
+void DDTransactionRecordTests::transferFeeRowNumberCannotClashWithARealRow()
+{
+    // Every row a transaction produces carries the number of the output it came
+    // from. A fee has no output, so its row is numbered past the last one. The
+    // transfer code used to number it with how many rows it had built so far,
+    // and that number can be one a real row in the same transaction already
+    // has. Two rows of one transaction then claim the same output.
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    std::shared_ptr<wallet::CWallet> wallet = wallet::CreateSyncedWallet(
+        *test.m_node.chain,
+        WITH_LOCK(Assert(test.m_node.chainman)->GetMutex(), return test.m_node.chainman->ActiveChain()),
+        test.coinbaseKey);
+
+    MiniGui gui(m_node);
+    gui.openWallet(m_node, wallet);
+
+    const CTxDestination our_dgb = *Assert(wallet->GetNewDestination(OutputType::BECH32, ""));
+    const CTxDestination their_dd = ForeignTaprootDest(0x21);
+    // A DigiDollar output that comes back to the wallet as change. The send
+    // side of the code skips a change output; the receive side does not, so
+    // this output produces exactly one row, numbered 1.
+    const CTxDestination our_dd_change = *Assert(wallet->GetNewChangeDestination(OutputType::BECH32M));
+    const CAmount fee = COIN / 10;
+
+    // The DigiDollar being spent sits on an output the wallet cannot spend, so
+    // the transfer goes through the transfer code rather than the ordinary
+    // code, which is where the fee row is numbered.
+    CMutableTransaction funding;
+    funding.vin.resize(1);
+    funding.vin[0].prevout = COutPoint(uint256::ONE, 2);
+    funding.vout.push_back(DDTokenOut(their_dd));
+    funding.vout.push_back(CTxOut(10 * COIN, GetScriptForDestination(our_dgb)));
+    const CTransactionRef funding_tx = MakeTransactionRef(funding);
+    PutInWallet(*wallet, funding_tx);
+
+    CMutableTransaction transfer;
+    transfer.SetDigiDollarType(DD_TX_TRANSFER);
+    transfer.vin.push_back(CTxIn(COutPoint(funding_tx->GetHash(), 0)));
+    transfer.vin.push_back(CTxIn(COutPoint(funding_tx->GetHash(), 1)));
+    transfer.vout.push_back(DDTokenOut(their_dd));            // output 0, paid away
+    transfer.vout.push_back(DDTokenOut(our_dd_change));       // output 1, back to us
+    transfer.vout.push_back(CTxOut(10 * COIN - fee,
+                                   GetScriptForDestination(*Assert(wallet->GetNewChangeDestination(OutputType::BECH32)))));
+    transfer.vout.push_back(TransferDataOut({1000, 500}));
+    const CTransactionRef transfer_tx = MakeTransactionRef(transfer);
+    PutInWallet(*wallet, transfer_tx);
+
+    interfaces::WalletTx wtx = gui.walletModel->wallet().getWalletTx(transfer_tx->GetHash());
+    QVERIFY(wtx.tx != nullptr);
+    QVERIFY(wtx.txout_is_change[1]);
+
+    const QList<TransactionRecord> rows = TransactionRecord::decomposeTransaction(wtx);
+    const TransactionRecord* fee_row = FindRow(rows, TransactionRecord::DDSendFee);
+    QVERIFY(fee_row != nullptr);
+
+    // The fee row sits past the last output, so it can never be given the
+    // number of a real row.
+    QCOMPARE(fee_row->getOutputIndex(), int(wtx.tx->vout.size()));
+    for (const TransactionRecord& row : rows) {
+        if (row.type == TransactionRecord::DDSendFee) continue;
+        QVERIFY2(row.getOutputIndex() != fee_row->getOutputIndex(),
+                 "a real row and the fee row were given the same output number");
+    }
 }
 
 void DDTransactionRecordTests::transferDetailsShowDigiDollarAmounts()

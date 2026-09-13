@@ -98,6 +98,10 @@ public:
     }
 
     //! System health tracking
+    //! Returns the collateral ratio as a percentage: 200 means the locked DGB
+    //! is worth twice the DigiDollar minted against it. Returns 0 when there is
+    //! nothing to compare, and the largest money amount when the true ratio is
+    //! too big to fit in one. Never reports a wrapped-round number.
     CAmount GetCurrentCollateralRatio(CAmount currentPrice) const;
     bool IsHealthy(CAmount currentPrice) const;
     CAmount GetRequiredDDForRedemption(int systemCollateral) const;

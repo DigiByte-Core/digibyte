@@ -39,6 +39,9 @@
 #include <QSet>
 #include <QStringList>
 #include <QTableWidget>
+#include <QHeaderView>
+#include <QSettings>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTextStream>
 
@@ -427,7 +430,7 @@ void DDTransactionTableTests::amountColumnsAreSeparate()
     }
 }
 
-void DDTransactionTableTests::sendFromOwnTokenKeepsFeeInDigiByteColumn()
+void DDTransactionTableTests::sendFromOwnTokenShowsTheFeeOnItsOwnRow()
 {
     if (MaybeSkipMacMinimal()) return;
     TestChain100Setup test;
@@ -441,10 +444,11 @@ void DDTransactionTableTests::sendFromOwnTokenKeepsFeeInDigiByteColumn()
     const std::shared_ptr<wallet::CWallet>& wallet =
         SetupWallet(m_node, test, "qt-dd-own-token-send");
 
-    // A send where every input belongs to the wallet. The history builds one
-    // row for the DigiDollars that left and hangs the DigiByte fee on it, so
-    // this row really does hold both kinds of money. Each column must still
-    // show its own figure and nothing else.
+    // A send where every input belongs to the wallet. This used to build a
+    // single row and hang the DigiByte fee on the row that shows dollars, so
+    // the user could not tell that the DigiByte figure was the fee. It now
+    // builds two rows: the dollars that left, and the fee. Each column must
+    // still show its own figure and nothing else.
     const CTransactionRef& fee_input = test.m_coinbase_txns[0];
     const CAmount input_value = fee_input->vout[0].nValue;
 
@@ -468,20 +472,38 @@ void DDTransactionTableTests::sendFromOwnTokenKeepsFeeInDigiByteColumn()
     QVERIFY(dgb_column >= 0 && dd_column >= 0 && dgb_column != dd_column);
 
     const QList<int> rows = RowsOfTransaction(*model, send_txid);
-    QCOMPARE(rows.size(), 1);
-    const int row = rows.at(0);
-    const QString dgb = model->index(row, dgb_column, QModelIndex()).data(Qt::DisplayRole).toString();
-    const QString dd = model->index(row, dd_column, QModelIndex()).data(Qt::DisplayRole).toString();
+    QCOMPARE(rows.size(), 2);
 
     const DigiByteUnit unit = mini_gui.walletModel->getOptionsModel()->getDisplayUnit();
-    QCOMPARE(dd, QString("-25.00 $DD"));
-    QCOMPARE(dgb, DigiByteUnits::format(unit, -kFee, false,
-                                        DigiByteUnits::SeparatorStyle::ALWAYS));
-    QVERIFY2(!dgb.contains("$DD"), "the DigiByte column printed a dollar amount");
-    QCOMPARE(model->index(row, dgb_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
-             qint64(-kFee));
-    QCOMPARE(model->index(row, dd_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
-             qint64(-2500));
+    const QString fee_text = DigiByteUnits::format(unit, -kFee, false,
+                                                   DigiByteUnits::SeparatorStyle::ALWAYS);
+    bool saw_dollar_row = false;
+    bool saw_fee_row = false;
+    for (int row : rows) {
+        const QString dgb = model->index(row, dgb_column, QModelIndex()).data(Qt::DisplayRole).toString();
+        const QString dd = model->index(row, dd_column, QModelIndex()).data(Qt::DisplayRole).toString();
+        QVERIFY2(!dgb.contains("$DD"), "the DigiByte column printed a dollar amount");
+
+        if (dd == QString("-25.00 $DD")) {
+            saw_dollar_row = true;
+            // No DigiByte at all on the row that shows dollars.
+            QVERIFY2(dgb.isEmpty(), "the row showing dollars also showed a DigiByte amount");
+            QCOMPARE(model->index(row, dgb_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
+                     qint64(0));
+            QCOMPARE(model->index(row, dd_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
+                     qint64(-2500));
+        } else if (dgb == fee_text) {
+            saw_fee_row = true;
+            // The fee row carries DigiByte and no dollars.
+            QVERIFY2(dd.isEmpty(), "the fee row also showed a dollar amount");
+            QCOMPARE(model->index(row, dgb_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
+                     qint64(-kFee));
+            QCOMPARE(model->index(row, dd_column, QModelIndex()).data(Qt::EditRole).toLongLong(),
+                     qint64(0));
+        }
+    }
+    QVERIFY2(saw_dollar_row, "the dollars that left were not shown");
+    QVERIFY2(saw_fee_row, "the fee was not shown on a row of its own");
 }
 
 void DDTransactionTableTests::csvExportHasSeparateAmountColumns()
@@ -615,6 +637,131 @@ void DDTransactionTableTests::digiDollarRowTypesAreLabelled()
         const TransactionRecord row = make_row(type, -1, 0, 0);
         QVERIFY2(!TransactionTableModel::formatTxType(&row).isEmpty(),
                  qPrintable(QString("row type %1 has no name").arg(int(type))));
+    }
+}
+
+void DDTransactionTableTests::theSingleAmountIsTheOneTheRowHas()
+{
+    // The pop-up that announces a new transaction, and the short list on the
+    // main overview, have room for one figure per row. Both used to read the
+    // DigiByte figure. A DigiDollar row holds no DigiByte, so a payment of
+    // $100 was announced as 0.00000000 DGB. Both now read the figure the row
+    // actually has.
+    if (MaybeSkipMacMinimal()) return;
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet =
+        SetupWallet(m_node, test, "qt-dd-single-amount");
+    DDHistory history;
+    history.build(wallet, test, m_node);
+
+    MiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    TransactionTableModel* model = mini_gui.walletModel->getTransactionTableModel();
+    QVERIFY(model != nullptr);
+
+    const int dgb_column = ColumnWithHeading(*model, "DGB");
+    const int dd_column = ColumnWithHeading(*model, "$DD");
+    QVERIFY(dgb_column >= 0 && dd_column >= 0);
+
+    bool saw_a_dollar_row = false;
+    bool saw_a_digibyte_row = false;
+    for (int row = 0; row < model->rowCount(QModelIndex()); ++row) {
+        const QModelIndex idx = model->index(row, 0, QModelIndex());
+        const QString single = idx.data(TransactionTableModel::FormattedSingleAmountRole).toString();
+        const qint64 single_number = idx.data(TransactionTableModel::SingleAmountRole).toLongLong();
+        const qint64 dgb_number = idx.data(TransactionTableModel::AmountRole).toLongLong();
+        const qint64 dd_number = idx.data(TransactionTableModel::AmountDDRole).toLongLong();
+
+        QVERIFY2(!single.isEmpty(), "every row must have one figure to show");
+        if (dgb_number == 0 && dd_number != 0) {
+            saw_a_dollar_row = true;
+            // The dollar figure, not a DigiByte zero.
+            QCOMPARE(single, idx.data(TransactionTableModel::FormattedAmountDDRole).toString());
+            QVERIFY2(single.contains("$DD"), "a DigiDollar row must show the dollar figure");
+            QCOMPARE(single_number, dd_number);
+        } else {
+            saw_a_digibyte_row = true;
+            QVERIFY2(!single.contains("$DD"), "a DigiByte row must not show a dollar figure");
+            QCOMPARE(single_number, dgb_number);
+        }
+    }
+    QVERIFY2(saw_a_dollar_row, "the history had no DigiDollar row to check");
+    QVERIFY2(saw_a_digibyte_row, "the history had no DigiByte row to check");
+}
+
+void DDTransactionTableTests::transactionViewAppliesAndRemembersColumnWidths()
+{
+    // The transaction view saves its column widths when it closes and puts them
+    // back when it opens. Putting them back used to happen before the view had
+    // a model. A header with no model has no columns, so every width call did
+    // nothing and the saved layout was thrown away when the model arrived.
+    if (MaybeSkipMacMinimal()) return;
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet =
+        SetupWallet(m_node, test, "qt-dd-column-widths");
+
+    MiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    QVERIFY(mini_gui.walletModel != nullptr);
+
+    // A width nobody would arrive at by accident.
+    const int chosen_width = 173;
+
+    QSettings settings;
+    const QVariant saved_before = settings.value("TransactionViewHeaderState");
+    settings.remove("TransactionViewHeaderState");
+    settings.sync();
+
+    // With nothing saved, the window must open with the widths the program
+    // chooses for each column.
+    {
+        TransactionView view(mini_gui.platformStyle.get());
+        view.setModel(mini_gui.walletModel.get());
+        QTableView* table = view.findChild<QTableView*>();
+        QVERIFY(table != nullptr);
+        QVERIFY2(table->horizontalHeader()->count() > 0,
+                 "the view has a model, so its header must have columns");
+        QCOMPARE(table->columnWidth(TransactionTableModel::Status),
+                 int(TransactionView::STATUS_COLUMN_WIDTH));
+        QCOMPARE(table->columnWidth(TransactionTableModel::Date),
+                 int(TransactionView::DATE_COLUMN_WIDTH));
+        QCOMPARE(table->columnWidth(TransactionTableModel::Type),
+                 int(TransactionView::TYPE_COLUMN_WIDTH));
+        QCOMPARE(table->columnWidth(TransactionTableModel::AmountDD),
+                 int(TransactionView::AMOUNT_DD_COLUMN_WIDTH));
+
+        // Now widen a column, as a user would.
+        table->setColumnWidth(TransactionTableModel::Date, chosen_width);
+        QCOMPARE(table->columnWidth(TransactionTableModel::Date), chosen_width);
+    }
+    // Closing the view saved the layout. Opening another one must bring it back.
+    {
+        TransactionView view(mini_gui.platformStyle.get());
+        view.setModel(mini_gui.walletModel.get());
+        QTableView* table = view.findChild<QTableView*>();
+        QVERIFY(table != nullptr);
+        QCOMPARE(table->columnWidth(TransactionTableModel::Date), chosen_width);
+        // The DigiDollar column is still on screen with a width of its own.
+        QVERIFY2(!table->isColumnHidden(TransactionTableModel::AmountDD),
+                 "the DigiDollar amount column was hidden");
+        QVERIFY(table->columnWidth(TransactionTableModel::AmountDD) > 0);
+    }
+
+    if (saved_before.isValid()) {
+        settings.setValue("TransactionViewHeaderState", saved_before);
+    } else {
+        settings.remove("TransactionViewHeaderState");
     }
 }
 

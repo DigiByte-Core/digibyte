@@ -289,9 +289,10 @@ BOOST_AUTO_TEST_CASE(transfer_pays_change_to_the_given_address)
     BOOST_CHECK_EQUAL(paidToChange, params.feeAmounts[0] - result.totalFees);
 }
 
-// A redemption with leftover fee money and no address for it must stop. It used
-// to build a taproot output from the untweaked owner key, which no wallet
-// watches and no wallet can spend.
+// A redemption with no address at all must stop. It used to build taproot
+// outputs from the untweaked owner key, which no wallet watches and no wallet
+// can spend. The first output of a redemption is the collateral, so that is
+// what the build now complains about first.
 BOOST_AUTO_TEST_CASE(redeem_without_any_change_address_fails)
 {
     BigUtxoRedeemBuilder builder(Params(), TEST_HEIGHT, TEST_PRICE);
@@ -304,10 +305,11 @@ BOOST_AUTO_TEST_CASE(redeem_without_any_change_address_fails)
     const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
 
     BOOST_CHECK(!result.success);
-    BOOST_CHECK(result.error.find("change address") != std::string::npos);
+    BOOST_CHECK_MESSAGE(result.error.find("collateral") != std::string::npos, result.error);
     BOOST_CHECK(result.tx.vout.empty());
 
-    // The old behaviour paid the change to this script. Prove it is gone.
+    // The old behaviour paid the collateral and the change to this script.
+    // Prove it is gone.
     const CScript ownerTaproot = GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey(owner.GetPubKey())));
     CAmount paidToOwnerTaproot = 0;
     BOOST_CHECK_EQUAL(CountOutputsPaying(result.tx, ownerTaproot, paidToOwnerTaproot), 0U);
@@ -361,6 +363,41 @@ BOOST_AUTO_TEST_CASE(redeem_falls_back_to_the_collateral_address)
     CAmount paidToCollateralAddress = 0;
     BOOST_CHECK_EQUAL(CountOutputsPaying(result.tx, collateralScript, paidToCollateralAddress), 2U);
     BOOST_CHECK_EQUAL(paidToCollateralAddress, params.collateralAmount + params.feeAmounts[0] - result.totalFees);
+}
+
+// A redemption hands back the whole vault in its first output. If the caller
+// gives no address for it, the build must stop.
+//
+// The build used to stop here for a different reason: it could not place the
+// DGB left over after the fee. That left one way through. When the leftover is
+// smaller than the dust limit there is no change output at all, so nothing ever
+// asked for a change address, and the whole vault was paid to a taproot address
+// worked out from the owner key. No wallet watches that address and no wallet
+// can spend from it.
+BOOST_AUTO_TEST_CASE(redeem_without_collateral_address_fails_when_the_leftover_is_dust)
+{
+    BigUtxoRedeemBuilder builder(Params(), TEST_HEIGHT, TEST_PRICE);
+
+    const CKey owner = NewKey();
+    TxBuilderRedeemParams params = BaseRedeemParams(owner);
+    BOOST_REQUIRE(!params.collateralDest.has_value());
+    BOOST_REQUIRE(!params.dgbChangeDest.has_value());
+    // The one fee coin pays the DigiDollar minimum fee of 0.1 DGB and leaves
+    // 500 satoshis behind. That is under the 1000 satoshi dust limit, so the
+    // leftover becomes miner fee and no change output is built.
+    params.feeAmounts = {COIN / 10 + 500};
+
+    const TxBuilderResult result = builder.BuildRedemptionTransaction(params);
+
+    BOOST_CHECK(!result.success);
+    BOOST_CHECK_MESSAGE(result.error.find("collateral") != std::string::npos, result.error);
+    BOOST_CHECK(result.tx.vout.empty());
+
+    // The whole vault used to be paid to this address.
+    const CScript ownerTaproot = GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey(owner.GetPubKey())));
+    CAmount paidToOwnerTaproot = 0;
+    BOOST_CHECK_EQUAL(CountOutputsPaying(result.tx, ownerTaproot, paidToOwnerTaproot), 0U);
+    BOOST_CHECK_EQUAL(paidToOwnerTaproot, 0);
 }
 
 // The builders only need a change address when change would actually be paid.
