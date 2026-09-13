@@ -52,7 +52,9 @@ rpcpassword=yourpassword
 
 That's it. Your existing DGB infrastructure stays the same — DD runs alongside it.
 
-`txindex=1` is not optional for DD chains because validation and wallet recovery need creating-transaction metadata. Before activation, `getdigidollardeploymentinfo` remains available, but DD address, balance, history, send, mint, redeem, and running-oracle RPCs are gated.
+`txindex=1` is not optional on an unpruned mainnet or testnet node, because validation and wallet recovery need creating-transaction metadata. Startup refuses to run without it. Before activation, `getdigidollardeploymentinfo` remains available, but DD address, balance, history, send, mint, redeem, and running-oracle RPCs are gated.
+
+**If you prune instead.** `-prune` and `-txindex` cannot both be set, so a pruned node is not asked for the index: it reads a spent DigiDollar output's creating transaction straight out of the retained block at that coin's height. What it must have is the block. So a pruned node keeps every block from the DigiDollar activation floor to the tip, which on mainnet is height 23,627,520, about 870,000 blocks and growing by about 5,760 a day. A small prune target such as `prune=550` therefore cannot be reached on mainnet: the node starts and removes everything below the floor, but it will not shrink past the blocks it has to keep. If a block above the floor is already missing, startup stops with "DigiDollar state not ready: retained block history is incomplete". See [node operations](doc/digidollar-operations.md).
 
 ---
 
@@ -177,8 +179,8 @@ digibyte-cli getbalance
 
 ### Withdrawal Limits
 
-- Per-output dust floor: $1 (100 cents) — see `src/consensus/digidollar.h:73`
-- Maximum single transfer: **$100,000** (10,000,000 cents) per `maxMintAmount`-aligned policy in `src/consensus/digidollar.h:72`
+- Per-output dust floor: $1 (100 cents) — see `src/consensus/digidollar.h:88`
+- Maximum single transfer: **$100,000** (10,000,000 cents) per `maxMintAmount`-aligned policy in `src/consensus/digidollar.h:87`
 - DD inputs must be **confirmed** (≥1 confirmation) before they can be re-spent. The wallet does not chain unconfirmed DigiDollar UTXOs, and consensus rejects DD transfer/redeem inputs that resolve from `MEMPOOL_HEIGHT` (commit `0b4959f563`). Plan withdrawal cadence around the 15-second block time, or batch with `sendmanydigidollar`.
 - Integration code can keep passing integer cents without an `amount_unit`: `25000` means $250.00. A decimal amount without a unit is rejected. To send dollar amounts, explicitly set `amount_unit` to `dollars`; then `250.00` means $250.00. The send, batch-send, and redeem RPCs share this rule. Explicit `cents` values must be integers; `dollars` values allow at most two decimal places.
 - DD transfer withdrawals do not need a fresh oracle quote for mempool admission. Mint and redeem paths require recent valid MuSig2 oracle data; transfer-only exchange withdrawals are price-independent, but still require confirmed DD and DGB fee inputs.
@@ -211,7 +213,7 @@ digibyte-cli getdigidollarbalance "" 0
 # DGB balance (for fees)
 digibyte-cli getbalance
 
-# BIP9 activation status (verifies DD is live)
+# Buried activation status (verifies DD is live)
 digibyte-cli getdigidollardeploymentinfo
 ```
 

@@ -33,7 +33,7 @@ There are only 4 operations: **Mint**, **Transfer**, **Redeem**, and regular DGB
 Your wallet must:
 - Use the reviewed release selected for the target network and its activation height
 - Set `digidollar=1` in `digibyte.conf`
-- Set `txindex=1`; startup enforces this on mainnet/testnet DigiDollar chains and on regtest when DD testing is enabled
+- Set `txindex=1`; startup enforces this on unpruned mainnet/testnet DigiDollar chains and on regtest when DD testing is enabled. A pruned node is exempt, because `-prune` and `-txindex` cannot both be set; it reads the creating transaction out of the retained block instead, and keeps every block from the DigiDollar activation floor (mainnet 23,627,520) to the tip
 - Check `getdigidollardeploymentinfo`: DigiDollar uses a buried activation height; Thaw Day has its own separately reported height
 - Use a descriptor/bech32m HD wallet with private keys enabled. DD mint
   requires deriving an HD owner key for the time-lock; encryption is
@@ -402,7 +402,7 @@ command works with DigiDollar wallets:
 | `loadwallet "name"` | Positions, balances, DD owner keys, dd_transactions | After load, `listdigidollarpositions` and `getdigidollarbalance` reflect the same on-chain state. |
 | `digibyted` stop / start | Same as above | `postInitProcess` re-runs `ScanForDDUTXOs()` to validate vault UTXO state against the active chain. |
 | `rescanblockchain` | Idempotent — no double counting | Triggers a post-rescan call to `ScanForDDUTXOs()` -> `ValidatePositionStates()` so any vault that was redeemed off-wallet is correctly marked inactive. |
-| `-reindex=1` | Same as restart | Wallet replays the chain; confirmed mints remain active until a real redeem/transfer spends the collateral on the active chain. |
+| `-reindex=1` | Same as restart | The node rebuilds its indexes from the block files and the wallet rescans; confirmed mints remain active until a real redeem/transfer spends the collateral on the active chain. |
 | `backupwallet path` / `restorewallet new_name path` | Full DD state including owner keys | Restored wallet is loaded under `new_name`; existing wallet is untouched. |
 | `importdescriptors` into a fresh wallet + `rescanblockchain` | Reconstructs DD positions from on-chain OP_RETURN metadata after proving ownership of the zero-value DD P2TR output | If the imported descriptors can provide the Taproot spending key, the wallet recovers and indexes that key for redemption. |
 
@@ -678,7 +678,7 @@ If your wallet parses raw transactions, here's how to identify DD transactions:
 | `OP_CHECKCOLLATERAL` | `0xbe` | Collateral ratio check |
 | `OP_ORACLE` | `0xbf` | Coinbase oracle bundle marker (Tapscript OP_SUCCESSx slot pre-activation) |
 
-Non-DD-aware wallets can safely ignore these — they behave as Tapscript OP_SUCCESSx (BIP-342) until `SCRIPT_VERIFY_DIGIDOLLAR` is set, which only happens after BIP9 `DEPLOYMENT_DIGIDOLLAR` is ACTIVE.
+Non-DD-aware wallets can safely ignore these — they behave as Tapscript OP_SUCCESSx (BIP-342) until `SCRIPT_VERIFY_DIGIDOLLAR` is set, which only happens at and above the buried `DigiDollarHeight` (mainnet 23,869,440, testnet26 600, signet and regtest 0).
 
 `OP_CHECKPRICE` is reserved and deterministically disabled; mint/redeem validation reads authenticated coinbase oracle bundles and the oracle price cache instead of a script-local price opcode. Oracle P2P messages, including `ORACLEHEARTBEAT` use `IsOracleP2PActive`.
 
@@ -716,7 +716,7 @@ Registered in `RegisterDigiDollarRPCCommands()` at `src/rpc/digidollar.cpp`:
 
 | Command | Description |
 |---------|-------------|
-| `getdigidollardeploymentinfo` | BIP9 activation status, signaling progress |
+| `getdigidollardeploymentinfo` | Buried activation height, oracle roster, MuSig2 session and Thaw Day status |
 | `getdigidollarstats` | Network-wide DD supply and health |
 | `getdcamultiplier` | Current Dynamic Collateral Adjustment multiplier |
 | `getoracleprice` | Current DGB/USD oracle price (from MuSig2 consensus) |

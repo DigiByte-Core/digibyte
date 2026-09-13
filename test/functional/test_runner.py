@@ -291,6 +291,7 @@ BASE_SCRIPTS = [
     'digidollar_health_restart_consensus.py --legacy',
     'digidollar_thawday_integration.py',
     'digidollar_thawday_fresh_sync.py',
+    'digidollar_thawday_node_matrix.py',
     'digidollar_oracle_startup_consensus.py',
     'digidollar_activation.py',
     'digidollar_basic.py',

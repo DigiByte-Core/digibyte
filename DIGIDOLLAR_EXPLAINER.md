@@ -9,7 +9,7 @@ DigiDollar is a decentralized USD-denominated token design native to DigiByte's 
 ### Key Points
 - **DGB becomes the strategic reserve asset** (21B max supply, ~1.94 per person on Earth at 8.1B population)
 - **Everything happens inside DigiByte Core wallet** — you never give up control of your private keys
-- **Status (V1, `feature/digidollar-v1`)**: Testnet26 activates at height 600 after BIP9 signaling; mainnet activation gate is configured for height 23,627,520 (start time 2026-06-01) — see `DIGIDOLLAR_ARCHITECTURE.md` for details
+- **Status (V1)**: DigiDollar is a buried deployment since v9.26.5 and is active on mainnet from height 23,869,440 and on testnet26 from height 600. There is no miner vote left to run — see `DIGIDOLLAR_ACTIVATION_EXPLAINER.md` for details
 
 ---
 
@@ -194,7 +194,7 @@ Efficient script execution with Merkleized Alternative Script Trees. The collate
 
 Both paths **require the timelock to expire first** - there is no early redemption, no forced liquidation, and no exceptions.
 
-**Implementation Note**: Partial redemption is rejected at consensus. `ValidateCollateralReleaseAmount` (`src/digidollar/validation.cpp:2299+`) requires the redeemer to burn at least `requiredDDBurn` (= `originalDDMinted` for healthy systems, or the ERR-adjusted amount when health < 100%) AND release the full locked collateral; otherwise the transaction is rejected with `bad-collateral-release-partial-burn`. Non-DD transactions cannot spend a registered collateral vault at all (`bad-collateral-spend-missing-dd-burn`).
+**Implementation Note**: Partial redemption is rejected at consensus. `ValidateCollateralReleaseAmount` (`src/digidollar/validation.cpp:2462+`) requires the redeemer to burn at least `requiredDDBurn` (= `originalDDMinted` for healthy systems, or the ERR-adjusted amount when health < 100%) AND release the full locked collateral; otherwise the transaction is rejected with `bad-collateral-release-partial-burn`. Non-DD transactions cannot spend a registered collateral vault at all (`bad-collateral-spend-missing-dd-burn`).
 
 ### Key Features
 
@@ -406,15 +406,15 @@ digibyte-cli -rpcwallet=restored rescanblockchain
 | ERR semantics | 100% collateral, MORE DD burned | `src/consensus/err.cpp:100-149` (`__int128` ceiling math) |
 | Minting blocked during ERR | Yes; also blocked when oracle absent | `src/consensus/err.cpp:417-469` |
 | Both MAST paths require CLTV | Both leaves prefix-match `<lockHeight> OP_CLTV OP_DROP` | `src/digidollar/scripts.cpp:73-99` |
-| Lock tiers | 10 tiers (1h, 30d, 90d, 180d, 1y, 2y, 3y, 5y, 7y, 10y) | `src/consensus/digidollar.h:57-68` |
+| Lock tiers | 10 tiers (1h, 30d, 90d, 180d, 1y, 2y, 3y, 5y, 7y, 10y) | `src/consensus/digidollar.h:72-83` |
 | Custom durations rejected | Mint validation enforces canonical tier windows: `[tier_blocks, tier_blocks + 100]` | `src/digidollar/validation.cpp:1354-1384` (`bad-mint-lock-tier-duration`) |
 | DCA tiers | 1.00 / 1.25 / 1.50 / 2.00 (≥150 / 120-149 / 110-119 / <110) | `src/consensus/dca.cpp:53-59` (HEALTH_TIERS) and `src/consensus/digidollar.h:94-99` (dcaLevels) |
 | ERR ratios | 0.95 / 0.90 / 0.85 / 0.80 | `src/consensus/err.cpp:53-58` (ERR_TIERS) |
 | Oracle config | 35 active slots, 7 signatures required (mainnet/testnet); 4-of-7 regtest | `src/kernel/chainparams.cpp` (`nOracleTotalOracles`, `nOracleRequiredMessages`, `nOracleConsensusRequired`) |
-| Cooldown period | 8640 blocks (~36h) | `src/consensus/volatility.h:74` (`COOLDOWN_BLOCKS`) |
-| DD amount unit | Cents (100 = $1.00) | `src/consensus/digidollar.h:70-73`, `src/digidollar/digidollar.h` |
+| Cooldown period | 8640 blocks (~36h) | `src/consensus/volatility.h:113` (`COOLDOWN_BLOCKS`) |
+| DD amount unit | Cents (100 = $1.00) | `src/consensus/digidollar.h:85-88`, `src/digidollar/digidollar.h` |
 | Oracle price unit | Micro-USD (1,000,000 = $1.00) | `src/oracle/bundle_manager.*`, `src/script/interpreter.cpp` |
-| DD supply alert | Monitoring only — no hard cap | `src/digidollar/health.h:83` (`ALERT_DD_SUPPLY`) |
+| DD supply alert | Monitoring only — no hard cap | `src/digidollar/health.h:170` (`ALERT_DD_SUPPLY`) |
 
 The full code-to-spec verification table lives in `DIGIDOLLAR_ARCHITECTURE.md` Section 18.
 
@@ -427,16 +427,16 @@ The V1 branch closes the consensus and policy gaps that the previous draft of th
 | Subsystem | Source | Status |
 |-----------|--------|--------|
 | OP_CHECKPRICE reserved opcode | `src/script/interpreter.cpp:436-746` | `OP_CHECKPRICE` is reserved and deterministically disabled; it does not read `g_get_oracle_consensus_price` |
-| MuSig2-only oracle bundles | `src/validation.cpp:185-283` | Pre-V1 (legacy) bundles rejected; mempool requires recent valid MuSig2 quote |
+| MuSig2-only oracle bundles | `src/validation.cpp:268-491` | Pre-V1 (legacy) bundles rejected; mempool requires recent valid MuSig2 quote |
 | Mainnet/testnet validator parity | `src/validation.cpp` | Mainnet short-circuit removed (commit `f0d9a7b2c7`) |
 | DCA/ERR integer math | `src/consensus/dca.cpp`, `src/consensus/err.cpp` | `__int128` ceiling arithmetic; `ApplyDCA` fails closed on stale health |
 | Confirmed-only DD chaining | `src/digidollar/validation.cpp:1810, 1954` | `MEMPOOL_HEIGHT` DD inputs rejected (commit `0b4959f563`) |
-| Mining graceful degradation | `src/node/miner.cpp:857-859` | Failing DD txs (`ValidateDDForBlockInclusion`) are added to `failedTx` and skipped; assembler continues |
-| DD supply alert (not a cap) | `src/digidollar/health.h:83` | Monitoring threshold only |
+| Mining graceful degradation | `src/node/miner.cpp:898-901` | Failing DD txs (`ValidateDDForBlockInclusion`) are added to `failedTx` and skipped; assembler continues |
+| DD supply alert (not a cap) | `src/digidollar/health.h:170` | Monitoring threshold only |
 
 **Where this leaves operators**:
-- **Regtest / testnet**: Fully exercisable today; testnet26 is configured with `min_activation_height = 600`.
-- **Mainnet**: Configuration is in place (BIP9 bit 23, start time 2026-06-01, timeout 2027-06-01, `min_activation_height = 23627520`). Outstanding work is operational — mainnet oracle operator deployment and continued testnet validation.
+- **Regtest / testnet**: Fully exercisable today; testnet26 buries DigiDollar at height 600, regtest at height 0.
+- **Mainnet**: DigiDollar is buried and active from height 23,869,440. The static DigiDollar and oracle height gates stay at the historical 23,627,520 floor, which is what the pruning floor and the pre-floor coin gate use. Outstanding work is operational: mainnet oracle operator deployment and continued testnet validation.
 
 ---
 

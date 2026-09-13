@@ -93,7 +93,7 @@ disk read or an atomic database write immediately.
 
 Cancelled oracle and legacy-health scans do not publish their partial results.
 Canonical recovery can have already saved an earlier chain height. A restart
-rechecks that saved state: a rewind leaves unchecked history, while replay
+rechecks that saved state: a rewind leaves unchecked history, while a reindex
 preserves only the history completed so far. The remaining blocks still need
 normal validation. Do not assume an interrupted recovery kept the original
 tip or that the previous stage's percentage is a durable restart position.
@@ -175,6 +175,38 @@ also need an upstream mapping or a reachable host supplied by its provider.
 
 Source: [listening port](../src/net.cpp), [port mapping](../src/mapport.cpp)
 and [network options](../src/init.cpp).
+
+## Pruning with DigiDollar
+
+A DigiDollar spend has to read the block that created the coin it spends. Those
+blocks are always at or above the DigiDollar activation floor, so a pruned node
+has to keep that whole stretch of chain.
+
+When `-prune` is set, the node registers a retention floor at startup and keeps
+every block from that height to the tip. Blocks below it may still be removed.
+The floor is fixed per network and does not move when the chain reorganises.
+
+| Network | Retention floor | Roughly |
+|---------|-----------------|---------|
+| Mainnet | 23,627,520 | about 568,000 blocks at the tip recorded on 12 September 2026, growing by about 5,760 a day |
+| Testnet26 | 600 | almost the whole chain |
+| Signet, regtest | 0 | the whole chain |
+
+Two things follow on mainnet. A small `-prune` target such as `prune=550` cannot
+be reached: the node still starts and still removes everything below the floor,
+but it will not shrink past the blocks it has to keep. And if a block above the
+floor is already missing when a pruned node starts, startup stops with:
+
+```
+DigiDollar state not ready: retained block history is incomplete. Restore the
+required block and undo files or download the missing DigiDollar-era history.
+```
+
+Restore the missing block and undo files from a backup, or resync. Do not delete
+retained history to save space.
+
+Source: [chainstate load](../src/node/chainstate.cpp),
+[prune range](../src/validation.cpp), [pruning](../src/node/blockstorage.cpp).
 
 ## Serve compact block filters
 
