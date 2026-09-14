@@ -196,11 +196,9 @@ public:
         consensus.DigiDollarHeight = 23869440;
         consensus.AlgoLockHeight = 23869440;
 
-        // Thaw Day (the one height at which every consensus change of the
-        // DigiDollar Thaw Day release takes effect) is not scheduled here yet.
-        // The release owner sets the exact height in the tagged source, about
-        // November 1 2026, at least 14 days ahead of the block itself.
-        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+        // Thaw Day applies from this block, estimated around November 1 2026.
+        // The block height is the trigger; the calendar date is an estimate.
+        consensus.nDDThawDayHeight = 24490000;
 
         // The best chain should have at least this much work.
         // NOTE: must stay reachable by the headers pre-sync, which measures *contextless*
@@ -549,9 +547,9 @@ public:
         consensus.DigiDollarHeight = 600;
         consensus.AlgoLockHeight = 0;
 
-        // Thaw Day is not scheduled on testnet yet. It is set when the testnet
-        // rehearsal candidate is built for the September 21 2026 activation.
-        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+        // Thaw Day applies from this block, estimated before September 21 2026.
+        // The block height is the trigger; the calendar date is an estimate.
+        consensus.nDDThawDayHeight = 432100;
 
         consensus.nMinimumChainWork = uint256S("0x00");
         consensus.defaultAssumeValid = uint256S("0x00"); //1079274

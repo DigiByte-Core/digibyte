@@ -163,8 +163,10 @@ blocks must satisfy the V1 oracle rules above; transfer-only and ordinary DGB
 blocks may omit the coinbase oracle bundle.
 
 Thaw Day is a separate shared height for the new DigiDollar validation rules.
-Mainnet, testnet26 and signet Thaw Day heights remain disabled in this source.
-It does not change the oracle signing quorum or the v0x03 bundle format. See
+Mainnet is scheduled at 24,490,000, estimated for November 1, 2026. Testnet26
+is scheduled at 432,100, estimated for September 18–19, 2026. The heights trigger
+activation. Signet is unsupported and remains unscheduled. Thaw Day does not
+change the oracle signing quorum or the v0x03 bundle format. See
 the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for tip and next-block
 status and the limits of this development candidate.
 

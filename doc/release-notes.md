@@ -16,9 +16,11 @@ Saved transaction fee estimates now load correctly after a restart. The node
 keeps its learned fee history instead of discarding its own saved file.
 
 It also adds Thaw Day. Thaw Day is a single block height, one per network, at
-which a set of DigiDollar rule changes takes effect together. **No network has a
-Thaw Day height set in this release.** Installing this software does not switch
-anything on.
+which a set of DigiDollar rule changes takes effect together. **Mainnet is
+scheduled at 24,490,000**, estimated for November 1, 2026. **Testnet26 is
+scheduled at 432,100**, estimated for September 18–19, 2026. Block heights
+trigger the changes. Signet is unsupported and remains unscheduled. Installing
+this software before a network's height does not activate its rules early.
 
 Please report problems using the issue tracker at GitHub:
 
@@ -141,16 +143,35 @@ same answer.
 3. Thaw Day activation settings
 --------------------------------------------
 
-Thaw Day is a single block height per network. In this release every network
-ships with it not scheduled: mainnet, the public test network, and signet. Only
-a private regtest chain can set one, with `-ddthawdayheight=N`. On any public
-network that option is a startup error.
+Thaw Day uses one height per network:
 
-The final mainnet height must be included in the tagged release source and
-published with at least 14 days for operators to upgrade. An announcement
-cannot activate an installed binary that has no height configured. Testnet
-activation has its own coordinated height. The same height on each network
-selects all intended Thaw Day rule changes together.
+| Network | Height in this candidate | Estimated date |
+|---------|--------------------------|----------------|
+| Mainnet | **24,490,000** | November 1, 2026 |
+| Testnet26 | **432,100** | September 18–19, 2026 |
+| Signet (unsupported) | Not scheduled | None |
+| Regtest | Not scheduled unless configured | Local test setting |
+
+The height is the trigger. Dates are estimates that change with the block rate.
+Only a private regtest chain can set a runtime height with
+`-ddthawdayheight=N`. On any public network that option is a startup error.
+The one height on each network selects all intended Thaw Day rule changes
+together. Blocks below it keep their existing rules.
+
+Publish the tagged source, binaries, checksums and activation heights at least
+14 days before mainnet activation and at least 3 days before testnet activation.
+The current testnet estimate requires distribution by the evening of
+September 15, 2026, in America/Boise. The selected height is expected on
+September 18–19, before the September 21 target. Recheck the block rate during
+the upgrade window. Coordinate upgrades with miners, oracles, exchanges and
+full-node operators. Scheduling the height does not establish that everyone
+has upgraded or that release checks have passed.
+
+If the upgrade window or required checks cannot be met, coordinate a replacement
+release before the scheduled height to postpone or disable activation.
+Operators must install the replacement before the old height. An announcement
+alone cannot change an installed binary's height. See
+[node operations](digidollar-operations.md) for upgrade and recovery steps.
 
 
 How to upgrade
@@ -497,14 +518,15 @@ For miners and pools
 
 Nothing in this release changes difficulty or the block reward.
 
-Every change in this release that touches the rules a node applies to a block is
-gated on the Thaw Day height, and no network has one set. With no height set,
-this release should accept and reject exactly the blocks that v9.26.5 does. The
-evidence for that is the test network chain, reindexed from the first block on
-this code, reaching the same block and the same hash as before. The same check
-on mainnet has not been run.
+The Thaw Day rule changes are gated on each network's height. Mainnet uses
+24,490,000 and testnet26 uses 432,100. Signet is unsupported and remains
+unscheduled. Blocks below a scheduled height retain their existing validation
+rules, including during reindex.
+An earlier testnet replay reached the recorded height and hash. That result
+applies to its tested build and history. The final-build mainnet replay still
+needs to be completed.
 
-Once a Thaw Day height is set and reached, a block that mints DigiDollar is
+Once the scheduled height is reached, a block that mints DigiDollar is
 checked against a price taken from the chain rather than from each node's own
 state. A miner still running old software after that height can build blocks the
 rest of the network rejects. Plan to upgrade before the height, not after it.
@@ -516,12 +538,13 @@ What has been checked, and what has not
 Each candidate needs its own verification record. That record must identify the
 source commit, binary hashes, build options, tests run, skipped tests, and
 unresolved findings. Results from an earlier build do not establish that RC1
-passed. The completed record accompanies the candidate.
+passed. Publish the completed record with the tested candidate.
 
 Controlled regtest coverage includes Thaw Day activation, restart, reindex,
 reorgs, and separate token and vault accounting. A public testnet replay checks
-the history available at its recorded height. No public network currently has
-a Thaw Day height scheduled in this candidate.
+the history available at its recorded height. Mainnet Thaw Day is scheduled
+at 24,490,000 and testnet26 at 432,100. Public Thaw Day activation and sustained
+network observation have not been completed for this candidate.
 
 Before the final mainnet release, complete the final-build mainnet history
 replay, coordinated public testnet activation and observation, required platform

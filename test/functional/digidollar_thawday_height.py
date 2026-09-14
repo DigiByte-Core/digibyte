@@ -7,8 +7,8 @@
 Thaw Day is the one block height at which every consensus change of the
 v9.26.6 release takes effect. This test checks only how the node reports
 that height through the "thaw_day" object of getdigidollardeploymentinfo;
-the rules that will consult it arrive in a later release step, so block
-validity is identical with and without the knob.
+the rule checks are covered by the separate Thaw Day transaction tests.
+This test also checks the published schedule on isolated public-network nodes.
 
 Expectations, with H the scheduled height:
 
@@ -31,8 +31,8 @@ Expectations, with H the scheduled height:
 import re
 
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.test_node import ErrorMatch
-from test_framework.util import assert_equal
+from test_framework.test_node import ErrorMatch, TestNode
+from test_framework.util import assert_equal, initialize_datadir, p2p_port, rpc_port
 
 # Thaw Day height configured on the nodes that carry the knob. It sits above
 # the default regtest DigiDollar/oracle gates (650) so the boundary is
@@ -135,6 +135,41 @@ class DigiDollarThawDayHeightTest(DigiByteTestFramework):
         self.test_restart_keeps_status()
         self.test_knob_rejection()
         self.test_final_state()
+        self.test_public_network_schedules()
+
+    def test_public_network_schedules(self):
+        """Read mainnet and testnet schedules without connecting to peers."""
+        schedules = (
+            ("test", "testnet26", "test", 432_100),
+            ("main", "", "main", 24_490_000),
+        )
+        for chain_arg, chain_directory, rpc_chain, height in schedules:
+            self.log.info(f"Check the published Thaw Day schedule on {rpc_chain}")
+            index = len(self.nodes)
+            datadir = initialize_datadir(self.options.tmpdir, index, "")
+            node = TestNode(
+                index, datadir, chain=chain_directory, rpchost=None,
+                timewait=self.rpc_timeout, timeout_factor=self.options.timeout_factor,
+                digibyted=self.options.digibyted, digibyte_cli=self.options.digibytecli,
+                coverage_dir=self.options.coveragedir, cwd=self.options.tmpdir,
+                descriptors=None,
+                extra_args=[f"-chain={chain_arg}", f"-rpcport={rpc_port(index)}",
+                            f"-port={p2p_port(index)}", "-networkactive=0", "-listen=0",
+                            "-connect=0", "-dnsseed=0", "-fixedseeds=0", "-dbcache=4"],
+            )
+            self.nodes.append(node)
+            node.start()
+            node.wait_for_rpc_connection()
+            try:
+                assert_equal(node.getblockchaininfo()["chain"], rpc_chain)
+                assert_equal(node.getblockcount(), 0)
+                assert_equal(node.getnetworkinfo()["networkactive"], False)
+                assert_equal(node.getconnectioncount(), 0)
+                self.assert_thaw_day(node, scheduled=height is not None, height=height,
+                                     tip=0, at_tip=False, next_block=False)
+            finally:
+                node.stop_node()
+                node.wait_until_stopped()
 
     def test_boundary_heights(self):
         node0, node1, node2, node3 = self.nodes

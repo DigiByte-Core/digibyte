@@ -758,7 +758,12 @@ For wallet integrators that bypass the Qt widget and submit raw mint transaction
 
 ## 13. Test on Testnet Now!
 
-The public testnet configured in this source is **testnet26**. DigiDollar uses buried activation height 600. Thaw Day remains unscheduled in this development source; no public activation or soak result is claimed. Check `getdigidollardeploymentinfo` on the installed build.
+The public testnet configured in this source is **testnet26**. DigiDollar uses
+buried activation height 600. Thaw Day is scheduled at **432,100**, estimated
+for September 18–19, 2026. The block height triggers the change. No public
+Thaw Day activation or soak result is claimed. Check
+`getdigidollardeploymentinfo` on the installed build and follow the
+[upgrade window](DIGIDOLLAR_ACTIVATION_EXPLAINER.md).
 
 ### Quick Setup
 
@@ -788,13 +793,14 @@ The public testnet configured in this source is **testnet26**. DigiDollar uses b
 | Oracle Consensus | 35 active slots, 7 signatures required |
 | Exchange Sources | Binance, CoinGecko, KuCoin, Gate.io, HTX, Crypto.com (6 active feeders, see `src/oracle/exchange.cpp:1092-1097`) |
 | Outlier filter | Median-distance: a price is dropped when its distance from the median exceeds `outlier_threshold × median` (`MultiExchangeAggregator::FilterOutliers` at `src/oracle/exchange.cpp:1225`) |
-| Activation | DigiDollar buried at 600; Thaw Day separately reported by `getdigidollardeploymentinfo` |
+| Activation | DigiDollar buried at 600; Thaw Day scheduled at 432,100 and reported separately by `getdigidollardeploymentinfo` |
 
 ### Mainnet Activation
 
 DigiDollar's buried mainnet activation height is 23,869,440. The separate
-Thaw Day height is disabled in this development source. Before a coordinated
-activation, upgrade the backend using the [node operations guide](doc/digidollar-operations.md).
+Thaw Day height is 24,490,000, estimated for November 1, 2026. The block height
+triggers the change. Upgrade the backend before that height using the
+[node operations guide](doc/digidollar-operations.md).
 See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for the candidate
 height boundary and old-node compatibility limits.
 

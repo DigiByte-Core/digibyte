@@ -1570,7 +1570,7 @@ static RPCHelpMan getdigidollardeploymentinfo()
                                 {RPCResult::Type::NUM, "creation_height", /*optional=*/true, "Block height at which the current session was created (omitted when state=none)"}
                             }
                         },
-                        {RPCResult::Type::OBJ, "thaw_day", "Thaw Day status. Thaw Day is the one block height at which every consensus change of this release takes effect. This release step only schedules and reports the height; the rules themselves arrive in a later release step",
+                        {RPCResult::Type::OBJ, "thaw_day", "Thaw Day status. One configured height selects the new DigiDollar rules. The tip and next block are reported separately",
                             {
                                 {RPCResult::Type::BOOL, "scheduled", "Whether a Thaw Day height is configured for this network in this build (false means the new rules never apply on this network with this build)"},
                                 {RPCResult::Type::NUM, "height", /*optional=*/true, "The Thaw Day block height (present only when scheduled)"},
@@ -1673,8 +1673,8 @@ static RPCHelpMan getdigidollardeploymentinfo()
             // reported separately on purpose: when the tip is one block below
             // Thaw Day the next block may already use the new rules, and that
             // is not early activation. Only the shared predicate decides
-            // "active" here, so this RPC can never disagree with validation,
-            // mining or the mempool once those start calling it.
+            // "active" here, as it does for validation, mining and mempool
+            // checks at their respective candidate heights.
             UniValue thaw_day(UniValue::VOBJ);
             const bool thaw_day_scheduled = DigiDollar::IsThawDayScheduled(consensusParams);
             thaw_day.pushKV("scheduled", thaw_day_scheduled);

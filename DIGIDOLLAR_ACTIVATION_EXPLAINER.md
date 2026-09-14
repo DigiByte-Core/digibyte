@@ -3,11 +3,19 @@
 ## Thaw Day in the v9.26.6 development source
 
 Thaw Day is a separate, coordinated change to DigiDollar validation. It uses
-one height per network, `Consensus::Params::nDDThawDayHeight`. Mainnet,
-testnet26 and signet are **not scheduled** in this source: their value is
-`std::numeric_limits<int>::max()`, which means disabled. Regtest is also
-unscheduled unless explicitly configured. No public-network activation or
-soak test has been completed for this candidate.
+one height per network, `Consensus::Params::nDDThawDayHeight`.
+
+| Network | Thaw Day height | Estimated date |
+|---------|-----------------|----------------|
+| Mainnet | **24,490,000** | November 1, 2026 |
+| Testnet26 | **432,100** | September 18–19, 2026 |
+| Signet (unsupported) | Not scheduled | None |
+| Regtest | Not scheduled unless `-ddthawdayheight=N` is set | Local test setting |
+
+The block height triggers activation. The date is an estimate and changes with
+the block rate. Unscheduled networks use `std::numeric_limits<int>::max()`,
+which means disabled. No public-network Thaw Day activation or soak test has
+been completed for this candidate.
 
 The new rules apply only when the height is configured, DigiDollar itself is
 active, and the candidate block's height is at least that height. The same
@@ -35,10 +43,20 @@ when scheduled, `tip_height`, `next_block_height`, `active_at_tip` and
 switch or miner signal that changes Thaw Day. `-ddthawdayheight=N` is for
 regtest only and is a startup error on other networks.
 
-A future release must publish its exact source, binaries and activation height
-with time for operators to upgrade. A calendar estimate is not the trigger.
-Older nodes may disagree after activation; burial of a previously activated
-deployment does not establish compatibility with this new transition.
+Publish the exact tagged source, binaries, checksums and activation heights
+at least 14 days before mainnet activation and at least 3 days before testnet
+activation. The current testnet estimate requires distribution by the evening
+of September 15, 2026, in America/Boise. September 21 was the testnet target;
+the selected height is expected to arrive earlier, on September 18–19.
+Recheck the block rate throughout each upgrade window. Coordinate the rollout
+with miners, oracles, exchanges and full-node operators. Scheduling a height
+does not prove that operators have upgraded or that release checks have passed.
+
+If the upgrade window or release checks cannot be met, coordinate a replacement
+release before the scheduled height to postpone or disable activation. An
+announcement alone cannot change heights in installed binaries. Older nodes
+may disagree after activation; burial of a previously activated deployment
+does not establish compatibility with this new transition.
 See [node operations](doc/digidollar-operations.md) for backup, upgrade and
 recovery guidance. Release and network readiness still require separate
 verification.
@@ -55,7 +73,7 @@ Source: [shared predicate](src/digidollar/digidollar.cpp),
 |---------|-----------------|--------------------|------------------|
 | Mainnet | 21,168,000 | 23,869,440 | 23,869,440 |
 | Testnet (testnet26) | 0 | 600 | 0 |
-| Signet / Regtest | 0 | 0 | 0 |
+| Signet (unsupported) / Regtest | 0 | 0 | 0 |
 
 The static gates keep their historical floors: mainnet `nDDActivationHeight = nOracleActivationHeight = nDigiDollarMuSig2Height = 23,627,520` (below the 23,869,440 burial height — `EarliestActivationFloor = min(nDDActivationHeight, DigiDollarHeight)` preserves the 23,627,520 prune/collateral floor exactly); testnet 600; default regtest DD/oracle gates 650 with `nDigiDollarMuSig2Height = min(650, DigiDollarHeight) = 0`.
 

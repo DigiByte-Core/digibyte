@@ -14,7 +14,14 @@ DigiDollar is a decentralized USD-denominated token design built natively on Dig
 
 ### Current Implementation Status
 
-The source contains the DigiDollar V1 stack and a height-gated validation transition. Mainnet, testnet26 and signet Thaw Day heights remain disabled. Release verification and coordinated activation are still required. Components include:
+The source contains the DigiDollar V1 stack and a height-gated validation
+transition. Mainnet Thaw Day is scheduled at 24,490,000, estimated for
+November 1, 2026. Testnet26 is scheduled at 432,100, estimated for
+September 18–19, 2026. The heights trigger the changes. Signet is unsupported
+and remains unscheduled. Release verification and coordinated activation are
+still required.
+See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md) for the upgrade
+window and postponement process. Components include:
 
 - **Address System** — DD/TD/RD addresses live on mainnet/testnet/regtest (`src/base58.{h,cpp}`).
 - **Minting / Transferring / Redeeming** — Full P2TR pipeline (`src/digidollar/txbuilder.cpp`, `src/digidollar/validation.cpp`).

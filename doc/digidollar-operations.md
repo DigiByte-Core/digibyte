@@ -1,9 +1,29 @@
 # DigiDollar node operations
 
-This guide describes the v9.26.6 development source. Mainnet, testnet26 and
-signet have no Thaw Day height configured in this source. No public-network
-Thaw Day activation or sustained network test has been completed for this candidate.
-These instructions are not a release-readiness announcement.
+This guide describes the v9.26.6 development source. Mainnet Thaw Day is
+scheduled at **24,490,000**, estimated for November 1, 2026. Testnet26 is
+scheduled at **432,100**, estimated for September 18–19, 2026. Block heights
+trigger activation. Signet is unsupported and remains unscheduled. No
+public-network Thaw Day activation or sustained network test has been completed
+for this candidate. These instructions are not a release-readiness announcement.
+
+## Coordinate the activation
+
+Publish the tagged source, binaries, checksums and heights at least 14 days
+before mainnet activation and at least 3 days before testnet activation. The
+current testnet estimate requires distribution by the evening of September 15,
+2026, in America/Boise. Height 432,100 is expected on September 18–19, before
+the September 21 target. Recheck the block rate, since the calendar estimate
+can move. Miners, oracles, exchanges and full-node operators need time to
+upgrade and check their nodes. A published height does not prove that all
+operators have upgraded or that release verification is complete.
+
+If the upgrade window or required release checks cannot be met, coordinate a
+replacement release before the scheduled height to postpone or disable
+activation. Operators must install that replacement before the old height.
+Changing an announcement or a local setting cannot postpone activation in an
+installed public-network binary. Preserve the prior schedule and replacement
+build identities so operators can verify which rules they are running.
 
 ## Upgrade and preserve recovery data
 
@@ -190,7 +210,8 @@ The floor is fixed per network and does not move when the chain reorganises.
 |---------|-----------------|---------|
 | Mainnet | 23,627,520 | about 568,000 blocks at the tip recorded on 12 September 2026, growing by about 5,760 a day |
 | Testnet26 | 600 | almost the whole chain |
-| Signet, regtest | 0 | the whole chain |
+| Regtest | 0 | the whole chain |
+| Signet (unsupported) | 0 in chain parameters | No supported node startup |
 
 Two things follow on mainnet. A small `-prune` target such as `prune=550` cannot
 be reached: the node still starts and still removes everything below the floor,

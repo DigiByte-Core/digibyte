@@ -1112,7 +1112,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `musig2_bundle_mining_tests.cpp` | MuSig2 bundle embedding in coinbase during mining |
 | `digidollar_amount_tests.cpp` | Every branch of the RPC amount parser: integer cents with no unit, explicit cents, explicit dollars to two decimals, the refusal of a decimal with no unit, syntax and size limits |
 | `digidollar_thawday_tests.cpp` | `IsThawDayActive`: not scheduled is false everywhere, scheduled flips exactly at the height, waits for DigiDollar, negative heights, the regtest knob and its rejection on public networks |
-| `digidollar_thawday_chainparams_tests.cpp` | No network schedules Thaw Day by default; `-ddthawdayheight` sets the height exactly and rejects out-of-range values; DigiDollar activation heights are untouched |
+| `digidollar_thawday_chainparams_tests.cpp` | Public Thaw Day schedule and unscheduled defaults; `-ddthawdayheight` sets the regtest height exactly and rejects out-of-range values; DigiDollar activation heights are untouched |
 | `digidollar_thawday_selection_tests.cpp` | Which height each caller passes to the Thaw Day predicate, and that the predicate does no arithmetic on the scheduled height |
 | `digidollar_thaw_recovery_tests.cpp` | Startup repair of saved DigiDollar totals: independent recheck, progress counted only over activated history, cancellation leaving a resumable prefix |
 | `digidollar_thaw_volatility_tests.cpp` | Mint volatility reference window at and above Thaw Day: deviation maths, window endpoints, empty/short/missing cases, recovery as new bundle blocks arrive |

@@ -76,7 +76,7 @@ As of v9.26.5 the Taproot, DigiDollar, and AlgoLock deployments are **buried** (
 |---------|-----------------|--------------------|------------------|
 | Mainnet | 21,168,000 | 23,869,440 | 23,869,440 |
 | Testnet (testnet26) | 0 | 600 | 0 |
-| Signet / Regtest | 0 | 0 | 0 |
+| Signet (unsupported) / Regtest | 0 | 0 | 0 |
 
 Static gates are unchanged: mainnet `nDDActivationHeight = nOracleActivationHeight = nDigiDollarMuSig2Height = 23,627,520` (the historical BIP9 floor, deliberately below the 23,869,440 burial height); testnet 600 / 600 / 600. Default regtest keeps the DD/oracle height gates at 650 / 650 while `nDigiDollarMuSig2Height = min(650, DigiDollarHeight) = 0`, so v0x03 quotes are valid whenever DigiDollar is active. `EarliestActivationFloor(params) = min(nDDActivationHeight, DigiDollarHeight)` (0 if the deployment is disabled) — value-preserving vs the pre-burial formula on every network. `IsDigiDollarEnabled` is a pure height compare against `DigiDollarHeight` (no `VersionBitsCache` anywhere in the DD path), and startup oracle-price reconstruction uses the same buried predicate as block connection, so DD-active blocks below the regtest 650 gate are still not dropped during restart/reindex cache rebuilds.
 
@@ -89,11 +89,15 @@ RPC/GBT surface: `getdeploymentinfo`/`getblockchaininfo` render the three deploy
 `nDDThawDayHeight` is the shared height for the new mint-only volatility rule,
 open-vault health accounting and canonical vault identity. Read it through
 `DigiDollar::IsThawDayActive(params, candidate_height)` in
-`src/digidollar/digidollar.cpp`. Mainnet, testnet26 and signet remain disabled
-in this source; regtest is disabled unless `-ddthawdayheight=N` is set. The
-option is rejected outside regtest. Public activation and soak testing have
-not occurred for this candidate. Do not describe unfinished release work as
-ready to distribute.
+`src/digidollar/digidollar.cpp`. Mainnet is scheduled at **24,490,000**, estimated
+for November 1, 2026. Testnet26 is scheduled at **432,100**, estimated for
+September 18–19, 2026. Block heights are the triggers; dates are estimates.
+Signet is unsupported and remains unscheduled. Regtest is disabled unless
+`-ddthawdayheight=N` is set; the option is rejected outside regtest. Publish
+the tagged source, binaries and heights at least 14 days before mainnet
+activation and at least 3 days before testnet activation. Public activation
+and soak testing have not occurred for this candidate. Do not describe
+unfinished release work as ready to distribute.
 
 Block validation uses the candidate's height, including when a node reindexes.
 Mining, mempool and wallet construction use the next-block height. At tip H-1,

@@ -40,7 +40,7 @@ constexpr int INT_MAX_VALUE = std::numeric_limits<int>::max();
 // A params value with DigiDollar active from genesis and Thaw Day not scheduled.
 Consensus::Params DigiDollarActiveParams()
 {
-    Consensus::Params params = Params().GetConsensus(); // regtest defaults
+    Consensus::Params params = CChainParams::RegTest(CChainParams::RegTestOptions{})->GetConsensus();
     params.DigiDollarHeight = 0;
     params.nDDThawDayHeight = NOT_SCHEDULED;
     return params;
@@ -58,8 +58,9 @@ BOOST_AUTO_TEST_CASE(not_scheduled_is_false_at_every_height)
         BOOST_CHECK_MESSAGE(!DigiDollar::IsThawDayActive(params, height), "unexpectedly active at height " << height);
     }
     // The regtest defaults themselves (no knob given) must also be "not scheduled".
-    BOOST_CHECK(!DigiDollar::IsThawDayScheduled(Params().GetConsensus()));
-    BOOST_CHECK(!DigiDollar::IsThawDayActive(Params().GetConsensus(), INT_MAX_VALUE));
+    const auto regtest = CChainParams::RegTest(CChainParams::RegTestOptions{});
+    BOOST_CHECK(!DigiDollar::IsThawDayScheduled(regtest->GetConsensus()));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(regtest->GetConsensus(), INT_MAX_VALUE));
 }
 
 BOOST_AUTO_TEST_CASE(scheduled_with_digidollar_active_flips_exactly_at_height)

@@ -6,10 +6,9 @@
 // (Consensus::Params::nDDThawDayHeight): the one block height at which every
 // consensus change of the "Thaw Day" release takes effect.
 //
-// In this release step no network schedules Thaw Day. Mainnet, testnet26,
-// signet and default regtest all keep the "not scheduled" value (the maximum
-// int). The only way to schedule it is the regtest-only -ddthawdayheight
-// option, which sets the field exactly and is refused on every public network.
+// Mainnet and testnet26 have fixed schedules. Signet and default regtest keep
+// the "not scheduled" value (the maximum int). The -ddthawdayheight option
+// sets the field exactly on regtest and is refused on every public network.
 // These tests pin that configuration matrix at the chainparams / option layer,
 // the same layer digidollar_activation_tests.cpp uses for
 // -digidollaractivationheight, so a stray placeholder height, an accidental
@@ -36,6 +35,9 @@ namespace {
 // The "not scheduled on this network" value of nDDThawDayHeight.
 constexpr int NOT_SCHEDULED = std::numeric_limits<int>::max();
 
+constexpr int MAINNET_THAW_HEIGHT = 24490000;
+constexpr int TESTNET_THAW_HEIGHT = 432100;
+
 // The height the regtest option schedules in these tests.
 constexpr int KNOB_HEIGHT = 700;
 
@@ -52,11 +54,112 @@ std::unique_ptr<const CChainParams> ParamsWithThawDayArg(ChainType chain, const 
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_thawday_chainparams_tests, BasicTestingSetup)
 
-// Without the option, every network reports "not scheduled", and the
-// predicate says the rules apply nowhere, including at the largest heights.
-BOOST_AUTO_TEST_CASE(no_network_schedules_thaw_day_by_default)
+BOOST_AUTO_TEST_CASE(mainnet_schedules_thaw_day_at_the_exact_height)
 {
-    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::SIGNET, ChainType::REGTEST}) {
+    const auto chainparams = ParamsWithThawDayArg(ChainType::MAIN, "");
+    const Consensus::Params& params = chainparams->GetConsensus();
+
+    BOOST_CHECK_EQUAL(params.nDDThawDayHeight, MAINNET_THAW_HEIGHT);
+    BOOST_CHECK(DigiDollar::IsThawDayScheduled(params));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT - 1));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT + 1));
+
+    // Scheduling Thaw Day does not move the earlier deployment or its floors.
+    BOOST_CHECK_EQUAL(params.DigiDollarHeight, 23869440);
+    BOOST_CHECK_EQUAL(params.nDDActivationHeight, 23627520);
+    BOOST_CHECK_EQUAL(params.nOracleActivationHeight, 23627520);
+    BOOST_CHECK_EQUAL(params.nDigiDollarMuSig2Height, 23627520);
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, params.DigiDollarHeight));
+}
+
+BOOST_AUTO_TEST_CASE(mainnet_uses_the_selected_candidate_height)
+{
+    const auto chainparams = ParamsWithThawDayArg(ChainType::MAIN, "");
+    const Consensus::Params& params = chainparams->GetConsensus();
+
+    // Selecting another network keeps its own rules at the mainnet boundary.
+    const auto regtest = ParamsWithThawDayArg(ChainType::REGTEST, "");
+    BOOST_CHECK(!DigiDollar::IsThawDayScheduled(regtest->GetConsensus()));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(regtest->GetConsensus(), MAINNET_THAW_HEIGHT));
+    struct Boundary {
+        int tip_height;
+        bool active_at_tip;
+        bool active_next_block;
+    };
+    for (const Boundary row : {
+             Boundary{MAINNET_THAW_HEIGHT - 2, false, false},
+             Boundary{MAINNET_THAW_HEIGHT - 1, false, true},
+             Boundary{MAINNET_THAW_HEIGHT, true, true}}) {
+        BOOST_TEST_CONTEXT("tip height " << row.tip_height) {
+            BOOST_CHECK_EQUAL(DigiDollar::IsThawDayActive(params, row.tip_height), row.active_at_tip);
+            BOOST_CHECK_EQUAL(DigiDollar::IsThawDayActive(params, row.tip_height + 1), row.active_next_block);
+        }
+    }
+
+    // Checking a later block must not latch activation for an earlier block
+    // replayed during validation or on a replacement branch.
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT + 1));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT - 1));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, MAINNET_THAW_HEIGHT - 1));
+}
+
+BOOST_AUTO_TEST_CASE(testnet_schedules_thaw_day_at_the_exact_height)
+{
+    const auto chainparams = ParamsWithThawDayArg(ChainType::TESTNET, "");
+    const Consensus::Params& params = chainparams->GetConsensus();
+
+    BOOST_CHECK_EQUAL(params.nDDThawDayHeight, TESTNET_THAW_HEIGHT);
+    BOOST_CHECK(DigiDollar::IsThawDayScheduled(params));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT - 1));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT + 1));
+
+    // DigiDollar and its oracle validation gates remain at block 600.
+    BOOST_CHECK_EQUAL(params.DigiDollarHeight, 600);
+    BOOST_CHECK_EQUAL(params.nDDActivationHeight, 600);
+    BOOST_CHECK_EQUAL(params.nOracleActivationHeight, 600);
+    BOOST_CHECK_EQUAL(params.nDigiDollarMuSig2Height, 600);
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, params.DigiDollarHeight - 1));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, params.DigiDollarHeight));
+}
+
+BOOST_AUTO_TEST_CASE(testnet_uses_the_selected_candidate_height)
+{
+    const auto chainparams = ParamsWithThawDayArg(ChainType::TESTNET, "");
+    const Consensus::Params& params = chainparams->GetConsensus();
+
+    // A mainnet schedule does not apply at the earlier testnet boundary.
+    const auto mainnet = ParamsWithThawDayArg(ChainType::MAIN, "");
+    BOOST_CHECK(DigiDollar::IsThawDayScheduled(mainnet->GetConsensus()));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(mainnet->GetConsensus(), TESTNET_THAW_HEIGHT));
+    struct Boundary {
+        int tip_height;
+        bool active_at_tip;
+        bool active_next_block;
+    };
+    for (const Boundary row : {
+             Boundary{TESTNET_THAW_HEIGHT - 2, false, false},
+             Boundary{TESTNET_THAW_HEIGHT - 1, false, true},
+             Boundary{TESTNET_THAW_HEIGHT, true, true}}) {
+        BOOST_TEST_CONTEXT("tip height " << row.tip_height) {
+            BOOST_CHECK_EQUAL(DigiDollar::IsThawDayActive(params, row.tip_height), row.active_at_tip);
+            BOOST_CHECK_EQUAL(DigiDollar::IsThawDayActive(params, row.tip_height + 1), row.active_next_block);
+        }
+    }
+
+    // Earlier candidates retain their old rules after a later block is checked.
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT + 1));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT - 1));
+    BOOST_CHECK(DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT));
+    BOOST_CHECK(!DigiDollar::IsThawDayActive(params, TESTNET_THAW_HEIGHT - 1));
+}
+
+// Unscheduled networks stay inactive even at the largest heights.
+BOOST_AUTO_TEST_CASE(unscheduled_networks_never_activate_by_default)
+{
+    for (const ChainType chain : {ChainType::SIGNET, ChainType::REGTEST}) {
         const auto chainparams = ParamsWithThawDayArg(chain, "");
         const Consensus::Params& params = chainparams->GetConsensus();
 
@@ -185,13 +288,16 @@ BOOST_AUTO_TEST_CASE(regtest_option_is_independent_of_digidollar_activation)
 
 // The option is a startup error on every public network, so a production
 // node can never be talked into an unpublished Thaw Day height. Without the
-// option those networks still build, with "not scheduled".
+// option those networks keep their fixed network configuration.
 BOOST_AUTO_TEST_CASE(option_is_refused_on_every_public_network)
 {
     for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::SIGNET}) {
         BOOST_CHECK_THROW(ParamsWithThawDayArg(chain, std::to_string(KNOB_HEIGHT)), std::runtime_error);
         BOOST_CHECK_THROW(ParamsWithThawDayArg(chain, "0"), std::runtime_error);
-        BOOST_CHECK_EQUAL(ParamsWithThawDayArg(chain, "")->GetConsensus().nDDThawDayHeight, NOT_SCHEDULED);
+        const int expected = chain == ChainType::MAIN ? MAINNET_THAW_HEIGHT :
+                             chain == ChainType::TESTNET ? TESTNET_THAW_HEIGHT : NOT_SCHEDULED;
+        BOOST_CHECK_THROW(ParamsWithThawDayArg(chain, std::to_string(expected)), std::runtime_error);
+        BOOST_CHECK_EQUAL(ParamsWithThawDayArg(chain, "")->GetConsensus().nDDThawDayHeight, expected);
     }
 }
 

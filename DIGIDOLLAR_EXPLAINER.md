@@ -164,9 +164,11 @@ DigiDollar is built natively on a UTXO (Unspent Transaction Output) blockchain. 
 
 **Implementation status:** This is v9.26.6 development documentation.
 DigiDollar's existing mainnet deployment is buried at height 23,869,440.
-The separate Thaw Day transition remains disabled on public networks in this
-source. Completed code does not establish release readiness or a successful
-network activation. See the [architecture guide](DIGIDOLLAR_ARCHITECTURE.md)
+The separate Thaw Day transition is scheduled on mainnet at 24,490,000,
+estimated for November 1, 2026, and on testnet26 at 432,100, estimated for
+September 18–19, 2026. The heights trigger activation. Signet is unsupported
+and remains unscheduled. Completed code does not establish release readiness
+or a successful network activation. See the [architecture guide](DIGIDOLLAR_ARCHITECTURE.md)
 and [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md).
 
 ### Core Technologies
@@ -308,8 +310,10 @@ by 100. With the same remaining collateral, the larger principal denominator
 can keep emergency restrictions active longer or require more DD to redeem.
 It does not create tokens or change balances at activation.
 
-Mainnet, testnet26 and signet Thaw Day heights remain disabled in this
-development source. See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md)
+Mainnet Thaw Day is scheduled at 24,490,000, estimated for November 1, 2026.
+Testnet26 uses height 432,100, estimated for September 18–19, 2026. Block heights
+decide when the rules change. Signet is unsupported and remains unscheduled.
+See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md)
 and [accounting explanation](DIGIDOLLAR_ARCHITECTURE.md#layer-2-dynamic-collateral-adjustment-dca).
 
 ### 5️⃣ Supply & Demand Dynamics (Natural Defense)

@@ -133,9 +133,11 @@ Your oracle key persists in your wallet across upgrades. You do **not** need to 
 ### Current testnet26 restart / upgrade
 
 Follow the [upgrade and recovery guide](doc/digidollar-operations.md). Keep
-existing wallet backups and retained block/undo data. Mainnet, testnet26 and
-signet Thaw Day heights remain disabled in this development source; this is
-not a notice that public activation or release verification has completed.
+existing wallet backups and retained block/undo data. Mainnet Thaw Day is
+scheduled at 24,490,000, estimated for November 1, 2026. Testnet26 is scheduled
+at 432,100, estimated for September 18–19, 2026. The heights trigger activation.
+Signet is unsupported and remains unscheduled. Public activation, soak testing
+and release verification still need to be completed.
 
 ```bash
 # 1. Back up the loaded wallet, then stop cleanly
@@ -253,7 +255,7 @@ removed / paid API key required).
 | Consensus Required (`nOracleConsensusRequired`) | 7 | 4-of-7 | 7 |
 | Static DD height (`nDDActivationHeight`) | 600 | 650 | 23,627,520 |
 | Buried DigiDollar height (`DigiDollarHeight`) | 600 | 0 | 23,869,440 |
-| Thaw Day (`nDDThawDayHeight`) | Disabled | Disabled unless configured | Disabled |
+| Thaw Day (`nDDThawDayHeight`) | 432,100 | Disabled unless configured | 24,490,000 |
 | Rotation Interval (`nDDOracleEpochBlocks`) | 40 blocks | 40 blocks | 40 blocks |
 | Price Update Interval (`nDDOracleUpdateInterval`) | 2 blocks | 1 block | 4 blocks |
 | Bundle/MuSig2 Epoch (`nOracleEpochLength`) | 40 blocks | 40 blocks | 40 blocks |

@@ -16,9 +16,11 @@ DigiDollar requires oracle operators to provide real-time DGB/USD price feeds. O
 
 For current testnet release/migration mechanics (testnet26, P2P port 12033, RPC port 14026) and retired testnet decommissioning notes, follow [DIGIDOLLAR_ORACLE_SETUP.md](../DIGIDOLLAR_ORACLE_SETUP.md).
 For upgrades, two nodes behind one router, compact filters and temporary logging,
-read [node operations](../doc/digidollar-operations.md). Thaw Day remains
-unscheduled on mainnet, testnet26 and signet in this development source. No
-public-network activation or soak test is claimed.
+read [node operations](../doc/digidollar-operations.md). Mainnet Thaw Day is
+scheduled at 24,490,000, estimated for November 1, 2026. Testnet26 is scheduled
+at 432,100, estimated for September 18–19, 2026. The heights trigger activation.
+Signet is unsupported and remains unscheduled. No public-network Thaw Day
+activation or soak test is claimed.
 
 ---
 

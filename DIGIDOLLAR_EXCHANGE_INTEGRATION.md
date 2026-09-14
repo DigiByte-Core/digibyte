@@ -404,7 +404,12 @@ investigating an explorer disagreement.
 
 ## 13. Test on Testnet Now!
 
-The public testnet configured in this source is **testnet26**, with buried DigiDollar activation at 600. Thaw Day remains disabled here. Check `getdigidollardeploymentinfo` on the installed build. No public Thaw Day activation or soak test is claimed.
+The public testnet configured in this source is **testnet26**, with buried
+DigiDollar activation at 600. Thaw Day is scheduled at **432,100**, estimated
+for September 18–19, 2026. The block height triggers the change. Check
+`getdigidollardeploymentinfo` on the installed build and follow the
+[upgrade window](DIGIDOLLAR_ACTIVATION_EXPLAINER.md). No public Thaw Day
+activation or soak test is claimed.
 
 ### Testnet Quick Start
 
@@ -433,7 +438,7 @@ The public testnet configured in this source is **testnet26**, with buried DigiD
 | Testnet name | testnet26 |
 | P2P Port | 12033 |
 | DD Address Prefix | `TD` |
-| Status | DigiDollar buried at 600; Thaw Day separately reported by `getdigidollardeploymentinfo` |
+| Status | DigiDollar buried at 600; Thaw Day scheduled at 432,100 and reported separately by `getdigidollardeploymentinfo` |
 | Oracle | 35 active slots, 7 MuSig2 signatures required, 6 exchange sources |
 
 ---
@@ -441,12 +446,13 @@ The public testnet configured in this source is **testnet26**, with buried DigiD
 ## 14. Mainnet Activation
 
 DigiDollar's buried mainnet activation height is 23,869,440. Thaw Day is a
-separate consensus transition and remains disabled in this development source.
+separate consensus transition scheduled at 24,490,000, estimated for
+November 1, 2026. The block height triggers the change.
 Use `getdigidollardeploymentinfo.thaw_day` to distinguish scheduled, active at
 tip and active next block. There are no current DigiDollar BIP9 signaling
 statistics in that RPC.
 
-Upgrade custody nodes before a future coordinated height. Older nodes may
+Upgrade custody nodes before that height. Older nodes may
 disagree under the new rules. Agree on how deposits and withdrawals will be
 held if chain agreement becomes uncertain. Installation alone is not proof of
 activation or readiness. See the [activation guide](DIGIDOLLAR_ACTIVATION_EXPLAINER.md)
