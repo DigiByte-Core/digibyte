@@ -115,8 +115,8 @@ Two more take it for the amounts they filter on, rather than an amount they
 send:
 
 ```
-listdigidollarpositions [minconf] [maxconf] [min_amount] [max_amount] [amount_unit]
-listdigidollaraddresses [minconf] [include_empty] [amount_unit]
+listdigidollarpositions [active_only] [tier_filter] [min_amount] [count] [skip] [amount_unit]
+listdigidollaraddresses [include_watchonly] [min_balance] [include_empty] [amount_unit]
 ```
 
 Both of these send $250.00:
@@ -444,10 +444,11 @@ Speed and memory
   paid DigiDollar at one of its own addresses. Anything that reads the log for
   routine DigiDollar lines has to add the category.
 
-- **Walking the coin database no longer copies every changed cache entry into a
-  second table first**, which on a node with a large cache was close to a
-  gigabyte allocated while a block was being connected. The set of coins it
-  hands out, and every value in it, is unchanged.
+- **Coin scans use a compact, sorted copy of changed cache entries** alongside
+  the database records. This replaces the extra hash table used in an earlier
+  version of the new accounting code. The scan still copies the changed coins
+  so later cache reads cannot disturb it, and uses their newer values in place
+  of the saved versions.
 
 - **Mining no longer grinds at the block before Thaw Day.** The starting
   accounting record is built once, when the block is really connected, instead

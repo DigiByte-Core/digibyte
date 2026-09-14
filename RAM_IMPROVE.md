@@ -1,190 +1,236 @@
-# Feather: less RAM, the same chain data
+# Feather: how DigiByte uses less RAM
 
-Feather reduces the memory used by DigiByte's block index and database reads.
-It also removes repeated startup work. The block index is the in-memory directory
-of known blocks: their parents, chainwork, validation state and disk locations.
-With millions of entries, small costs per entry add up.
+Feather is the name of DigiByte's memory and startup improvements in v9.26.6.
+The node keeps smaller records in RAM, reads less-used details from disk when
+needed, and does less repeated work when it starts.
 
-This document describes the implementation. It does not certify a release or
-promise a fixed whole-process RAM limit.
+## Summary
 
-Before Feather:
+- **Keep less in RAM.** Details already saved on disk no longer need a permanent
+  copy in every block's memory record.
+- **Waste less space.** Smaller records and shared memory allocations reduce the
+  cost of keeping a directory of millions of blocks.
+- **Do less repeated work.** Startup avoids unnecessary counting, large temporary
+  lists and repeated processing of oracle prices.
+- **Keep the checks.** These changes preserve mining rules, exact work scores
+  and checks for missing or damaged data.
+
+One RC1 desktop test used about **3.65–3.67 GiB of RAM** after startup. Starting
+that wallet took about **1 minute 48 seconds**. Results depend on the computer,
+chain data and workload; they are not a fixed RAM limit or startup time.
+
+**These improvements work as soon as the upgraded program runs.** They do not
+wait for Thaw Day. The separate DigiDollar rule changes wait for that height.
+
+## Why a full node needs so much memory
+
+A block is a group of transactions. DigiByte keeps a directory entry for every
+known block so it can find the block, check its place in the chain and compare
+competing chains. The code calls this directory the **block index**.
+
+There are more than 24 million mainnet blocks. A saving of just 64 bytes per
+entry adds up to about 1.43 GiB across 24 million entries.
+
+Feather keeps this directory in RAM. It makes each entry smaller and removes
+other unnecessary memory use around it.
+
+## What moved to disk?
+
+The data was already saved on disk. The change is that the node no longer keeps
+some of those details in RAM for every block, all the time.
+
+A block's short summary is called its **header**. Two header fields now come
+from disk when needed: the summary of its transactions and a number used in
+mining. Their code names are `hashMerkleRoot` and `nNonce`.
+
+A **cache** is temporary memory that saves repeated reads. Feather keeps a
+limited cache of saved headers. Older entries can be replaced because they
+can be read from disk again.
 
 ```mermaid
-flowchart LR
-    DB[Existing block-index database] --> Records[144-byte main records in RAM]
-    Records --> Nodes[Map nodes allocated separately]
-    DB --> Maps[Whole table files mapped into the process]
-    Coins[Coins database] --> Maps
+flowchart TD
+    A[Keep a small directory of blocks in RAM]
+    B[Need more details about a saved block]
+    C{Already in the cache?}
+    D[Use the RAM copy]
+    E[Read from the existing disk database]
+    A --> B --> C
+    C -->|Yes| D
+    C -->|No| E
 ```
 
-After Feather:
+**Unsaved data is different.** New header details stay in RAM until their save
+succeeds. A full cache is never permission to discard unsaved data.
 
-```mermaid
-flowchart LR
-    Hot[96-byte main records in a pooled map] --> Source[Header lookup]
-    Source --> Pending[Unsaved header fields in RAM]
-    Source --> Cache[Bounded saved-header cache]
-    Cache -->|read on a miss| DB[Same block-index database on disk]
-    Pending -->|write and sync before removal| DB
-    CoinsCache[Bounded coins DB read cache in RAM] -->|buffered read on a miss| Coins[Coins database on disk]
-```
+## The other memory changes
 
-On the current 64-bit build, the main `CBlockIndex` object is **96 bytes**, down
-from **144 bytes**. This excludes map keys, map bookkeeping, caches and separate
-allocations. Other platforms or compiler layouts can differ. Check the size
-again when changing fields; it is not the RAM cost of the entire node.
+### 1. Remove eight shortcuts from every block record
 
-The main record keeps the fields used often: parent and skip links, height,
-validation status, transaction counts, time, difficulty, work and disk positions.
-It still exists in RAM for every known block. Feather does not page the whole
-block index out to disk.
+Each record used to hold eight pointers to earlier blocks, grouped by mining
+algorithm. These were shortcuts for finding a previous block of the same kind.
 
-The Merkle root is a 32-byte summary of a block's transactions. The nonce is a
-4-byte mining field. These **36 bytes** are needed less often, so main records
-read them through a shared header source. The fields already exist in the block
-index database; there is no new database or storage format.
+The node now follows the chain's existing links to find that block. Removing
+these pointers saves 64 bytes per record on the measured 64-bit build. The
+mining difficulty rules stay the same, including rules for historical Groestl
+blocks.
 
-Sources: [chain.h](src/chain.h), [chain.cpp](src/chain.cpp),
-[blockstorage.cpp](src/node/blockstorage.cpp), `BlockTreeDB::ReadBlockHeader`.
+The tradeoff is a little extra lookup work. This particular change saves RAM;
+it does not make every lookup faster.
 
-Chainwork measures the accumulated proof of work used to compare chains.
-`CompactWork` stores values of up to 112 bits inside its 16-byte storage.
-Larger values use a separately allocated full 256-bit value. Reads and arithmetic
-still use `arith_uint256`. No high bits are discarded and no new work ceiling is
-introduced. Large values therefore cost extra memory.
+### 2. Store work scores in less space
 
-Source: [compact_work.h](src/util/compact_work.h).
+The node compares valid chains by their total mining work. This number is
+called **chainwork**, and its exact value matters.
 
-The hash map still gives each block record a stable address. Its allocator now
-takes space from shared chunks instead of making a separate general-purpose
-allocation for every node. This reduces allocation overhead. The chunks must
-outlive the map, and the shared header source must outlive its records.
+Feather uses a smaller holder for this number. If a value is too large to fit,
+it keeps the full-size value separately in RAM. No digits are rounded away,
+and the math still uses the full number.
 
-Sources: [blockstorage.h](src/node/blockstorage.h), `BlockMap`;
-[pool.h](src/support/allocators/pool.h).
+Together with reading the two header fields from disk, this cuts another
+48 bytes from the main block record on the measured build.
 
-Saved and unsaved headers have different rules:
+| Change | Size of the main record |
+| --- | ---: |
+| Before the memory work | 208 bytes |
+| After removing the eight pointers | 144 bytes |
+| After the header and work-score changes | 96 bytes |
 
-- The saved-header cache holds at most **65,536 full headers**, plus bookkeeping.
-  It checks the requested full block hash and returns an owned copy. Callers do
-  not keep cache entries pinned in memory. Missing headers and read errors are
-  not cached as successful results.
-- Unsaved roots and nonces stay in a separate lookup table in RAM. At 65,536
-  entries, normal header processing requests a database flush. This is a flush
-  trigger, not permission to discard pending data.
-- Pending header fields and dirty-record markers are cleared only after the existing
-  synchronous database batch succeeds. A failed write must leave them available.
-  Block and undo files are flushed before the index advertises their positions,
-  including files belonging to a snapshot chainstate.
+This table covers the main record only. The surrounding lookup tables, caches
+and other memory still add to the total. Sizes can differ on other builds.
 
-An unreadable stored header is a local storage error. Callers must stop the
-affected operation rather than invent a header or mark a peer's block invalid
-because a local read failed. Allocation failures remain failures too.
+### 3. Give many records space in one larger memory allocation
 
-Sources: [blockheadercache.h](src/node/blockheadercache.h),
-[blockheadercache.cpp](src/node/blockheadercache.cpp),
-[blockstorage.cpp](src/node/blockstorage.cpp), `BlockIndexHeaderStore` and
-`WriteBlockIndexDB`; [validation.cpp](src/validation.cpp), `FlushStateToDisk`.
+Asking the system for millions of separate pieces of memory adds bookkeeping
+and wasted space. Feather asks for larger chunks and gives each record a piece.
+This is called a **memory pool**.
 
-Both the block-index database and the coins database now use Feather's
-buffered file reader. On POSIX systems it uses `pread`, which reads at a given
-offset without moving a shared file position. Windows protects its seek/read
-sequence with a lock. LevelDB still checks read lengths and checksums.
+Each record stays in the same place while in use, so links between records keep
+working. The lookup table also removes some bookkeeping where the system's
+C++ library allows it. The full block identifier is still kept.
 
-These databases target **64 cached table files** each, using `max_open_files=74`
-because LevelDB reserves ten slots for other files. Buffered files keep their
-handles open, so Unix startup also reserves descriptors for the block index and
-up to two chainstates before budgeting peer connections. Active iterators can
-hold additional files; the table-cache target is not an absolute descriptor cap.
+### 4. Read the part of a database file that is needed
 
-Ordinary database defaults stay unchanged. Coins database cache resizing and
-snapshot initialization preserve the scoped buffered-read settings. The byte
-budgets for database caches are not reduced by this change.
+The block directory and coin database now read requested parts of files into
+buffers. Previously, their reader could map whole files into the program's
+memory space. The database still checks that the data is complete and intact.
 
-Sources: [dbwrapper.h](src/dbwrapper.h), [dbwrapper_env.cpp](src/dbwrapper_env.cpp),
-[node/chainstate.cpp](src/node/chainstate.cpp), [txdb.cpp](src/txdb.cpp),
-[validation.cpp](src/validation.cpp), `InitCoinsDB`; [init.cpp](src/init.cpp).
+This also changes how the task manager counts memory. The operating system can
+still keep recently read file data in its own cache. A lower RAM figure for the
+program does not mean every byte of that decrease became free system RAM.
 
-Memory-mapped file pages count toward process resident memory, or **RSS**, while
-they remain resident. Clean pages can already be reclaimed by the operating
-system. Buffered reads avoid whole-table mappings, but the operating system can
-still cache those files outside the process. A drop in RSS is therefore not an
-equal increase in free system RAM. Heap use, file-backed pages and swap should be
-reported separately. `dbcache` controls selected caches, not all process memory.
-The main allocation savings come from smaller pooled block records and avoiding
-large temporary candidate sets. Buffered reads chiefly change how file pages
-are accessed and accounted for; they do not guarantee extra physical RAM savings.
+The actual savings from smaller records and fewer temporary allocations are
+separate from this change in how file memory is counted. The database cache
+budgets were not simply turned down.
 
-Startup changes reduce work and temporary allocations:
+### 5. Use a smaller temporary list when checking coins
 
-1. Load block-index records once. The old preliminary pass only counted records
-   to draw percentage progress. Progress now reports the number loaded, without
-   that extra database walk. Iterator errors are checked explicitly.
-2. Recover the coins database and its tip before building candidate sets. These
-   sets contain blocks eligible to become the chain tip. Building them against
-   each recovered chainstate avoids adding a large historical set merely to
-   remove most of it later. Fork and snapshot eligibility still matter.
-3. Avoid repeated warning scans over complete periods below the existing warning
-   height. Those periods cannot contain qualifying warning signals. The period
-   crossing that height and later periods still use the existing checker.
-   This does not move an activation height or replace consensus checks.
+Some coin records are on disk. Recent changes may still be in RAM. Accounting
+checks need both, with the newer information taking priority.
 
-Sources: [blockstorage.cpp](src/node/blockstorage.cpp), `LoadBlockIndexGuts`;
-[node/chainstate.cpp](src/node/chainstate.cpp), `CompleteChainstateInitialization`;
-[validation.cpp](src/validation.cpp), `RebuildBlockIndexCandidates` and
-`WarningBitsConditionChecker::GetStateFor`.
+The scan now reads the saved records alongside a sorted copy of the changed
+coins. This replaces the extra lookup table used in an earlier version of the
+new accounting code. Coins already spent are left out of the result.
 
-Feather keeps the serialized database records, wire headers, chainwork precision,
-consensus rules and Thaw Day activation heights unchanged. The storage changes
-do not require a resync or reindex. A damaged database still requires recovery;
-Feather is not a substitute for backups or corruption checks.
+The copy is intentional. The working coin cache can change during the scan.
+Keeping a stable copy of its changes avoids reading data that moves beneath
+the scan. This is a smaller temporary structure, not the removal of a check.
 
-For future changes, preserve these rules: stable record addresses, correct
-source lifetimes, full hash identity checks, pending data until successful sync,
-and a clear difference between invalid network data and local storage failure.
-Keep the work small. Do not add another database or an eviction scheme for
-unsaved records just to reduce a displayed memory number.
+## What makes startup do less work?
 
-Verification must include the full unit and functional suites, sanitizer fuzzing
-of compact work and affected arithmetic/header paths, and focused tests for
-cache eviction, errors, concurrency, database reopening and descriptor use.
-Exercise interruption, failed writes, replay, reorgs, pruning and snapshot roles.
-Fuzzing alone does not cover the storage and recovery requirements above.
-
-Measure the final binary on comparable data and workloads. Record peak and
-settled RSS, anonymous and file-backed memory, startup time, and identical tip
-hash and chainwork. Check header responses and block processing as well. Compare
-GUI with GUI; a daemon measurement does not establish desktop memory use.
-
-The first complete verification pass used these source snapshots. Git's directory
-hashes identify the exact files even when commits are combined:
-
-- `src`: `0c72ff1eb4daecc69a09623d17056d4e0fe95b2c`
-- `test`: `41d600dcb0c65d551e1a6957f2a193f815256df2`
-
-| Check | Result |
+| Before | Now |
 | --- | --- |
-| Full C++ unit suite | 3,718 cases passed |
-| Qt suite on an offscreen display | 163 passes, including setup and cleanup; 3 optional visual captures skipped |
-| Full extended functional suite | 391 passed, 17 skipped, no failures |
-| Focused memory and undefined-behavior checks | 120 cases and 293,380 assertions passed |
-| Fuzz input replay | 85,985 saved inputs across all 255 public targets; no failures |
-| Longer fuzz runs | 28 runs passed, including 10 minutes for compact work and one minute per other selected target |
+| Walk the block database just to count its entries, then load them | Load them straight away and show how many have been read |
+| Build a large list of possible chain ends, then remove most of it | Read the saved chain's last block first, then build the list that is needed |
+| Repeat warning calculations for old periods that cannot trigger a warning | Skip those periods; still check the boundary and later periods |
+| Repeat parsing and setup for historical oracle price records | Reuse work already done for those records |
+| Rebuild completed oracle price history again during the same startup | Use the completed reconstruction |
 
-The functional skips cover unsupported signet tests, optional tracing, older
-release binaries, and tests requiring special network addresses. A skipped test
-is not a passed test. These runs do not establish Windows behavior or physical
-power-loss behavior. Full historical reindex and public testnet release checks
-remain separate requirements.
+Oracle services provide signed DGB prices for DigiDollar. Their required price
+history is still loaded before startup finishes. Valid competing chains are
+still considered when the node builds its list of possible chain ends.
 
-One observed desktop startup took about **113 seconds**. Process memory settled
-at about **3.67 GiB**, with a peak of **3.82 GiB** and no swap used by that process.
-The preceding Feather build used about **4.47 GiB** after startup. This comparison
-shows the effect on process memory; the operating-system file-cache caveat above
-still applies. These are observations from one workload, not a fixed RAM limit
-or a general speed claim.
+Long scans now show progress and respond to cancellation. Incomplete results
+are not marked ready. Required accounting checks still run, including the
+check of saved vault totals.
 
-After history consolidation, rebuild and repeat the full unit, functional, and
-fuzz checks on the final release commit. Keep the source identity, commands,
-results, and remaining limits with that verification record.
+Mining also avoids repeated work. The initial Thaw Day accounting record is
+prepared when the preceding block is actually added to the chain. It is not
+rebuilt every time a miner asks for a proposed block to mine.
+
+## How saves and reads stay safe
+
+- **Save before forgetting.** Unsaved header details and pending-write records
+  stay available if a database write fails.
+- **Save in the right order.** Block files and the data needed to reverse blocks
+  are saved before the directory records their disk locations.
+- **Check what was read.** A stored header must match the block requested.
+  Missing or damaged data produces a storage error.
+- **Keep errors separate.** A local disk failure is not treated as proof that
+  another node sent an invalid block.
+
+Feather keeps the existing block-index file format and network header format.
+Its storage changes alone do not require downloading or rechecking the whole
+chain. Thaw Day's separate accounting changes have their own recovery checks.
+
+## Why the node still uses several gigabytes
+
+The block directory still has an entry for every known block. The node also
+needs memory for coin caches, wallets, pending transactions, network connections
+and the work of checking new blocks.
+
+The `dbcache` setting controls only some of those caches. It is not a limit on
+the whole program. Feather therefore reduces RAM use without turning a full
+DigiByte node into a 200 MB program.
+
+Some operations now do more disk reads or follow more chain links. Startup
+removes other work. The total effect on speed depends on the workload and disk.
+First sync, recovery and accounting checks after Thaw Day can take longer than
+an ordinary restart before it.
+
+## Details for developers and operators
+
+These are the limits and checks behind the design above.
+
+| Item | Detail |
+| --- | --- |
+| Saved-header cache | Holds at most 65,536 full headers, plus bookkeeping; callers receive their own copy |
+| Unsaved headers | Reaching 65,536 entries requests a save; entries remain until that save succeeds |
+| Header fields read from disk | A 32-byte transaction summary and a 4-byte mining nonce |
+| Work-score storage | A 16-byte holder keeps values up to 112 bits directly; larger values use a separate exact 256-bit number |
+| Database file cache | Targets 64 table files per affected database; an active scan can hold more |
+| Open-file budget | Startup reserves room for database files before assigning room to peer connections |
+| Lookup bookkeeping | Avoids an extra cached hash where supported; full block identifiers remain |
+| Unix and Windows reads | Unix uses reads at a given file offset; Windows locks the seek-and-read operation |
+| Cache changes and chain snapshots | Keep the same buffered-read settings; block and reversal data are saved before index references |
+| Other databases | Keep their existing defaults |
+
+On Unix, a low open-file limit can reduce connections or stop startup. If the
+node reports that limit, check the operating system's file allowance.
+
+The recorded desktop run and test results used source commit
+`d2097819f260f4d82409643fe9f7263cdd7e3eaa`. That run used no process swap in the
+recorded samples. The startup time was 108 seconds; it was not a measurement
+of the future Thaw Day accounting scan.
+
+Recorded checks included 3,739 passing unit tests and 394 passing functional
+tests, with 17 functional tests skipped and none failed. Separate desktop,
+memory-error and fuzz checks are recorded with the release tests. A skipped
+test is not a pass. Full mainnet replay and public activation checks remain
+separate release requirements.
+
+Future changes need tests for exact work scores, historical mining rules,
+cache replacement, failed reads and writes, simultaneous reads, restarts,
+pruning and chain changes. Compare the accepted block and work score as well
+as RAM use. Measure the same workload on both builds.
+
+| Code area | Files |
+| --- | --- |
+| Block records and saved headers | [chain.h](src/chain.h), [chain.cpp](src/chain.cpp), [blockstorage.cpp](src/node/blockstorage.cpp) |
+| Mining lookups | [pow.cpp](src/pow.cpp), [lookup tests](src/test/pow_algo_lookup_tests.cpp) |
+| Work scores | [compact_work.h](src/util/compact_work.h), [work-score tests](src/test/compact_work_tests.cpp) |
+| Shared memory allocations | [blockstorage.h](src/node/blockstorage.h), [pool.h](src/support/allocators/pool.h), [hasher.h](src/util/hasher.h) |
+| Header cache | [blockheadercache.cpp](src/node/blockheadercache.cpp), [cache tests](src/test/blockheadercache_tests.cpp) |
+| File reads | [dbwrapper.h](src/dbwrapper.h), [dbwrapper_env.cpp](src/dbwrapper_env.cpp), [reader tests](src/test/dbwrapper_env_tests.cpp) |
+| Coin scans | [coins.cpp](src/coins.cpp) |
+| Startup and saving | [chainstate.cpp](src/node/chainstate.cpp), [validation.cpp](src/validation.cpp), [init.cpp](src/init.cpp) |
+| Oracle prices and health | [bundle_manager.cpp](src/oracle/bundle_manager.cpp), [health.cpp](src/digidollar/health.cpp) |
