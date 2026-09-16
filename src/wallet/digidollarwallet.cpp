@@ -5399,7 +5399,9 @@ size_t DigiDollarWallet::ReconcilePositionStates()
     }
 
     if (!ChainForQuery(__FILE__, __LINE__).isReadyToBroadcast()) {
-        LogPrintf("DigiDollar: ReconcilePositionStates skipped while chainstate is not ready\n");
+        // This runs for every connected block during a reindex or initial
+        // sync, so it stays in the DigiDollar debug category.
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ReconcilePositionStates skipped while chainstate is not ready\n");
         LOCK(cs_dd_wallet);
         m_position_state_validation_pending = true;
         return 0;
