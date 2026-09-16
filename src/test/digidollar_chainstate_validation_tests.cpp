@@ -500,7 +500,10 @@ BOOST_AUTO_TEST_CASE(abandoned_mint_preserves_legacy_clamped_inverse)
     }
 }
 
-BOOST_AUTO_TEST_CASE(unsaved_legacy_candidate_preserves_registry_acceptance_and_updates)
+// The registry claims the mint token is worth twice its principal. Consensus
+// reads amounts from the chain only, so the doubled transfer is not accepted
+// on the strength of that entry, and the entry itself is left untouched.
+BOOST_AUTO_TEST_CASE(unsaved_legacy_candidate_ignores_registry_amounts)
 {
     auto mint = Mint(1, 500 * COIN, 120);
     auto transfer = TransferMintToken(mint, 2 * PRINCIPAL);
@@ -519,14 +522,15 @@ BOOST_AUTO_TEST_CASE(unsaved_legacy_candidate_preserves_registry_acceptance_and_
     const auto history_size = DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory().size();
     CCoinsViewCache candidate{&chain.CoinsTip()};
     BlockValidationState state;
-    BOOST_REQUIRE_MESSAGE(chain.ConnectBlock(block->block, state, &block->index, candidate, true), state.ToString());
-    BOOST_CHECK(!candidate.HaveCoin(COutPoint{mint.GetHash(), 1}));
-    BOOST_CHECK(candidate.HaveCoin(COutPoint{transfer.GetHash(), 0}));
-    BOOST_CHECK(candidate.HaveCoin(COutPoint{later_mint.GetHash(), 0}));
-    // Both legacy mint updates ran; abandoning the check retains their clamped inverse behavior.
+    BOOST_CHECK(!chain.ConnectBlock(block->block, state, &block->index, candidate, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "dd-input-amounts-unknown");
+    BOOST_CHECK(candidate.HaveCoin(COutPoint{mint.GetHash(), 1}));
+    BOOST_CHECK(!candidate.HaveCoin(COutPoint{transfer.GetHash(), 0}));
+    BOOST_CHECK(!candidate.HaveCoin(COutPoint{later_mint.GetHash(), 0}));
+    // The failed transfer prevents the second mint's legacy accounting update.
     const auto after = DigiDollar::SystemHealthMonitor::GetCachedMetrics();
     BOOST_CHECK_EQUAL(after.totalDDSupply, 0);
-    BOOST_CHECK_EQUAL(after.totalCollateral, metrics.totalCollateral - 1000 * COIN);
+    BOOST_CHECK_EQUAL(after.totalCollateral, metrics.totalCollateral - 500 * COIN);
     DigiDollar::ScriptMetadata metadata;
     BOOST_REQUIRE(DigiDollar::GetScriptMetadata(mint.vout[1].scriptPubKey, metadata));
     BOOST_CHECK_EQUAL(metadata.ddAmount, 2 * PRINCIPAL);

@@ -206,6 +206,8 @@ static std::optional<int> ResolveCanonicalHealth(const ValidationContext& ctx,
 // Script Analysis Functions
 // ============================================================================
 
+// Test-only helper. It answers from the script metadata registry, which is
+// local wallet state, so block and mempool validation must never call it.
 ScriptType IdentifyScriptType(const CScript& script) {
     // Quick rejection for obviously non-P2TR scripts
     if (!IsCanonicalP2TROutput(script)) {
@@ -234,12 +236,18 @@ bool IsDDTokenScript(const CScript& script) {
     return type == ScriptType::DD_TOKEN_OUTPUT;
 }
 
+// Consensus reads DigiDollar amounts from the chain only: a mint or redeem
+// OP_RETURN, or the transaction that created a token output. The script
+// metadata registry is filled in by the wallet and the transaction builder and
+// is keyed by output script alone, so an owner address that is used again keeps
+// only the amount written last. Block validity must never depend on it. The
+// registry form below exists for unit tests that have no chain to read.
 bool ExtractDDAmount(const CScript& script, CAmount& amount) {
-    return ExtractDDAmount(script, amount, true);
+    return ExtractDDAmount(script, amount, /*allow_registry=*/false);
 }
 
 bool ExtractDDAmount(const CScript& script, CAmount& amount, bool allow_registry) {
-    // Phase 1: Use metadata registry for scripts created by Create*P2TR functions
+    // Test-only: the registry is never read by block or mempool validation.
     ScriptMetadata metadata;
     if (allow_registry && GetScriptMetadata(script, metadata)) {
         if (metadata.type == ScriptType::DD_TOKEN_OUTPUT ||
@@ -675,13 +683,11 @@ static bool ExtractRedemptionDDOutputs(const CTransaction& tx, CAmount& totalDDO
                 return false;
             }
 
-            CAmount ddAmount = 0;
-            if (foundOpReturn) {
-                ddAmount = ddAmountFromOpReturn;
-            } else if (!ExtractDDAmount(output.scriptPubKey, ddAmount)) {
+            // A change output is only countable through the serialized amount.
+            if (!foundOpReturn) {
                 return false;
             }
-            if (!AddDDAmount(totalDDOutputs, ddAmount)) {
+            if (!AddDDAmount(totalDDOutputs, ddAmountFromOpReturn)) {
                 return false;
             }
         }
@@ -746,8 +752,7 @@ bool ExtractRedemptionAccountingAmounts(const CTransaction& tx,
 
         CAmount ddAmount = 0;
         if ((ExtractDDAmountFromPrevTx(tx.vin[i].prevout, ddAmount) && ddAmount > 0) ||
-            (txLookup && ExtractDDAmountFromBlockDb(tx.vin[i].prevout, coin.nHeight, txLookup, ddAmount) && ddAmount > 0) ||
-            (ExtractDDAmount(coin.out.scriptPubKey, ddAmount) && ddAmount > 0)) {
+            (txLookup && ExtractDDAmountFromBlockDb(tx.vin[i].prevout, coin.nHeight, txLookup, ddAmount) && ddAmount > 0)) {
             if (!AddDDAmount(totalDDInputs, ddAmount)) {
                 return false;
             }
@@ -867,10 +872,7 @@ bool SpendsDigiDollarCollateralVault(const CTransaction& tx,
             continue;
         }
 
-        if (DigiDollar::IsRegisteredCollateralVaultScript(coin.out.scriptPubKey)) {
-            return true;
-        }
-
+        // Only the transaction that created the coin can say it is a vault.
         CTransactionRef prev_tx;
         if (LookupPreviousTransaction(txin.prevout, coin.nHeight, ctx, prev_tx) &&
             IsMintCollateralOutput(prev_tx, txin.prevout.n)) {
@@ -1075,6 +1077,9 @@ bool ValidateCollateralRatio(CAmount dgbLocked, CAmount ddMinted,
 // Path-Specific Validation Functions
 // ============================================================================
 
+// Test-only helper. It reads the lock height from the script metadata registry,
+// which is local wallet state. Consensus enforces the timelock through the
+// vault script itself and through the creating mint transaction.
 bool ValidateNormalRedemption(const CScript& script, int currentHeight) {
     // Phase 1 simplified implementation
     // Extract lock height from script metadata if available
@@ -1164,9 +1169,10 @@ bool ValidateDigiDollarScript(const CScript& script,
         return true;
     }
 
-    // Extract and validate DD amount if present
+    // Extract and validate DD amount if present. This helper is test-only and
+    // classifies scripts through the registry, so it reads the amount there too.
     CAmount amount;
-    if (!ExtractDDAmount(script, amount)) {
+    if (!ExtractDDAmount(script, amount, /*allow_registry=*/true)) {
         if (serror) *serror = SCRIPT_ERR_INVALID_DD_AMOUNT;
         LogPrintf("DigiDollar: Script validation failed - cannot extract DD amount\n");
         return false;
@@ -1217,7 +1223,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
     for (const auto& output : tx.vout) {
         if (output.nValue == 0) {
             CAmount ddAmt = 0;
-            if (ExtractDDAmount(output.scriptPubKey, ddAmt, !canonical)) {
+            if (ExtractDDAmount(output.scriptPubKey, ddAmt)) {
                 // Check both mint amount limits AND output amount limits
                 if (!ValidateMintAmount(ddAmt, ctx.params, ctx.nHeight) || !ValidateOutputAmount(ddAmt, ctx.params)) {
                     LogPrintf("DigiDollar: Invalid DD mint/output amount detected: %d cents\n", ddAmt);
@@ -1289,19 +1295,13 @@ bool ValidateMintTransaction(const CTransaction& tx,
         bool isP2TR = IsCanonicalP2TROutput(output.scriptPubKey);
         bool isOpReturn = (output.scriptPubKey.size() > 0 && output.scriptPubKey[0] == OP_RETURN);
 
-        // Check script type using metadata
-        ScriptType scriptType = canonical ? ScriptType::NOT_DIGIDOLLAR : IdentifyScriptType(output.scriptPubKey);
+        // Outputs are classified by structure only. The script metadata
+        // registry is local wallet state and must not influence block validity.
         CAmount ddAmount = 0;
-        bool hasDDAmount = ExtractDDAmount(output.scriptPubKey, ddAmount, !canonical);
+        bool hasDDAmount = ExtractDDAmount(output.scriptPubKey, ddAmount);
 
         if (output.nValue > 0 && !isOpReturn) {
             // Any output with value could be collateral in a mint transaction
-            // Check if this is actually a DD TOKEN script with non-zero value (invalid)
-            if (scriptType == ScriptType::DD_TOKEN_OUTPUT) {
-                LogPrintf("DigiDollar: DD token output has non-zero DGB value: %d\n", output.nValue);
-                return state.Invalid(TxValidationResult::TX_CONSENSUS, "dd-output-value");
-            }
-
             // Check if it's P2TR (required for collateral)
             // Non-P2TR outputs are allowed as change outputs - skip them
             if (!isP2TR) {
@@ -1655,7 +1655,7 @@ bool ValidateMintTransaction(const CTransaction& tx,
         expectedParams.internalKey = DigiDollar::GetCollateralNUMSKey();
         expectedParams.oracleKeys = DigiDollar::GetOracleKeys(15);
 
-        CScript expectedCollateral = DigiDollar::CreateCollateralP2TR(expectedParams, !canonical);
+        CScript expectedCollateral = DigiDollar::CreateCollateralP2TR(expectedParams, /*register_metadata=*/false);
         if (expectedCollateral.empty()) {
             LogPrintf("DigiDollar: SECURITY - Failed to reconstruct expected P2TR collateral\n");
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-collateral-reconstruction",
@@ -1961,16 +1961,6 @@ bool ValidateTransferTransaction(const CTransaction& tx,
                 }
             }
 
-            // 3. Try coins view + metadata registry (may be stale — last resort)
-            if (!found && ctx.coins) {
-                Coin coin;
-                if (ctx.coins->GetCoin(txin.prevout, coin) && coin.out.nValue == 0) {
-                    if (ExtractDDAmount(coin.out.scriptPubKey, ddAmt) && ddAmt > 0) {
-                        found = true;
-                    }
-                }
-            }
-
             if (found) {
                 inputDD += ddAmt;
                 ddInputCount++;
@@ -2111,16 +2101,6 @@ bool ValidateRedemptionTransaction(const CTransaction& tx,
                                                      "Redemption DD input amount exceeds per-output serialization bounds");
                             }
                             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD input %d - amount: %lld cents (from block db)\n",
-                                     i, (long long)ddAmount);
-                        } else if (ExtractDDAmount(coin.out.scriptPubKey, ddAmount) && ddAmount > 0) {
-                            // Last resort for unit tests and legacy in-memory flows.
-                            // The registry is keyed only by scriptPubKey, so repeated
-                            // sends to the same P2TR key can overwrite the amount.
-                            if (!AddDDAmount(totalDDInputs, ddAmount)) {
-                                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-redeem-dd-input-amount",
-                                                     "Redemption DD input amount exceeds per-output serialization bounds");
-                            }
-                            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: DD input %d - amount: %lld cents (from registry fallback)\n",
                                      i, (long long)ddAmount);
                         } else {
                             LogPrintf("DigiDollar: WARNING - Could not extract DD amount from DD input %d\n", i);
@@ -2278,16 +2258,10 @@ bool ValidateRedemptionTransaction(const CTransaction& tx,
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Output %d - DD P2TR: %lld cents (from OP_RETURN)\n",
                              outIdx, (long long)ddAmountFromOpReturn);
                 } else {
-                    // Fallback to metadata registry (may be stale)
-                    CAmount ddAmount = 0;
-                    if (ExtractDDAmount(output.scriptPubKey, ddAmount, !IsThawDayActive(ctx.params.GetConsensus(), ctx.nHeight))) {
-                        if (!AddDDAmount(totalDDOutputs, ddAmount)) {
-                            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-redeem-dd-output-amount",
-                                                 "Redemption DD output amount exceeds per-output serialization bounds");
-                        }
-                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Output %d - DD P2TR: %lld cents (from metadata)\n",
-                                 outIdx, (long long)ddAmount);
-                    }
+                    // A change output with no serialized amount adds nothing to the
+                    // output total. Below Thaw Day this matches every node that has
+                    // no local registry entry for the script.
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Output %d - DD P2TR without a serialized amount\n", outIdx);
                 }
             }
         }
@@ -2641,21 +2615,6 @@ bool ValidateCollateralReleaseAmount(const CTransaction& tx,
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Extracted original DD minted (%lld) and lock height (%lld) from block db\n",
                          (long long)originalDDMinted, (long long)originalLockHeight);
             }
-        }
-    }
-
-    // Last resort for legacy/unit-test contexts that lack tx lookup. This is intentionally
-    // after authoritative sources because script metadata can be overwritten by failed mints
-    // that reuse the same collateral script.
-    if (!canonical && !found) {
-        ScriptMetadata metadata;
-        if (GetScriptMetadata(collateralCoin.out.scriptPubKey, metadata) &&
-            metadata.type == DigiDollar::ScriptType::COLLATERAL_LOCK &&
-            metadata.ddAmount > 0 &&
-            metadata.lockHeight >= 0) {
-            originalDDMinted = metadata.ddAmount;
-            originalLockHeight = metadata.lockHeight;
-            found = true;
         }
     }
 

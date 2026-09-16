@@ -172,13 +172,16 @@ bool RequiresDigiDollarValidation(const CTransaction& tx,
 ScriptType IdentifyScriptType(const CScript& script);
 
 /**
- * Extract DigiDollar amount from script
+ * Read a DigiDollar amount from a script's own data (a mint or redeem OP_RETURN).
+ * A plain token output carries no amount; resolve it through the creating
+ * transaction instead. Consensus never reads the script metadata registry.
  *
  * @param script Script containing DD amount
  * @param amount Output parameter to receive extracted amount
  * @return true if amount successfully extracted, false otherwise
  */
 bool ExtractDDAmount(const CScript& script, CAmount& amount);
+/** Test-only variant: allow_registry=true also consults the script metadata registry. */
 bool ExtractDDAmount(const CScript& script, CAmount& amount, bool allow_registry);
 
 /**
@@ -226,7 +229,7 @@ bool ExtractDDAmountFromBlockDb(const COutPoint& prevout, uint32_t coinHeight,
  */
 bool ExtractMintAccountingAmounts(const CTransaction& tx,
                                   CAmount& ddAmount,
-                                  CAmount& collateralAmount, bool allow_registry = true);
+                                  CAmount& collateralAmount, bool allow_registry = false);
 
 /**
  * Extract actual DD burned and collateral released by a redemption transaction.

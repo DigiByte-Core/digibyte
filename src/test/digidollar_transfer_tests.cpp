@@ -1207,8 +1207,10 @@ BOOST_FIXTURE_TEST_CASE(test_dd_amount_balance_verification, DDTransferTestFixtu
         // Skip OP_RETURN outputs (metadata, not spendable DD)
         if (output.nValue == 0 && output.scriptPubKey.size() > 0 &&
             output.scriptPubKey[0] == OP_1) {
+            // The builder registers each output it creates; read that
+            // registry explicitly. Consensus never does.
             CAmount ddAmount = 0;
-            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount)) {
+            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount, /*allow_registry=*/true)) {
                 totalDDOut += ddAmount;
             }
         }
@@ -1375,8 +1377,10 @@ BOOST_FIXTURE_TEST_CASE(test_complete_transaction_structure, DDTransferTestFixtu
         // Skip OP_RETURN outputs (metadata, not spendable DD)
         if (output.nValue == 0 && output.scriptPubKey.size() > 0 &&
             output.scriptPubKey[0] == OP_1) {
+            // The builder registers each output it creates; read that
+            // registry explicitly. Consensus never does.
             CAmount ddAmount = 0;
-            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount)) {
+            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount, /*allow_registry=*/true)) {
                 totalDDOut += ddAmount;
             }
         }

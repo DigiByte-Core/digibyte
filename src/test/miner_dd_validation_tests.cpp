@@ -1510,8 +1510,16 @@ BOOST_FIXTURE_TEST_CASE(thaw_redemption_change_is_countable_through_index_reopen
             restore.value = NextBlockHeight() + 1;
             const auto legacy_metrics = DigiDollar::SystemHealthMonitor::GetCachedMetrics();
             BlockValidationState legacy;
-            BOOST_REQUIRE_MESSAGE(TestBlockValidity(legacy, Params(), chain, block, chain.m_chain.Tip(),
-                                                     GetAdjustedTime, false, false), legacy.ToString());
+            const bool legacy_valid = TestBlockValidity(legacy, Params(), chain, block, chain.m_chain.Tip(),
+                                                        GetAdjustedTime, false, false);
+            if (redemption == missing) {
+                // Below Thaw Day a change output with no serialized amount cannot be
+                // counted from chain data, so every node rejects the block.
+                BOOST_CHECK(!legacy_valid);
+                BOOST_CHECK_EQUAL(legacy.GetRejectReason(), "bad-dd-redeem-accounting");
+            } else {
+                BOOST_REQUIRE_MESSAGE(legacy_valid, legacy.ToString());
+            }
             BOOST_CHECK_EQUAL(DigiDollar::SystemHealthMonitor::GetCachedMetrics().totalDDSupply, legacy_metrics.totalDDSupply);
             BOOST_CHECK_EQUAL(DigiDollar::SystemHealthMonitor::GetCachedMetrics().totalCollateral, legacy_metrics.totalCollateral);
         }
@@ -1889,9 +1897,45 @@ BOOST_FIXTURE_TEST_CASE(supply_index_rejects_readable_current_block_body_corrupt
     }
 }
 
-BOOST_FIXTURE_TEST_CASE(legacy_missing_token_metadata_keeps_supply_unavailable, ThawMinerERRValidationSetup)
+// Below Thaw Day, a redemption change output whose amount was never serialized
+// cannot be counted from chain data. Every node rejects that block the same way,
+// whatever its own wallet has written into the script metadata registry.
+BOOST_FIXTURE_TEST_CASE(legacy_unserialized_redemption_change_is_rejected, ThawMinerERRValidationSetup)
 {
-    CheckLegacyUncountableSupply(*this, false);
+    struct RestoreHeight {
+        int saved;
+        RestoreHeight()
+        {
+            LOCK(cs_main);
+            auto& height = const_cast<Consensus::Params&>(Params().GetConsensus()).nDDThawDayHeight;
+            saved = height;
+            height += 100;
+        }
+        ~RestoreHeight()
+        {
+            LOCK(cs_main);
+            const_cast<Consensus::Params&>(Params().GetConsensus()).nDDThawDayHeight = saved;
+        }
+    } restore;
+    constexpr CAmount fee_value{2 * COIN};
+    constexpr CAmount fee{COIN};
+    const auto funding = ConfirmOpTrueFunding(fee_value);
+    InstallMuSig2OraclePrice(REFERENCE_PRICE, NextBlockHeight());
+    const auto redemption = BuildMatureRedemption(funding, fee_value, fee, 100, /*serialized_change=*/false);
+    auto& chain = m_node.chainman->ActiveChainstate();
+    BOOST_REQUIRE_LT(NextBlockHeight(), Params().GetConsensus().nDDThawDayHeight);
+    const auto parent_hash = WITH_LOCK(cs_main, return chain.m_chain.Tip()->GetBlockHash());
+    const auto block = CreateBlock({CMutableTransaction{*redemption}}, CScript() << OP_TRUE, chain);
+
+    LOCK(cs_main);
+    // The wallet that built the redemption knows the change amount. Consensus must not.
+    DigiDollar::RegisterScriptMetadata(redemption->vout[2].scriptPubKey, DigiDollar::ScriptType::DD_TOKEN_OUTPUT, 100, 0);
+    BlockValidationState rejected;
+    BOOST_CHECK(!TestBlockValidity(rejected, Params(), chain, block, chain.m_chain.Tip(),
+                                   GetAdjustedTime, false, false));
+    BOOST_CHECK_EQUAL(rejected.GetRejectReason(), "bad-dd-redeem-accounting");
+    BOOST_CHECK(chain.m_chain.Tip()->GetBlockHash() == parent_hash);
+    BOOST_CHECK(chain.CoinsTip().HaveCoin(COutPoint{redeemable_mint->GetHash(), 0}));
 }
 
 BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_metadata_keeps_supply_unavailable, ThawMinerERRValidationSetup)
@@ -1899,19 +1943,14 @@ BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_metadata_keeps_supply_unavailable
     CheckLegacyUncountableSupply(*this, true);
 }
 
-BOOST_FIXTURE_TEST_CASE(legacy_unknown_token_supply_reopens_across_thaw, ThawMinerERRValidationSetup)
-{
-    CheckLegacyUncountableSupply(*this, false, true);
-}
-
 BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_supply_reopens_across_thaw, ThawMinerERRValidationSetup)
 {
     CheckLegacyUncountableSupply(*this, true, true);
 }
 
-BOOST_FIXTURE_TEST_CASE(legacy_unknown_token_supply_crosses_thaw_with_open_index, ThawMinerERRValidationSetup)
+BOOST_FIXTURE_TEST_CASE(legacy_ambiguous_token_supply_crosses_thaw_with_open_index, ThawMinerERRValidationSetup)
 {
-    CheckLegacyUncountableSupply(*this, false, true, true);
+    CheckLegacyUncountableSupply(*this, true, true, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(thaw_miner_reports_missing_reference_before_selection, ThawMinerValidationSetup)

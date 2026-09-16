@@ -355,6 +355,7 @@ BASE_SCRIPTS = [
     'wallet_digidollar_pending_redeem_restart.py',
     'wallet_digidollar_rc33_regressions.py',
     'wallet_digidollar_reindex.py',
+    'wallet_digidollar_reindex_reused_address.py',
     'wallet_digidollar_reorg.py',
     'wallet_digidollar_rescan.py',
     'wallet_digidollar_persistence_restart.py --descriptors',

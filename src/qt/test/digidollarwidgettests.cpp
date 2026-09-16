@@ -2043,8 +2043,10 @@ void DigiDollarWidgetTests::redeemWidgetCanonicalHealthDoesNotRequireCirculating
     CreateAndProcessOracleQuoteBlock(test, 1000000);
     QCOMPARE(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()), redemption_quote_height);
 
-    // Legacy redemption can leave change whose amount was never serialized.
-    // A separate token remains known and can fund another vault's redemption.
+    // A legacy redemption can leave change whose amount cannot be counted: its
+    // metadata appears twice, so no node can tell which record is the amount.
+    // Every node still accepts the block. A separate token remains known and
+    // can fund another vault's redemption.
     CMutableTransaction legacy_redeem;
     legacy_redeem.SetDigiDollarType(DD_TX_REDEEM);
     legacy_redeem.nLockTime = mint_params.lockHeight;
@@ -2055,6 +2057,10 @@ void DigiDollarWidgetTests::redeemWidgetCanonicalHealthDoesNotRequireCirculating
     legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
     legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
     legacy_redeem.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner_pubkey, 100));
+    const CScript legacy_metadata = CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                              << CScriptNum(3) << CScriptNum(100);
+    legacy_redeem.vout.emplace_back(0, legacy_metadata);
+    legacy_redeem.vout.emplace_back(1, legacy_metadata);
     const CScript normal = DigiDollar::CreateNormalRedemptionPath(mint_params);
     TaprootBuilder tree;
     tree.Add(1, normal, 0xc0);
