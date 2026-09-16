@@ -261,7 +261,7 @@ rules change together:
 - **A vault has one identity** that every node derives the same way.
 
 The height of the block being checked decides which rules apply to it. The new
-rules use that block's ancestry and coin state during normal operation, replay
+rules use that block's ancestry and coin state during normal operation, reindex
 and reorgs. Blocks below Thaw Day keep their existing validation rules.
 
 You can see the status at any time:
@@ -573,8 +573,8 @@ The Thaw Day rule changes are gated on each network's height. Mainnet uses
 24,490,000 and testnet26 uses 432,100. Signet is unsupported and remains
 unscheduled. Blocks below a scheduled height retain their existing validation
 rules, including during reindex.
-An earlier testnet replay reached the recorded height and hash. That result
-applies to its tested build and history. The final-build mainnet replay still
+An earlier testnet reindex reached the recorded height and hash. That result
+applies to its tested build and history. The final-build mainnet reindex still
 needs to be completed.
 
 Once the scheduled height is reached, a block that mints DigiDollar is
@@ -592,13 +592,13 @@ unresolved findings. Results from an earlier build do not establish that RC2
 passed. Publish the completed record with the tested candidate.
 
 Controlled regtest coverage includes Thaw Day activation, restart, reindex,
-reorgs, and separate token and vault accounting. A public testnet replay checks
+reorgs, and separate token and vault accounting. A public testnet reindex checks
 the history available at its recorded height. Mainnet Thaw Day is scheduled
 at 24,490,000 and testnet26 at 432,100. Public Thaw Day activation and sustained
 network observation have not been completed for this candidate.
 
 Before the final mainnet release, complete the final-build mainnet history
-replay, coordinated public testnet activation and observation, required platform
+reindex, coordinated public testnet activation and observation, required platform
 checks, and final independent review. A local candidate test run does not finish
 those release gates.
 
@@ -607,7 +607,12 @@ It does not prove how every possible future block will behave.
 
 RC2 record, source commit `653484decd` with the version bump on top: 3,742 unit
 tests passed with none failed; 396 extended functional tests passed with 17
-skipped and none failed; the desktop wallet tests passed. The mainnet node
+skipped and none failed; the desktop wallet tests passed. The isolated Thaw Day
+lab exercise `rc2-rehearsal-09` crossed Thaw Day at a lab height of 5,000, ran
+every DigiDollar feature before and after it, including mints at all ten lock
+tiers, transfers, every redemption path, the extra burn, the boundary reorg, a
+wallet-holding node reindex, and a fresh empty node syncing from scratch, and
+finished at height 5,658 with 143 recorded checks and no failures. The mainnet node
 whose RC1 reindex had stopped at 23,869,548 accepted block 23,869,549 on RC2
 after `reconsiderblock`, with its DigiDollar wallet loaded, and validated every
 later block to the tip at 24,222,044 with no rejection. That covers the whole

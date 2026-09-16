@@ -488,6 +488,7 @@ These are the recorded results for the rc2 source commit
 | Extended functional tests | 396 passed, 17 skipped, none failed |
 | Desktop wallet tests | Passed |
 | Mainnet node with the affected wallet | Accepted block 23,869,549 after `reconsiderblock` and caught up to the tip, 24,222,044, with 0 rejected blocks |
+| Thaw Day testnet lab exercise | Passed: isolated run `rc2-rehearsal-09` crossed Thaw Day at lab height 5,000, ran every DigiDollar feature before and after it, and finished at height 5,658 with 143 checks and 0 failures |
 
 The rc1 results for commit `d2097819f260f4d82409643fe9f7263cdd7e3eaa` were
 3,739 unit tests passed, 394 functional tests passed with 17 skipped, desktop
@@ -502,7 +503,7 @@ One RC1 desktop run settled at about **3.65–3.67 GiB of RAM** and started in
 **108 seconds**. These figures describe that workload. They do not predict
 startup on every computer or the cost of the future Thaw Day accounting scan.
 
-Before the final mainnet release, complete the full mainnet history replay,
+Before the final mainnet release, complete the full mainnet history reindex,
 public testnet activation and observation, remaining platform checks and final
 release review.
 
