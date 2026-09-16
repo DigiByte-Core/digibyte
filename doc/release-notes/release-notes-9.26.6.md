@@ -1,4 +1,4 @@
-DigiByte Core version 9.26.6rc1
+DigiByte Core version 9.26.6rc2
 ============================
 
 The notes for this candidate are in [doc/release-notes.md](../release-notes.md), which is where the

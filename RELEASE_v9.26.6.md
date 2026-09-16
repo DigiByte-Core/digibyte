@@ -1,11 +1,13 @@
 # DigiByte Core v9.26.6 release notes
 
-**Current version: v9.26.6rc1.** This is the first release candidate: a test
-build before the final release.
+**Current version: v9.26.6rc2.** This is the second release candidate: a test
+build before the final release. It replaces rc1, which could reject a valid
+DigiDollar mint block during a reindex on a node holding a DigiDollar wallet.
+See "Changes since rc1" below.
 
 ## Summary
 
-v9.26.6 includes **83 fixes and improvements**. It improves wallet recovery,
+v9.26.6 includes **85 fixes and improvements**. It improves wallet recovery,
 DigiDollar (DD) sending and redemption, wallet displays, node stability, price
 services, memory use and startup. The count also includes tests and documentation.
 
@@ -23,6 +25,32 @@ Older software may follow a different chain after the change.
 We are testing Thaw Day on **testnet first**. The final mainnet release follows
 the remaining tests and release review.
 
+## Changes since rc1
+
+**Block validation no longer reads the wallet's script table.** The node keeps
+an in-memory table that the wallet fills in with the DigiDollar amount behind
+each output script. It is keyed by the script alone, so an owner address that
+is used again keeps only the last amount. In rc1, block validation below Thaw
+Day read that table before the chain data. A mainnet rc1 node whose wallet had
+minted $100 and later held $98 of change at the same address rejected the
+first DigiDollar mint block, 23,869,549, while reindexing, then stopped
+following the chain. Nodes without such a wallet accepted the block. Validation
+now reads amounts from the chain only. The Thaw Day heights and rules are
+unchanged.
+
+**If an rc1 node is stuck**, install rc2, start it, and run:
+
+```bash
+digibyte-cli reconsiderblock 00000000000000052cc3d211b3d16196a3585d46474202dfa42e9f770d02e9bd
+```
+
+The node validates the remaining blocks and catches up. A fresh `-reindex`
+on rc2 also works. Do not start `-reindex` on an rc1 node that holds a
+DigiDollar wallet.
+
+**A wallet log line no longer repeats once per block** during a reindex or a
+first sync. It now needs `-debug=digidollar`.
+
 ## What you need to do
 
 1. **Read the upgrade notes below.** Check scripts that send DD amounts and
@@ -31,7 +59,7 @@ the remaining tests and release review.
    and oracle keys too.
 3. **Verify the build, then replace the old program.** Check the release's
    signed checksums. Stop the old node normally and wait for it to exit first.
-   RC1 is for the test exercise; use the approved final build for the mainnet rollout.
+   RC2 is for the test exercise; use the approved final build for the mainnet rollout.
 4. **Let startup finish.** The node may need to check or rebuild accounting.
    Do not mistake a long scan for a stopped program.
 5. **Check the running node.** Confirm its version, network, sync progress and
@@ -165,7 +193,7 @@ Feather's RAM improvements work on installation. On Unix, the new database
 file allowance may expose a low system open-file limit. Check that limit if
 startup reports it or reduces connections.
 
-## All 83 fixes and improvements
+## All 85 fixes and improvements
 
 Each entry states the change and the reason. Related repairs are grouped.
 These are implemented changes, not a claim that every outside bug report is fixed.
@@ -441,18 +469,30 @@ The block index is the node's directory of known blocks. A header is a block's s
 83. **Change:** Adds setup steps for nodes sharing a router and for block-filter services used by lightweight wallets.\
     **Why:** Correct ports and service settings help those setups work; this does not claim a mobile-wallet code fix.
 
+### Reindex and block validation (rc2)
+
+84. **Change:** Block and mempool validation read DigiDollar amounts from the chain only, never from the wallet's in-memory script table.\
+    **Why:** A node's answer about a block must not depend on what its own wallet has done since.
+
+85. **Change:** The wallet's "ReconcilePositionStates skipped" message moves into the DigiDollar debug category.\
+    **Why:** It was written once per block during a reindex and filled the log.
+
 ## Tests completed and work still ahead
 
-These are the recorded results for source commit
-`d2097819f260f4d82409643fe9f7263cdd7e3eaa`:
+These are the recorded results for the rc2 source commit
+`653484decd` (the block validation repair) with the rc2 version bump on top:
 
 | Check | Result |
 | --- | --- |
-| C++ unit tests | 3,739 passed |
-| Extended functional tests | 394 passed, 17 skipped, none failed |
+| C++ unit tests | 3,742 passed, none failed |
+| Extended functional tests | 396 passed, 17 skipped, none failed |
 | Desktop wallet tests | Passed |
-| Fuzz tests | Saved inputs tested across 255 public targets; 28 longer runs passed |
-| Extra script and fee-estimator fuzz tests | Passed |
+| Mainnet node with the affected wallet | Accepted block 23,869,549 after `reconsiderblock` and caught up to the tip, 24,222,044, with 0 rejected blocks |
+
+The rc1 results for commit `d2097819f260f4d82409643fe9f7263cdd7e3eaa` were
+3,739 unit tests passed, 394 functional tests passed with 17 skipped, desktop
+wallet tests passed, and fuzz tests over 255 public targets with 28 longer
+runs. The fuzz targets were not rerun for rc2.
 
 Unit tests check pieces of the program. Functional tests run nodes and check
 how they behave. Fuzz tests try many inputs to find unexpected behavior.

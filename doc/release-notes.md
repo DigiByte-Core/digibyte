@@ -1,9 +1,11 @@
-DigiByte Core version 9.26.6rc1
+DigiByte Core version 9.26.6rc2
 ============================
 
-RC1 is a candidate for coordinated node and wallet testing. It is not the
-final v9.26.6 release. Activation settings are listed below; installing a
-candidate does not change heights already built into it.
+RC2 is a candidate for coordinated node and wallet testing. It replaces RC1,
+which could reject a valid DigiDollar mint block during a reindex on a node
+that holds a DigiDollar wallet. It is not the final v9.26.6 release. Activation
+settings are listed below; installing a candidate does not change heights
+already built into it.
 
 The release repairs identified crash and hang defects, improves DigiDollar
 redemption and amount handling, and corrects wallet displays. Feather reduces
@@ -25,6 +27,54 @@ this software before a network's height does not activate its rules early.
 Please report problems using the issue tracker at GitHub:
 
   <https://github.com/DigiByte-Core/digibyte/issues>
+
+
+Changes since RC1
+=================
+
+**Block validation no longer reads the wallet's script table.** The node keeps
+an in-memory table that the wallet and the transaction builder fill in with the
+DigiDollar amount behind each output script. The table is keyed by the script
+alone, so when a DigiDollar owner address is used again, only the last amount
+stays. Change from a send goes back to the address that held the spent token,
+so any wallet that has ever sent DigiDollar has such an address.
+
+In RC1, block validation below Thaw Day read that table before the chain data.
+A mainnet RC1 node holding a wallet that had minted $100 and later held $98 of
+change at the same address rejected block 23,869,549, the first DigiDollar mint
+block, with `bad-dd-mint-amount` while reindexing. It then marked every later
+block invalid and stopped following the chain. Nodes without such a wallet
+accepted the same block, so the answer depended on the local wallet rather than
+on the chain.
+
+Block and mempool validation now read DigiDollar amounts from the chain only:
+the mint or redeem record in the transaction itself, or the transaction that
+created a token output. The table is left for the wallet and for unit tests.
+The Thaw Day heights and rules are unchanged, and the chain that exists today is
+what nodes without the wallet table already accepted, so this repairs a local
+defect and does not change the rules.
+
+**If an RC1 node is stuck below a block it wrongly rejected**, install RC2,
+start the node, and tell it to look at that block again:
+
+```
+digibyte-cli reconsiderblock 00000000000000052cc3d211b3d16196a3585d46474202dfa42e9f770d02e9bd
+```
+
+The node then validates the remaining blocks and catches up without another
+full reindex. A fresh `-reindex` on RC2 also works and takes longer. Until you
+have upgraded, do not start `-reindex` on an RC1 node that holds a DigiDollar
+wallet.
+
+**A wallet message no longer fills the log once per block.** During a reindex or
+a first sync the wallet logged "ReconcilePositionStates skipped while chainstate
+is not ready" for every block, which produced an 8 GB log on one mainnet
+reindex. The line now appears only with `-debug=digidollar`.
+
+**Tests.** A unit test suite writes wrong amounts into the table and checks that
+mint validation, vault detection and the amount reader answer from chain data. A
+functional test mints, pays the mint address again, and then reorgs and
+reindexes with the wallet loaded. Both fail on RC1 and pass on RC2.
 
 
 Read this first
@@ -538,7 +588,7 @@ What has been checked, and what has not
 
 Each candidate needs its own verification record. That record must identify the
 source commit, binary hashes, build options, tests run, skipped tests, and
-unresolved findings. Results from an earlier build do not establish that RC1
+unresolved findings. Results from an earlier build do not establish that RC2
 passed. Publish the completed record with the tested candidate.
 
 Controlled regtest coverage includes Thaw Day activation, restart, reindex,
@@ -554,6 +604,16 @@ those release gates.
 
 Passing a reindex is evidence about the tested build and the recorded history.
 It does not prove how every possible future block will behave.
+
+RC2 record, source commit `653484decd` with the version bump on top: 3,742 unit
+tests passed with none failed; 396 extended functional tests passed with 17
+skipped and none failed; the desktop wallet tests passed. The mainnet node
+whose RC1 reindex had stopped at 23,869,548 accepted block 23,869,549 on RC2
+after `reconsiderblock`, with its DigiDollar wallet loaded, and validated every
+later block to the tip at 24,222,044 with no rejection. That covers the whole
+DigiDollar era of mainnet on a wallet-holding node. The blocks below the
+DigiDollar activation height were validated by the same node on RC1 and were
+not validated again. Fuzz targets were not rerun for RC2.
 
 
 Compatibility
