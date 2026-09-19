@@ -284,7 +284,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
 
         def send():
             result = client.senddigidollar(
-                recipient_address, 1_000, "", 0, None, options)
+                recipient_address, 1_000, "", 0, None, "cents", options)
             assert_equal(result["provider_id"], cheap_identity["provider_id"])
             return result
 

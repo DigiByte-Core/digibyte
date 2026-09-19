@@ -42,6 +42,9 @@ public:
     void setClientModel(ClientModel* model);
     void updateView();
 
+    /** Test hook for reading what the Confirmations column shows, without a wallet. */
+    QString confirmationsTextForTesting(int confirmations, bool isAbandoned = false, bool isLocal = false) const;
+
 public Q_SLOTS:
     /** Set privacy mode — hides transactions table */
     void setPrivacy(bool privacy);

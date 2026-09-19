@@ -263,7 +263,7 @@ testnet, or PRE rehearsal material.
 
 Tasks:
 
-- Add formal `digidollar/RELEASE_v9.26.2.md` release notes.
+- Add formal `doc/release-notes/RELEASE_v9.26.2.md` release notes.
 - Update root `README.md` to explain that v9.26.2 is the formal DigiDollar
   mainnet activation release.
 - Update `doc/release-notes.md`; it still contains stale DigiDollar language

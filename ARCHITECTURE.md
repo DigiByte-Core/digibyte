@@ -8,6 +8,11 @@
 
 ## Paymaster architecture in this branch
 
+The v9.26.6rc2 integration keeps the provider panel in
+`src/qt/paymasterwidget.cpp`, behind a small embedding interface. See the
+[integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
+and pending verification.
+
 For the Paymaster implementation at `bd270044c1`, see the
 [developer starting point](PAYMASTER.md) and
 [implementation reference](doc/digidollar-paymaster-implementation.md).
@@ -379,16 +384,22 @@ The cipher uses:
 - **P-boxes**: 2 permutation boxes with 6 subrounds
 - **Keccak-p[800]** finalization
 
-### 4.5 Algorithm Lookup Cache
+### 4.5 Finding the last block mined with a given algorithm
 
-**File:** `src/chain.h` (line 212)
+**File:** `src/pow.cpp`, `GetLastBlockIndexForAlgo()`
 
-```cpp
-// Fast per-algorithm block tracking
-CBlockIndex *lastAlgoBlocks[NUM_ALGOS_IMPL];
-```
+The difficulty rules need the previous block that used the same mining algorithm. There is one way to find it:
+walk back through the chain from the current block until a block with that algorithm turns up.
 
-This cache enables O(1) lookup of the last block for each algorithm, critical for difficulty adjustment.
+Every block used to carry an array of pointers, one per algorithm, so the answer could be read without walking.
+That array was removed. It cost 64 bytes for every block header the node holds in memory, which is about 1.5 GB
+on a fully synced mainnet node, and the walk it saved is short. The difficulty rule that uses this already steps
+back fifty blocks on every call before it does anything else, so the walk adds roughly a tenth more work to a
+path that was already doing a lot of it.
+
+Removing it changed no difficulty result. The two lookups were run side by side over every algorithm, every
+difficulty rule and the special case for minimum-difficulty blocks, and their answers were recorded as plain
+numbers that the tests still check.
 
 ---
 
@@ -482,7 +493,7 @@ class CBlock : public CBlockHeader {
 
 ### 6.2 Block Index Structure
 
-**File:** `src/chain.h` (lines 146-384)
+**File:** `src/chain.h` (lines 146-380)
 
 ```cpp
 class CBlockIndex {
@@ -505,14 +516,12 @@ class CBlockIndex {
     unsigned int nTx;             // Transactions in block
     unsigned int nChainTx;        // Cumulative transactions
 
-    // DigiByte multi-algo
-    CBlockIndex *lastAlgoBlocks[NUM_ALGOS_IMPL];  // Per-algo tracking
 };
 ```
 
 ### 6.3 Chain State Management
 
-**File:** `src/validation.h` (lines 491-815)
+**File:** `src/validation.h` (`Chainstate` at 497, `ChainstateManager` at 884-1308)
 
 ```
 ChainstateManager
@@ -704,7 +713,7 @@ enum class SigVersion {
 | `SCRIPT_VERIFY_CHECKSEQUENCEVERIFY` | BIP112 CSV |
 | `SCRIPT_VERIFY_WITNESS` | BIP141 SegWit |
 | `SCRIPT_VERIFY_TAPROOT` | BIP341/342 Taproot |
-| `SCRIPT_VERIFY_DIGIDOLLAR` | DigiDollar opcodes (`OP_DIGIDOLLAR`/`OP_DDVERIFY`/`OP_CHECKPRICE`/`OP_CHECKCOLLATERAL`/`OP_ORACLE`); set in `GetBlockScriptFlags()` (`validation.cpp:2755, 2796-2797`) only when the buried `DEPLOYMENT_DIGIDOLLAR` deployment is active (BIP90 since v9.26.5). |
+| `SCRIPT_VERIFY_DIGIDOLLAR` | DigiDollar opcodes (`OP_DIGIDOLLAR`/`OP_DDVERIFY`/`OP_CHECKPRICE`/`OP_CHECKCOLLATERAL`/`OP_ORACLE`); set in `GetBlockScriptFlags()` (`src/validation.cpp:3030, 3071-3072`) only when the buried `DEPLOYMENT_DIGIDOLLAR` deployment is active (BIP90 since v9.26.5). |
 
 ### 8.4 DigiDollar Opcodes
 
@@ -722,7 +731,7 @@ OP_ORACLE = 0xbf            // Coinbase oracle bundle marker (Tapscript OP_SUCCE
 
 ### 8.5 Taproot Support
 
-**Files:** `src/script/interpreter.cpp` (lines 1980-2106)
+**Files:** `src/script/interpreter.cpp` (`ExecuteWitnessScript` at 1963, `VerifyWitnessProgram` at 2048-2129)
 
 - **Key path spending**: Single Schnorr signature (64 bytes)
 - **Script path spending**: Control block + script + witness
@@ -1357,10 +1366,10 @@ class COraclePriceMessage {
 
 ### 13.3 Exchange Integration
 
-**Files:** `src/oracle/exchange.h`, `src/oracle/exchange.cpp` (~1230 lines)
+**Files:** `src/oracle/exchange.h` (281 lines), `src/oracle/exchange.cpp` (~1,333 lines)
 
-12 fetcher classes derive from `BaseExchangeFetcher` (`exchange.h:23+`):
-Binance, Coinbase, Kraken, CoinGecko, Bittrex, Poloniex, Messari, KuCoin, Crypto.com, Gate.io, HTX, plus the base. Active exchange selection is per oracle operator (see `DIGIDOLLAR_ORACLE_ARCHITECTURE.md` for the configurable subset).
+Eleven fetcher classes derive from `BaseExchangeFetcher` (`src/oracle/exchange.h:25-215`):
+Binance, Coinbase, Kraken, CoinGecko, Bittrex, Poloniex, Messari, KuCoin, Crypto.com, Gate.io and HTX. Which of them run is not a setting: `MultiExchangeAggregator::InitializeFetchers` creates exactly six of them in the source (`src/oracle/exchange.cpp:1092-1097`) — Binance, CoinGecko, KuCoin, Gate.io, HTX and Crypto.com. The other five compile but are never created. See `DIGIDOLLAR_ORACLE_ARCHITECTURE.md`.
 
 ```cpp
 MultiExchangeAggregator:

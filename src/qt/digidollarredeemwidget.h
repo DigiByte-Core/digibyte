@@ -49,6 +49,18 @@ public:
     /** Set position to redeem (e.g., from Vault tab) */
     void setPosition(const QString& outpoint);
 
+    /**
+     * The style the form reports the outcome of a redemption with.
+     * The wallet window only opens a dialog when the style carries the modal
+     * flag; without it the words go to the desktop notification service, which
+     * may be missing or turned off. Both the confirmation and the refusal use
+     * this so the user is always told what happened.
+     */
+    static unsigned int resultMessageStyle(bool succeeded);
+
+    /** The words shown once a redemption has been broadcast, with its transaction id. */
+    static QString redemptionBroadcastText(const QString& txid);
+
 Q_SIGNALS:
     /** Fired when a message should be reported to the user */
     void message(const QString &title, const QString &message, unsigned int style);

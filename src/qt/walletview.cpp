@@ -150,13 +150,17 @@ void WalletView::processNewTransaction(const QModelIndex& parent, int start, int
         return;
 
     QString date = ttm->index(start, TransactionTableModel::Date, parent).data().toString();
-    qint64 amount = ttm->index(start, TransactionTableModel::Amount, parent).data(Qt::EditRole).toULongLong();
-    QString type = ttm->index(start, TransactionTableModel::Type, parent).data().toString();
     QModelIndex index = ttm->index(start, 0, parent);
+    // A DigiDollar row holds no DigiByte. Reading the DigiByte figure on one
+    // would announce a payment in dollars as zero DigiByte, so ask the model
+    // for the one figure the row actually has.
+    QString amount = ttm->data(index, TransactionTableModel::FormattedSingleAmountRole).toString();
+    bool money_left_wallet = ttm->data(index, TransactionTableModel::SingleAmountRole).toLongLong() < 0;
+    QString type = ttm->index(start, TransactionTableModel::Type, parent).data().toString();
     QString address = ttm->data(index, TransactionTableModel::AddressRole).toString();
     QString label = GUIUtil::HtmlEscape(ttm->data(index, TransactionTableModel::LabelRole).toString());
 
-    Q_EMIT incomingTransaction(date, walletModel->getOptionsModel()->getDisplayUnit(), amount, type, address, label, GUIUtil::HtmlEscape(walletModel->getWalletName()));
+    Q_EMIT incomingTransaction(date, amount, money_left_wallet, type, address, label, GUIUtil::HtmlEscape(walletModel->getWalletName()));
 }
 
 void WalletView::gotoOverviewPage()

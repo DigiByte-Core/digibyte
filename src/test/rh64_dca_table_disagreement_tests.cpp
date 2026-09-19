@@ -19,22 +19,14 @@
 #include <util/int128.h>
 
 #include <chainparams.h>
-#include <util/int128.h>
 #include <consensus/dca.h>
-#include <util/int128.h>
 #include <consensus/digidollar.h>
-#include <util/int128.h>
 #include <consensus/amount.h>
-#include <util/int128.h>
 #include <digidollar/validation.h>
-#include <util/int128.h>
 #include <test/util/setup_common.h>
-#include <util/int128.h>
 
 #include <cmath>
-#include <util/int128.h>
 #include <vector>
-#include <util/int128.h>
 
 using namespace DigiDollar;
 using namespace DigiDollar::DCA;

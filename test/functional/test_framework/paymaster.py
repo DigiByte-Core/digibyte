@@ -251,7 +251,7 @@ class PaymasterFunctionalHarness:
 
         def send():
             return self.client.senddigidollar(
-                recipient, amount_cents, "", 0, None, options)
+                recipient, amount_cents, "", 0, None, "cents", options)
 
         initial = send()
         assert_equal(initial["request_id"], request_id)

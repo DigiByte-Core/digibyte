@@ -1115,7 +1115,7 @@ void MultiExchangeAggregator::InitializeFetchers()
         fetcher->SetInterruptCallback(interrupt_callback);
     }
 
-    LogPrintf("Oracle: Initialized %d exchange fetchers\n", fetchers.size());
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Initialized %d exchange fetchers\n", fetchers.size());
 }
 
 CAmount MultiExchangeAggregator::FetchAggregatePrice()
@@ -1169,7 +1169,7 @@ std::vector<MultiExchangeAggregator::ExchangePrice> MultiExchangeAggregator::Fet
             double weight = GetExchangeWeight(fetcher->GetExchangeName());
             prices.emplace_back(fetcher->GetExchangeName(), price, timestamp, success, weight);
 
-            LogPrintf("Oracle: %s price: %lld micro-USD (success: %s)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: %s price: %lld micro-USD (success: %s)\n",
                      fetcher->GetExchangeName(), price, success ? "true" : "false");
         }
         catch (const std::exception& e) {
@@ -1336,12 +1336,12 @@ std::vector<MultiExchangeAggregator::ExchangePrice> MultiExchangeAggregator::Fil
 
 void MultiExchangeAggregator::LogPriceResults(const std::vector<ExchangePrice>& prices, CAmount final_price)
 {
-    LogPrintf("Oracle: Price aggregation results:\n");
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Price aggregation results:\n");
     for (const auto& price : prices) {
-        LogPrintf("Oracle:   %s: %lld micro-USD (weight: %.1f)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle:   %s: %lld micro-USD (weight: %.1f)\n",
                  price.exchange, price.price_micro_usd, price.weight);
     }
-    LogPrintf("Oracle: Final aggregated price: %lld micro-USD ($%.6f)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Final aggregated price: %lld micro-USD ($%.6f)\n",
              final_price, static_cast<double>(final_price) / 1000000.0);
 }
 

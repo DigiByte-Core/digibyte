@@ -5,6 +5,7 @@
 #ifndef DIGIBYTE_QT_TRANSACTIONVIEW_H
 #define DIGIBYTE_QT_TRANSACTIONVIEW_H
 
+#include <qt/digibyteunits.h>
 #include <qt/guiutil.h>
 
 #include <uint256.h>
@@ -12,6 +13,7 @@
 #include <QWidget>
 #include <QKeyEvent>
 
+class CSVModelWriter;
 class PlatformStyle;
 class TransactionDescDialog;
 class TransactionFilterProxy;
@@ -40,6 +42,9 @@ public:
 
     void setModel(WalletModel *model);
 
+    /** Adds the transaction-history columns to a CSV writer, in export order. */
+    static void addExportColumns(CSVModelWriter& writer, DigiByteUnit unit, bool have_watch_only);
+
     // Date ranges for filter
     enum DateEnum
     {
@@ -58,6 +63,8 @@ public:
         DATE_COLUMN_WIDTH = 120,
         TYPE_COLUMN_WIDTH = 113,
         AMOUNT_MINIMUM_COLUMN_WIDTH = 120,
+        // Fits a DigiDollar figure with two decimals and the "$DD" suffix.
+        AMOUNT_DD_COLUMN_WIDTH = 140,
         MINIMUM_COLUMN_WIDTH = 23
     };
 

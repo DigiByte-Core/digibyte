@@ -85,6 +85,14 @@ struct DDChangeTestFixture : public TestingSetup {
         return outpoint;
     }
 
+    // An ordinary bech32 address, the kind a wallet hands out for leftover DGB.
+    // The builder refuses to place change anywhere else.
+    CTxDestination CreateChangeDestination() {
+        CKey key;
+        key.MakeNewKey(true);
+        return CTxDestination{WitnessV0KeyHash(key.GetPubKey())};
+    }
+
     std::string CreateDDAddress(const CPubKey& pubkey) {
         XOnlyPubKey xonly(pubkey);
         WitnessV1Taproot dest(xonly);
@@ -148,6 +156,7 @@ BOOST_FIXTURE_TEST_CASE(test_dd_change_output, DDChangeTestFixture)
     params.recipients = {{recipientAddr, 60000}}; // Send 600 DD ($600.00)
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
     params.ddUtxos.push_back(CreateMockDDUTXO(100000)); // 1000 DD ($1000.00)
     params.feeUtxos.push_back(CreateMockDGBUTXO(20000000)); // 0.2 DGB for 0.1 DGB min fee + change
 
@@ -208,6 +217,7 @@ BOOST_FIXTURE_TEST_CASE(test_dgb_change_output, DDChangeTestFixture)
     params.recipients = {{recipientAddr, 10000}}; // Send 100 DD ($100.00)
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
     params.ddUtxos.push_back(CreateMockDDUTXO(10000)); // Exact DD amount
     params.feeUtxos.push_back(CreateMockDGBUTXO(20000000)); // 0.2 DGB (enough for 0.1 min fee + change)
 
@@ -254,6 +264,7 @@ BOOST_FIXTURE_TEST_CASE(test_no_dd_change_exact_amount, DDChangeTestFixture)
     params.recipients = {{recipientAddr, 50000}}; // Send 500 DD ($500.00)
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
     params.ddUtxos.push_back(CreateMockDDUTXO(50000)); // Exact amount
     params.feeUtxos.push_back(CreateMockDGBUTXO(20000000));
 
@@ -302,6 +313,7 @@ BOOST_FIXTURE_TEST_CASE(test_dd_change_below_dust, DDChangeTestFixture)
     params.recipients = {{recipientAddr, sendAmount}};
     params.feeRate = 100000;
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
     params.ddUtxos.push_back(CreateMockDDUTXO(totalDD));
     params.feeUtxos.push_back(CreateMockDGBUTXO(20000000));
 
@@ -364,6 +376,7 @@ BOOST_FIXTURE_TEST_CASE(test_bug27_multi_input_dd_conservation, DDChangeTestFixt
     params.recipients = {{recipientAddr, 9950}}; // $99.50
     params.feeRate = 100000;
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
 
     for (int i = 0; i < numUtxos; i++) {
         params.ddUtxos.push_back(CreateMockDDUTXO(perUtxo));
@@ -429,6 +442,7 @@ BOOST_FIXTURE_TEST_CASE(test_single_cent_dd_change_preserved, DDChangeTestFixtur
     params.recipients = {{recipientAddr, 9999}}; // $99.99
     params.feeRate = 100000;
     params.spenderKey = senderKey;
+    params.dgbChangeDest = CreateChangeDestination();
     params.ddUtxos.push_back(CreateMockDDUTXO(10000)); // $100.00
     params.feeUtxos.push_back(CreateMockDGBUTXO(20000000));
 

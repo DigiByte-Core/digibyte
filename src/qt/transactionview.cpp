@@ -102,6 +102,8 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
 
     amountWidget = new QLineEdit(this);
     amountWidget->setPlaceholderText(tr("Min amount"));
+    amountWidget->setToolTip(tr("Show only rows whose DigiByte amount is at least this much. "
+                                "Rows that hold a DigiDollar amount are left alone."));
     if (platformStyle->getUseExtraSpacing()) {
         amountWidget->setFixedWidth(97);
     } else {
@@ -151,17 +153,6 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     transactionView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     transactionView->setSortingEnabled(true);
     transactionView->verticalHeader()->hide();
-
-    QSettings settings;
-    if (!transactionView->horizontalHeader()->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
-        transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
-        transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
-        transactionView->horizontalHeader()->setStretchLastSection(true);
-    }
 
     contextMenu = new QMenu(this);
     contextMenu->setObjectName("contextMenu");
@@ -239,6 +230,41 @@ void TransactionView::setModel(WalletModel *_model)
                     contextMenu->addAction(tr("Show in %1").arg(host), [this, url] { openThirdPartyTxUrl(url); });
                 }
             }
+        }
+
+        // Column widths only take effect once the view has a model, because
+        // until then the header has no columns to size. All of this used to run
+        // in the constructor, where every width call did nothing and the layout
+        // the user had saved was thrown away as soon as the model arrived.
+        QHeaderView* header = transactionView->horizontalHeader();
+        header->setMinimumSectionSize(MINIMUM_COLUMN_WIDTH);
+        QSettings settings;
+        if (!header->restoreState(settings.value("TransactionViewHeaderState").toByteArray())) {
+            transactionView->setColumnWidth(TransactionTableModel::Status, STATUS_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Watchonly, WATCHONLY_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Date, DATE_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Type, TYPE_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::Amount, AMOUNT_MINIMUM_COLUMN_WIDTH);
+            transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
+        }
+
+        // A layout saved by an older version has one column fewer, so make sure
+        // the DigiDollar amount column is on screen as well.
+        if (transactionView->isColumnHidden(TransactionTableModel::AmountDD)) {
+            transactionView->setColumnHidden(TransactionTableModel::AmountDD, false);
+        }
+        if (transactionView->columnWidth(TransactionTableModel::AmountDD) <= 0) {
+            transactionView->setColumnWidth(TransactionTableModel::AmountDD, AMOUNT_DD_COLUMN_WIDTH);
+        }
+
+        header->setStretchLastSection(false);
+        // The DigiByte amount is the one whose width varies most, from a fee of
+        // a few thousandths to a whole balance, so it keeps the spare width it
+        // had when it was the right-hand column. Qt does not check the column
+        // number on this call the way it does on the ones above, so ask first
+        // whether the header really has that column.
+        if (header->count() > TransactionTableModel::Amount) {
+            header->setSectionResizeMode(TransactionTableModel::Amount, QHeaderView::Stretch);
         }
 
         // show/hide column Watch-only
@@ -365,17 +391,8 @@ void TransactionView::exportClicked()
 
     CSVModelWriter writer(filename);
 
-    // name, column, role
     writer.setModel(transactionProxyModel);
-    writer.addColumn(tr("Confirmed"), 0, TransactionTableModel::ConfirmedRole);
-    if (model->wallet().haveWatchOnly())
-        writer.addColumn(tr("Watch-only"), TransactionTableModel::Watchonly);
-    writer.addColumn(tr("Date"), 0, TransactionTableModel::DateRole);
-    writer.addColumn(tr("Type"), TransactionTableModel::Type, Qt::EditRole);
-    writer.addColumn(tr("Label"), 0, TransactionTableModel::LabelRole);
-    writer.addColumn(tr("Address"), 0, TransactionTableModel::AddressRole);
-    writer.addColumn(DigiByteUnits::getAmountColumnTitle(model->getOptionsModel()->getDisplayUnit()), 0, TransactionTableModel::FormattedAmountRole);
-    writer.addColumn(tr("ID"), 0, TransactionTableModel::TxHashRole);
+    addExportColumns(writer, model->getOptionsModel()->getDisplayUnit(), model->wallet().haveWatchOnly());
 
     if(!writer.write()) {
         Q_EMIT message(tr("Exporting Failed"), tr("There was an error trying to save the transaction history to %1.").arg(filename),
@@ -385,6 +402,23 @@ void TransactionView::exportClicked()
         Q_EMIT message(tr("Exporting Successful"), tr("The transaction history was successfully saved to %1.").arg(filename),
             CClientUIInterface::MSG_INFORMATION);
     }
+}
+
+/** The columns the exported file carries, in order. DigiByte amounts and
+    DigiDollar amounts get a column each, the same two the table shows. */
+void TransactionView::addExportColumns(CSVModelWriter& writer, DigiByteUnit unit, bool have_watch_only)
+{
+    // name, column, role
+    writer.addColumn(tr("Confirmed"), 0, TransactionTableModel::ConfirmedRole);
+    if (have_watch_only)
+        writer.addColumn(tr("Watch-only"), TransactionTableModel::Watchonly);
+    writer.addColumn(tr("Date"), 0, TransactionTableModel::DateRole);
+    writer.addColumn(tr("Type"), TransactionTableModel::Type, Qt::EditRole);
+    writer.addColumn(tr("Label"), 0, TransactionTableModel::LabelRole);
+    writer.addColumn(tr("Address"), 0, TransactionTableModel::AddressRole);
+    writer.addColumn(DigiByteUnits::getAmountColumnTitle(unit), 0, TransactionTableModel::FormattedAmountRole);
+    writer.addColumn(tr("Amount ($DD)"), 0, TransactionTableModel::FormattedAmountDDRole);
+    writer.addColumn(tr("ID"), 0, TransactionTableModel::TxHashRole);
 }
 
 void TransactionView::contextualMenu(const QPoint &point)
@@ -419,7 +453,16 @@ void TransactionView::abandonTx()
     hash.SetHex(hashQStr.toStdString());
 
     // Abandon the wallet transaction over the walletModel
-    model->wallet().abandonTransaction(hash);
+    if (!model->wallet().abandonTransaction(hash)) {
+        // Abandoning can be refused, and when it is, the transaction is left exactly
+        // as it was. Say so. Without this the user is shown nothing and has every
+        // reason to believe the coins it spends have been freed, when they are still
+        // committed to it.
+        Q_EMIT message(tr("Abandoning the transaction failed"),
+            tr("The transaction could not be abandoned. It is unchanged, and the coins "
+               "it spends are still committed to it."),
+            CClientUIInterface::MSG_ERROR);
+    }
 }
 
 void TransactionView::bumpFee([[maybe_unused]] bool checked)
@@ -457,6 +500,11 @@ void TransactionView::copyLabel()
 
 void TransactionView::copyAmount()
 {
+    // A row holds a DigiByte amount or a DigiDollar amount. Copy the one it has.
+    if (GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::FormattedAmountDDRole)) {
+        GUIUtil::copyEntryData(transactionView, 0, TransactionTableModel::FormattedAmountDDRole);
+        return;
+    }
     GUIUtil::copyEntryData(transactionView, 0, TransactionTableModel::FormattedAmountRole);
 }
 

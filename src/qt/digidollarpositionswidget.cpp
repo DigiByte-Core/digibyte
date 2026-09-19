@@ -4,7 +4,6 @@
 
 #include <qt/digidollarpositionswidget.h>
 
-#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
@@ -107,8 +106,6 @@ void DigiDollarPositionsWidget::setupUI()
     m_statusLabel = new QLabel(tr("Loading vaults..."), this);
     m_statusLabel->setObjectName("statusLabel");
     m_statusLabel->setAlignment(Qt::AlignCenter);
-    m_statusLabel->setWordWrap(true);
-    DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::WAITING);
     // Theme styling will be applied in applyTheme()
     m_mainLayout->addWidget(m_statusLabel);
 
@@ -469,8 +466,10 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
     // while testnet/mainnet use the live oracle price.
     CAmount oraclePrice = GetMockOraclePrice();
     const bool isWatchOnly = m_walletModel->wallet().privateKeysDisabled();
-    const bool isWalletLocked = m_walletModel->getEncryptionStatus() == WalletModel::Locked;
-    const bool walletCanSign = !isWatchOnly && !isWalletLocked;
+    // A locked wallet still holds its keys. The Redeem tab asks for the
+    // passphrase when the user clicks Redeem there. Only a wallet with no
+    // private keys can never redeem, so only that one case blocks the button.
+    const bool walletCanSign = !isWatchOnly;
 
     // Get positions from wallet backend
     std::vector<WalletCollateralPosition> walletPositions = GetWalletPositions();
@@ -576,8 +575,7 @@ void DigiDollarPositionsWidget::populatePositionsTable()
     m_positionsTable->setRowCount(0);
 
     if (m_positions.isEmpty()) {
-        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
-        m_statusLabel->setText(tr("ℹ No DigiDollar vaults found. Use the Mint $DD tab to create your first vault."));
+        m_statusLabel->setText(tr("📋 No DigiDollar vaults found\n\nYou haven't created any DigiDollar vaults yet.\nUse the 'Mint' tab to create your first DigiDollar vault."));
         m_statusLabel->show();
         return;
     }
@@ -860,8 +858,9 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
     // - "Redeemed" if already redeemed (with strikethrough)
     // - "Watch-Only" if the wallet has private keys disabled and so cannot
     //   ever construct a redemption witness
-    // - "Wallet Locked" if private keys exist but are currently unavailable
-    // - "Redeem" if can redeem now (green, clickable)
+    // - "Redeem" if it can be redeemed now (green, clickable). A locked wallet
+    //   gets this too. The Redeem tab asks for the passphrase on click, and the
+    //   tooltip says so.
     // - "Locked" if vault hasn't matured yet (grayed out)
     QString buttonText;
     if (isPendingMint) {
@@ -872,8 +871,6 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
         buttonText = tr("Redeemed");
     } else if (isWatchOnly) {
         buttonText = tr("Watch-Only");
-    } else if (isWalletLocked) {
-        buttonText = tr("Wallet Locked");
     } else if (canRedeem) {
         buttonText = tr("Redeem");
     } else {
@@ -971,25 +968,6 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
             .arg(woText);
         tooltip = tr("Watch-only wallet\nThis wallet cannot sign DigiDollar redemptions because private keys are disabled.");
         button->setEnabled(false);
-    } else if (isWalletLocked) {
-        QString lockedWalletBg = isDarkTheme ? "#4a4655" : "#e4dfea";
-        QString lockedWalletText = isDarkTheme ? "#d6c6e6" : "#4d3f5f";
-
-        buttonStyle = QString(
-            "QPushButton { "
-            "  background-color: %1; "
-            "  color: %2; "
-            "  border: 1px solid %2; "
-            "  border-radius: 5px; "
-            "  padding: 6px 8px; "
-            "  font-weight: 600; "
-            "  font-size: 10px; "
-            "  min-width: 72px; "
-            "}")
-            .arg(lockedWalletBg)
-            .arg(lockedWalletText);
-        tooltip = tr("Wallet is locked\nUnlock the wallet to redeem this DigiDollar vault.");
-        button->setEnabled(false);
     } else if (canRedeem) {
         // Can redeem - green button
         QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
@@ -1019,6 +997,11 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
             .arg(successHover)
             .arg(successPressed);
         tooltip = tr("Click to redeem this DigiDollar position\nThis will return your DGB collateral and burn the $DD tokens");
+        if (isWalletLocked) {
+            // Still clickable. The Redeem tab asks for the passphrase.
+            tooltip += QLatin1Char('\n') +
+                tr("The wallet is locked: you will be asked for your passphrase on the Redeem tab.");
+        }
         button->setEnabled(true);
     } else {
         // Locked - vault hasn't matured yet - grayed out button with dark text
@@ -1202,8 +1185,7 @@ void DigiDollarPositionsWidget::setPrivacy(bool privacy)
     m_privacy = privacy;
     m_positionsTable->setVisible(!m_privacy);
     if (m_privacy) {
-        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
-        m_statusLabel->setText(tr("ℹ Values are hidden by privacy mode. Disable Settings → Mask values to show them."));
+        m_statusLabel->setText(tr("Privacy mode activated for the $DD Vault tab. To unmask the values, uncheck Settings->Mask values."));
         m_statusLabel->show();
     } else {
         updatePositions();

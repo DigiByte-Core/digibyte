@@ -24,6 +24,7 @@
 #include <util/strencodings.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <random.h>
 #include <script/script.h>
 #include <script/standard.h>
@@ -32,8 +33,6 @@
 #include <mutex>
 #include <atomic>
 #include <vector>
-#include <fstream>
-#include <iterator>
 
 namespace wallet {
 
@@ -368,7 +367,7 @@ BOOST_AUTO_TEST_CASE(rh08_03b_foreign_mint_with_wallet_dgb_output_not_claimed)
     mtx.vout.push_back(CTxOut(COIN, GetScriptForDestination(our_dgb_dest)));
 
     CTransactionRef tx = MakeTransactionRef(std::move(mtx));
-    dd_wallet.ProcessDDTxForRescan(tx, block_height);
+    dd_wallet.ProcessDDTxForRescan(tx, block_height, /*block_time=*/1600000000);
 
     BOOST_CHECK_MESSAGE(dd_wallet.GetDDTimeLocks(false).empty(),
         "SECURITY BUG [DD-RH-071]: wallet claimed a foreign DD collateral position "
@@ -738,31 +737,9 @@ BOOST_AUTO_TEST_CASE(rh08_04_position_marked_inactive_when_collateral_spent)
 
 BOOST_AUTO_TEST_CASE(rh08_04_pending_position_validation_retry_is_wired_to_tip_updates)
 {
-    const auto readFile = [](const std::vector<std::string>& candidates) {
-        for (const auto& path : candidates) {
-            std::ifstream file(path);
-            if (!file.is_open()) continue;
-            return std::string(std::istreambuf_iterator<char>(file),
-                               std::istreambuf_iterator<char>());
-        }
-        return std::string();
-    };
+    const std::string wallet_cpp = ReadRepositoryFile("src/wallet/wallet.cpp");
+    const std::string dd_wallet_cpp = ReadRepositoryFile("src/wallet/digidollarwallet.cpp");
 
-    const std::string wallet_cpp = readFile({
-        "src/wallet/wallet.cpp",
-        "../src/wallet/wallet.cpp",
-        "../../src/wallet/wallet.cpp",
-        "wallet/wallet.cpp",
-    });
-    const std::string dd_wallet_cpp = readFile({
-        "src/wallet/digidollarwallet.cpp",
-        "../src/wallet/digidollarwallet.cpp",
-        "../../src/wallet/digidollarwallet.cpp",
-        "wallet/digidollarwallet.cpp",
-    });
-
-    BOOST_REQUIRE_MESSAGE(!wallet_cpp.empty(), "could not locate wallet.cpp from current working directory");
-    BOOST_REQUIRE_MESSAGE(!dd_wallet_cpp.empty(), "could not locate digidollarwallet.cpp from current working directory");
     BOOST_CHECK_MESSAGE(
         dd_wallet_cpp.find("m_position_state_validation_pending = true") != std::string::npos,
         "ValidatePositionStates/ReconcilePositionStates must remember a chainstate-not-ready skip for retry");

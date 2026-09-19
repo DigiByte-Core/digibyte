@@ -49,6 +49,9 @@ private:
     int consecutive_fetch_failures{0};  //!< Tracks consecutive exchange fetch failures for alerting
     int64_t start_time{0};
 
+    //! Test-only: when set, the price thread runs but fetches no prices.
+    std::atomic<bool> skip_exchange_fetch{false};
+
     // Configuration
     int price_update_interval{30};  // seconds
     int broadcast_interval{60};     // 60 seconds: 1 broadcast/min gives 12x-25x redundancy per epoch
@@ -130,6 +133,14 @@ public:
     /** Test-only: inject price freshness state without running the price thread. */
     void InjectTestPriceState(CAmount current_price_in, int64_t last_update_time_in,
                               CAmount last_broadcast_price_in, int64_t last_broadcast_timestamp_in);
+    /**
+     * Test-only: run the price thread without asking any exchange for a price.
+     *
+     * The thread is real: it starts, sends heartbeats and stops the same way.
+     * It just skips the part that would reach out over the network, which a
+     * test must never do. Call this before Start().
+     */
+    void SetSkipExchangeFetchForTesting(bool skip) { skip_exchange_fetch.store(skip); }
     /** Test-only: expose broadcast-gating decision for staleness regressions. */
     bool ShouldBroadcastForTesting() const { return ShouldBroadcast(); }
 
@@ -248,7 +259,43 @@ public:
 
     //! Global functions
     static OracleManager& GetInstance();
+
+    /**
+     * Whether the one oracle manager has been built yet.
+     *
+     * Callers that only want to know whether an oracle service exists must not
+     * ask GetInstance(), because that builds one on demand. This reads the
+     * pointer under the same lock that builds and clears it.
+     */
+    static bool IsBuilt();
     static void StartOracleService();
+
+    /**
+     * Stop the price thread of every oracle this node runs, and leave the
+     * oracle objects in place.
+     *
+     * Shutdown calls this early. The price threads fetch prices from exchanges
+     * over the network and hand messages to the connection manager, so they
+     * have to be gone before networking is torn down. The oracle objects have
+     * to live longer than that, because block notifications, the remote
+     * procedure call server and the peer-to-peer message handler all look
+     * oracles up through this manager, and they stop later.
+     *
+     * This also refuses any further oracle start. The command server is still
+     * answering requests at this point in shutdown, so a start can be part way
+     * through; it is refused rather than left to create a thread that would
+     * outlive the connection manager.
+     */
+    static void StopOraclePriceThreads();
+
+    /**
+     * Stop everything and destroy the oracle objects, including this manager.
+     *
+     * Only call this once nothing can look an oracle up any more: the remote
+     * procedure call server, the peer-to-peer message handler and the
+     * scheduler thread that delivers block notifications must all have
+     * stopped, and every queued block notification must have run.
+     */
     static void StopOracleService();
 };
 

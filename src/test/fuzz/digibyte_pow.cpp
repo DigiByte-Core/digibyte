@@ -59,11 +59,6 @@ static CBlockIndex* BuildChain(
     genesis.nTime = 1389388394; // DigiByte genesis time
     genesis.nBits = powLimitArith.GetCompact();
     genesis.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SCRYPT;
-    for (int a = 0; a < NUM_ALGOS_IMPL; a++)
-        genesis.lastAlgoBlocks[a] = nullptr;
-    int galgo = genesis.GetAlgo();
-    if (galgo >= 0 && galgo < NUM_ALGOS_IMPL)
-        genesis.lastAlgoBlocks[galgo] = &genesis;
 
     for (int i = 1; i <= chain_len && fdp.remaining_bytes() >= 4; i++) {
         chain.emplace_back();
@@ -89,12 +84,6 @@ static CBlockIndex* BuildChain(
         int algo = kAlgos[algo_idx];
         blk.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
         blk.nBits = powLimitArith.GetCompact();
-
-        // Wire up lastAlgoBlocks from prev
-        for (int a = 0; a < NUM_ALGOS_IMPL; a++)
-            blk.lastAlgoBlocks[a] = prev.lastAlgoBlocks[a];
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL)
-            blk.lastAlgoBlocks[algo] = &blk;
     }
 
     return chain.size() >= 2 ? &chain.back() : nullptr;
@@ -185,8 +174,6 @@ FUZZ_TARGET(fuzz_algo_selection, .init = initialize_digibyte_pow)
         idx.nHeight = height;
         idx.pprev = nullptr;
         idx.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SCRYPT;
-        for (int a = 0; a < NUM_ALGOS_IMPL; a++)
-            idx.lastAlgoBlocks[a] = nullptr;
 
         // IsAlgoActive must not crash for any algo value
         for (int a = 0; a < NUM_ALGOS; a++) {
@@ -271,11 +258,6 @@ FUZZ_TARGET(fuzz_difficulty_clamping, .init = initialize_digibyte_pow)
         genesis.nTime = base_time;
         genesis.nBits = powLimitArith.GetCompact();
         genesis.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SCRYPT;
-        for (int a = 0; a < NUM_ALGOS_IMPL; a++)
-            genesis.lastAlgoBlocks[a] = nullptr;
-        int algo = genesis.GetAlgo();
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL)
-            genesis.lastAlgoBlocks[algo] = &genesis;
     }
 
     // Build the chain with fuzzed timestamps
@@ -300,12 +282,6 @@ FUZZ_TARGET(fuzz_difficulty_clamping, .init = initialize_digibyte_pow)
         int algo = kAlgos[algo_idx];
         blk.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
         blk.nBits = powLimitArith.GetCompact();
-
-        // Wire up lastAlgoBlocks
-        for (int a = 0; a < NUM_ALGOS_IMPL; a++)
-            blk.lastAlgoBlocks[a] = prev.lastAlgoBlocks[a];
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL)
-            blk.lastAlgoBlocks[algo] = &blk;
     }
 
     if (chain.size() < 2) return;

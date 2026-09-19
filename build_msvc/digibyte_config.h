@@ -6,7 +6,7 @@
 #define DIGIBYTE_DIGIBYTE_CONFIG_H
 
 /* Version Build */
-#define CLIENT_VERSION_BUILD 5
+#define CLIENT_VERSION_BUILD 6
 
 /* Version is release */
 #define CLIENT_VERSION_IS_RELEASE true
@@ -122,13 +122,13 @@
 #define PACKAGE_NAME "DigiByte Core"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "DigiByte Core 9.26.5"
+#define PACKAGE_STRING "DigiByte Core 9.26.6"
 
 /* Define to the home page for this package. */
 #define PACKAGE_URL "https://digibytecore.org/"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "9.26.5"
+#define PACKAGE_VERSION "9.26.6"
 
 /* Define this symbol if the minimal qt platform exists */
 #define QT_QPA_PLATFORM_MINIMAL 1

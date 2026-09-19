@@ -318,7 +318,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "senddigidollar", 1, "amount" },
     { "senddigidollar", 3, "fee_rate" },
     { "senddigidollar", 4, "selected_inputs" },
-    { "senddigidollar", 5, "options" },
+    { "senddigidollar", 6, "options" },
     { "getdigidollarsendsession", 0, "lookup" },
     { "getpaymasteroffers", 0, "amount_cents" },
     { "getpaymasteroffers", 1, "options" },

@@ -17,38 +17,22 @@
 #include <util/int128.h>
 
 #include <chainparams.h>
-#include <util/int128.h>
 #include <consensus/amount.h>
-#include <util/int128.h>
 #include <consensus/dca.h>
-#include <util/int128.h>
 #include <consensus/digidollar.h>
-#include <util/int128.h>
 #include <consensus/volatility.h>
-#include <util/int128.h>
 #include <digidollar/health.h>
-#include <util/int128.h>
 #include <oracle/bundle_manager.h>
-#include <util/int128.h>
 #include <primitives/oracle.h>
-#include <util/int128.h>
 #include <test/util/setup_common.h>
-#include <util/int128.h>
+#include <test/util/source_root.h>
 #include <util/time.h>
-#include <util/int128.h>
 
 #include <algorithm>
-#include <util/int128.h>
 #include <cmath>
-#include <util/int128.h>
-#include <fstream>
-#include <util/int128.h>
 #include <limits>
-#include <util/int128.h>
 #include <string>
-#include <util/int128.h>
 #include <vector>
-#include <util/int128.h>
 
 using DigiDollar::AlertThresholds;
 using DigiDollar::SystemHealthMonitor;
@@ -299,13 +283,7 @@ BOOST_FIXTURE_TEST_CASE(wave6_volatility_would_freeze_no_mutation, Wave6Setup)
 
 BOOST_FIXTURE_TEST_CASE(wave6_volatility_consensus_freeze_path_uses_integer_bps, Wave6Setup)
 {
-    std::ifstream in("src/consensus/volatility.cpp");
-    if (!in) {
-        in.open("consensus/volatility.cpp");
-    }
-    BOOST_REQUIRE_MESSAGE(in.is_open(), "could not read volatility.cpp for deterministic math guard");
-    const std::string source((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
+    const std::string source = ReadRepositoryFile("src/consensus/volatility.cpp");
 
     const size_t would_pos = source.find("bool VolatilityMonitor::WouldCandidateFreezeMinting");
     BOOST_REQUIRE_NE(would_pos, std::string::npos);

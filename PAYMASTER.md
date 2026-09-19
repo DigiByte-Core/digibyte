@@ -1,5 +1,8 @@
 # DigiDollar Paymaster: developer starting point
 
+The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
+recorded in the [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md).
+
 The Paymaster feature lets a wallet transfer DigiDollar (DD) without owning DGB
 for the miner fee. A separate provider contributes DGB inputs to the same
 transaction. The user signs its DD inputs, the provider signs its own inputs,

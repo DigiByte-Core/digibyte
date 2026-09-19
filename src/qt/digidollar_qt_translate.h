@@ -48,6 +48,16 @@ inline std::string TranslateMintRejectReasonForUser(const std::string& reason)
                "Please wait for the next block (about 15 seconds) and try again.";
     }
 
+    if (contains("minting-volatility-pause")) {
+        return "DigiDollar minting is paused because the candidate oracle quote "
+               "differs by at least 20% from the ancestor reference. "
+               "Transfers and redemptions are not paused by this volatility rule.";
+    }
+    if (contains("volatility state not ready") || contains("volatility_state_not_ready")) {
+        return "Required ancestor price data is unavailable. Restore or download "
+               "the missing blocks before minting. This is a local data-readiness error.";
+    }
+
     // Volatility freeze is active; the oracle price would cross the
     // freeze threshold (src/digidollar/validation.cpp:2600-2604).
     if (contains("volatility-freeze") || contains("volatility-protection") ||

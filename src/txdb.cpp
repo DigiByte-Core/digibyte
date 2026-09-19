@@ -27,6 +27,7 @@
 static constexpr uint8_t DB_COIN{'C'};
 static constexpr uint8_t DB_BEST_BLOCK{'B'};
 static constexpr uint8_t DB_HEAD_BLOCKS{'H'};
+static constexpr uint8_t DB_DD_HEALTH{'D'};
 // Keys used in previous version that might still be found in the DB:
 static constexpr uint8_t DB_COINS{'c'};
 
@@ -93,7 +94,18 @@ std::vector<uint256> CCoinsViewDB::GetHeadBlocks() const {
     return vhashHeadBlocks;
 }
 
-bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase) {
+std::optional<DigiDollar::ChainstateHealth> CCoinsViewDB::GetDigiDollarState() const
+{
+    // Coin batches may be only partly applied. Never expose the old health
+    // record until UTXO recovery has finished and accounting is reconstructed.
+    if (m_db->Exists(DB_HEAD_BLOCKS)) return std::nullopt;
+    DigiDollar::ChainstateHealth state;
+    if (!m_db->Read(DB_DD_HEALTH, state) || !state.IsValid() || state.best_block != GetBestBlock()) return std::nullopt;
+    return state;
+}
+
+bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase, const std::optional<DigiDollar::ChainstateHealth>& dd_state) {
+    if (dd_state && (!dd_state->IsValid() || dd_state->best_block != hashBlock)) return false;
     CDBBatch batch(*m_db);
     size_t count = 0;
     size_t changed = 0;
@@ -132,7 +144,7 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, boo
         it = erase ? mapCoins.erase(it) : std::next(it);
         if (batch.SizeEstimate() > m_options.batch_write_bytes) {
             LogPrint(BCLog::COINDB, "Writing partial batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
-            m_db->WriteBatch(batch);
+            if (!m_db->WriteBatch(batch)) return false;
             batch.Clear();
             if (m_options.simulate_crash_ratio) {
                 static FastRandomContext rng;
@@ -147,6 +159,11 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, boo
     // In the last batch, mark the database as consistent with hashBlock again.
     batch.Erase(DB_HEAD_BLOCKS);
     batch.Write(DB_BEST_BLOCK, hashBlock);
+    if (dd_state) {
+        batch.Write(DB_DD_HEALTH, *dd_state);
+    } else {
+        batch.Erase(DB_DD_HEALTH);
+    }
 
     LogPrint(BCLog::COINDB, "Writing final batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
     bool ret = m_db->WriteBatch(batch);
@@ -174,10 +191,13 @@ public:
 
     bool Valid() const override;
     void Next() override;
+    void CheckStatus() const override;
 
 private:
     std::unique_ptr<CDBIterator> pcursor;
     std::pair<char, COutPoint> keyTmp;
+    bool m_key_decode_failed{false};
+    void ReadKey();
 
     friend class CCoinsViewDB;
 };
@@ -190,14 +210,7 @@ std::unique_ptr<CCoinsViewCursor> CCoinsViewDB::Cursor() const
        only need read operations on it, use a const-cast to get around
        that restriction.  */
     i->pcursor->Seek(DB_COIN);
-    // Cache key of first record
-    if (i->pcursor->Valid()) {
-        CoinEntry entry(&i->keyTmp.second);
-        i->pcursor->GetKey(entry);
-        i->keyTmp.first = entry.key;
-    } else {
-        i->keyTmp.first = 0; // Make sure Valid() and GetKey() return false
-    }
+    i->ReadKey();
     return i;
 }
 
@@ -224,10 +237,29 @@ bool CCoinsViewDBCursor::Valid() const
 void CCoinsViewDBCursor::Next()
 {
     pcursor->Next();
+    ReadKey();
+}
+
+void CCoinsViewDBCursor::ReadKey()
+{
+    keyTmp.first = 0;
+    if (!pcursor->Valid()) return;
+    uint8_t prefix{0};
+    if (!pcursor->GetKey(prefix)) {
+        m_key_decode_failed = true;
+        return;
+    }
+    if (prefix != DB_COIN) return;
     CoinEntry entry(&keyTmp.second);
-    if (!pcursor->Valid() || !pcursor->GetKey(entry)) {
-        keyTmp.first = 0; // Invalidate cached key after last record so that Valid() and GetKey() return false
+    if (!pcursor->GetKey(entry)) {
+        m_key_decode_failed = true;
     } else {
         keyTmp.first = entry.key;
     }
+}
+
+void CCoinsViewDBCursor::CheckStatus() const
+{
+    pcursor->CheckStatus();
+    if (m_key_decode_failed) throw dbwrapper_error("Failed to decode chainstate coin key");
 }

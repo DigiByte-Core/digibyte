@@ -1562,11 +1562,13 @@ void DigiByteGUI::showEvent(QShowEvent *event)
 }
 
 #ifdef ENABLE_WALLET
-void DigiByteGUI::incomingTransaction(const QString& date, DigiByteUnit unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName)
+void DigiByteGUI::incomingTransaction(const QString& date, const QString& amount, bool money_left_wallet, const QString& type, const QString& address, const QString& label, const QString& walletName)
 {
-    // On new transaction, make an info balloon
+    // On new transaction, make an info balloon. The amount arrives ready to
+    // show, because a DigiDollar row carries dollars and a DigiByte row carries
+    // DigiByte, and only the transaction list knows which this row is.
     QString msg = tr("Date: %1\n").arg(date) +
-                  tr("Amount: %1\n").arg(DigiByteUnits::formatWithUnit(unit, amount, true));
+                  tr("Amount: %1\n").arg(amount);
     if (m_node.walletLoader().getWallets().size() > 1 && !walletName.isEmpty()) {
         msg += tr("Wallet: %1\n").arg(walletName);
     }
@@ -1575,7 +1577,7 @@ void DigiByteGUI::incomingTransaction(const QString& date, DigiByteUnit unit, co
         msg += tr("Label: %1\n").arg(label);
     else if (!address.isEmpty())
         msg += tr("Address: %1\n").arg(address);
-    message((amount)<0 ? tr("Sent transaction") : tr("Incoming transaction"),
+    message(money_left_wallet ? tr("Sent transaction") : tr("Incoming transaction"),
              msg, CClientUIInterface::MSG_INFORMATION);
 }
 #endif // ENABLE_WALLET

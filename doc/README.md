@@ -68,11 +68,18 @@ The DigiByte repo's [root README](/README.md) contains relevant information on t
 - [Paymaster hardening plan](../DIGIDOLLAR_PAYMASTER_HARDENING_PLAN.md)
 - [Paymaster operator and RPC guide](digidollar-paymaster.md)
 - [Paymaster release gate and dated evidence](digidollar-paymaster-release-gate.md)
+- [Paymaster v9.26.6rc2 integration and verification](digidollar-paymaster-v9.26.6rc2-integration.md)
 - [Unauthenticated REST Interface](REST-interface.md)
 - [Shared Libraries](shared-libraries.md)
 - [BIPS](bips.md)
 - [Dnsseed Policy](dnsseed-policy.md)
 - [Benchmarking](benchmarking.md)
+
+### Release documentation
+
+- [v9.26.4 pruning documentation](v9.26.4/V9.26.4_PRUNING_EXPLAINER.md)
+- [v9.26.2 archived documentation-validation prompt](v9.26.2/Z_DOC_VALIDATION_v9.26.2_PROMPT.md)
+- [Release-note archive](release-notes/), including [v8.26.2](release-notes/RELEASE-NOTES-8.26.2.md), [v9.26.2](release-notes/RELEASE_v9.26.2.md), and [v9.26.5](release-notes/RELEASE_v9.26.5.md)
 
 ### Resources
 * Discuss on the [DigiByteTalk](https://digibytetalk.org/) forums, in the [Development & Technical Discussion board](https://digibytetalk.org/index.php?board=6.0).

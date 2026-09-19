@@ -10,6 +10,7 @@ idempotency, redacted reservation output, and atomic release semantics.
 """
 
 import base64
+from decimal import Decimal
 import time
 
 from test_framework.paymaster import (
@@ -163,8 +164,16 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         second_options = dict(first_options)
         second_options["request_id"] = second_request_id
         second_pending = client.senddigidollar(
-            recipient, 200, "", 0, None, second_options)
+            recipient, 200, "", 0, None, "cents", second_options)
         assert_equal(second_pending["request_id"], second_request_id)
+        # The upstream amount_unit argument stays before Paymaster options.
+        # Equivalent cents/dollars retries must resume the same durable request.
+        dollars_retry = client.senddigidollar(
+            recipient, Decimal("2.00"), "", 0, None, "dollars", second_options)
+        assert_equal(dollars_retry["request_id"], second_request_id)
+        assert_equal(dollars_retry["requested_amount_cents"], 200)
+        assert_equal(dollars_retry["session_id"], second_pending["session_id"])
+
 
         first_page = client.listdigidollarsendsessions({"limit": 1})
         assert_equal(first_page["count"], 1)

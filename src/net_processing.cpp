@@ -12,6 +12,7 @@
 #include <chainparams.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
+#include <dbwrapper.h>
 #include <deploymentstatus.h>
 #include <digidollar/digidollar.h>
 #include <hash.h>
@@ -1395,8 +1396,8 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
 
     if (!state->hashLastUnknownBlock.IsNull()) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(state->hashLastUnknownBlock);
-        if (pindex && pindex->nChainWork > 0) {
-            if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
+        if (pindex && pindex->GetChainWork() > 0) {
+            if (state->pindexBestKnownBlock == nullptr || pindex->GetChainWork() >= state->pindexBestKnownBlock->GetChainWork()) {
                 state->pindexBestKnownBlock = pindex;
             }
             state->hashLastUnknownBlock.SetNull();
@@ -1411,9 +1412,9 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
     ProcessBlockAvailability(nodeid);
 
     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
-    if (pindex && pindex->nChainWork > 0) {
+    if (pindex && pindex->GetChainWork() > 0) {
         // An actually better block was announced.
-        if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
+        if (state->pindexBestKnownBlock == nullptr || pindex->GetChainWork() >= state->pindexBestKnownBlock->GetChainWork()) {
             state->pindexBestKnownBlock = pindex;
         }
     } else {
@@ -1435,7 +1436,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
 
-    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork || state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
+    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->GetChainWork() < m_chainman.ActiveChain().Tip()->GetChainWork() || state->pindexBestKnownBlock->GetChainWork() < m_chainman.MinimumChainWork()) {
         // This peer has nothing interesting.
         return;
     }
@@ -1656,117 +1657,177 @@ void PeerManagerImpl::RelayDandelionTransaction(const CTransaction& tx, CNode* p
 void PeerManagerImpl::CheckDandelionEmbargoes()
 {
     // =========================================================================
-    // Bug #29 fix: ABBA deadlock between m_nodes_mutex and m_dandelion_embargo_mutex
+    // Lock-order rule for this function: m_dandelion_embargo_mutex is a leaf
+    // lock. It is NEVER held while acquiring any other lock: not cs_main, not
+    // m_nodes_mutex, and not the mempool or stempool locks that the pool
+    // accessors (exists, get, size) take internally.
     //
-    // The established lock ordering throughout the Dandelion++ code is:
-    //   m_nodes_mutex FIRST, then m_dandelion_embargo_mutex SECOND
+    // Two orders are established elsewhere and must not be inverted here:
+    //   cs_main -> m_dandelion_embargo_mutex
+    //     The DANDELIONTX handler in ProcessMessage() holds cs_main while
+    //     CConnman::insertDandelionEmbargo() takes the embargo mutex.
+    //   m_nodes_mutex -> m_dandelion_embargo_mutex
+    //     DandelionShuffle() and CloseDandelionConnections() (dandelion.cpp),
+    //     the latter under DisconnectNodes() in net.cpp.
     //
-    // This ordering is used by:
-    //   - DandelionShuffle()            (dandelion.cpp:344 → 357)
-    //   - CloseDandelionConnections()   (dandelion.cpp:211 → 292)
-    //   - DisconnectNodes()             (net.cpp:1952 → CloseDandelionConnections)
+    // Why this matters: this function has frozen whole nodes twice, both
+    // times because it held the embargo mutex while calling something that
+    // takes another lock. First against the shuffle timer, which takes
+    // m_nodes_mutex. Then against the network thread, which holds cs_main
+    // when it receives a stem transaction and then takes the embargo mutex.
+    // When two threads take the same two locks in opposite order and overlap,
+    // each waits for the other forever: logging stops and every RPC times
+    // out. So nothing that needs cs_main or m_nodes_mutex may run while the
+    // embargo mutex is held.
     //
-    // Before this fix, CheckDandelionEmbargoes() violated that ordering:
-    //   it held m_dandelion_embargo_mutex, then called usingDandelion() and
-    //   localDandelionDestinationPushInventory(), both of which acquire
-    //   m_nodes_mutex internally. This created a classic ABBA deadlock:
+    // Structure: nothing that needs cs_main or m_nodes_mutex runs while the
+    // embargo mutex is held.
+    //   Phase 0 — usingDandelion() (m_nodes_mutex) before any embargo lock.
+    //   Phase 1 — under the embargo mutex only: copy the map (txid, expiry,
+    //             stem-routed flag). No other lock of any kind is taken while
+    //             the embargo mutex is held; it is a leaf lock.
+    //   Phase 2 — without the embargo mutex: classify each copy. Entries
+    //             already in the mempool are done. Expired entries are moved
+    //             from the stempool to the mempool: take cs_main per entry,
+    //             AcceptToMemoryPool, relay on success, then remove it from
+    //             the stempool under m_stempool.cs. Unexpired entries that
+    //             still sit in the stempool are collected for stem routing.
+    //   Phase 3 — re-take the embargo mutex and erase the finished entries,
+    //             but only where the stored expiry still matches what Phase 1
+    //             saw: a peer or the wallet may have re-inserted the txid with
+    //             a new embargo while the mutex was released.
+    //   Phase 4 — stem routing (m_nodes_mutex) without the embargo mutex, then
+    //             a brief re-lock to mark each routed txid.
     //
-    //   Thread A (shuffle timer):  LOCK(m_nodes_mutex) → LOCK(m_dandelion_embargo_mutex)
-    //   Thread B (embargo timer):  LOCK(m_dandelion_embargo_mutex) → LOCK(m_nodes_mutex)
-    //
-    //   When both fire concurrently, each thread holds the lock the other needs.
-    //   Result: sendtoaddress hangs forever at "Processing Dandelion relay",
-    //   shutdown hangs on threadDandelionShuffle.join(), RPC times out.
-    //   (Reported by DanGB on Windows 11, RC26, reproducible after ~1 week uptime.)
-    //
-    // Fix: restructure this function into two phases:
-    //   Phase 1 — under m_dandelion_embargo_mutex: scan the embargo map, handle
-    //             expired/mempool entries, collect txids that need stem routing.
-    //   Phase 2 — after releasing m_dandelion_embargo_mutex: perform the stem
-    //             routing (which needs m_nodes_mutex), then briefly re-acquire
-    //             m_dandelion_embargo_mutex to mark them as routed.
-    //
-    // usingDandelion() is also moved before the embargo lock for the same reason.
-    // The bool may be momentarily stale, but that only means we skip one routing
-    // cycle (~1 second) — no correctness impact.
+    // usingDandelion() is read before the embargo lock. The bool may be
+    // momentarily stale, but that only means we skip one routing cycle
+    // (~1 second) — no correctness impact.
     // =========================================================================
 
     // Phase 0: query Dandelion destination availability WITHOUT holding the
     // embargo lock.  usingDandelion() acquires m_nodes_mutex internally.
     bool hasDandelionDestinations = m_connman.usingDandelion();
 
-    // Transactions collected during Phase 1 that need stem routing in Phase 2.
-    std::vector<uint256> txidsNeedingStemRoute;
+    // A snapshot of one embargo-map entry, copied out in Phase 1. Every
+    // decision about it is made later, with no lock held, from this copy:
+    // the expiry lets Phase 3 notice if someone re-embargoed the same
+    // transaction while we were unlocked.
+    struct EmbargoSnapshot {
+        uint256 txid;
+        std::chrono::microseconds expiry;
+        bool already_stem_routed;
+    };
+    std::vector<EmbargoSnapshot> snapshots;
+    std::chrono::milliseconds current_time;
 
-    // Phase 1: scan embargo map under m_dandelion_embargo_mutex.
-    // Everything in this block touches only embargo-protected state (plus
-    // cs_main for AcceptToMemoryPool, which has no ordering conflict here).
+    // Phase 1: copy the embargo map under m_dandelion_embargo_mutex and do
+    // nothing else. The mutex is a leaf lock: no mempool or stempool call is
+    // made while it is held (those take their own pool lock inside), nothing
+    // is logged (the logger has a lock too), and cs_main and m_nodes_mutex
+    // are never taken here. All lookups happen in Phase 2 on the copy.
     {
         LOCK(m_connman.m_dandelion_embargo_mutex);
-        auto current_time = GetTime<std::chrono::milliseconds>();
+        current_time = GetTime<std::chrono::milliseconds>();
+        snapshots.reserve(m_connman.mDandelionEmbargo.size());
+        for (const auto& [txid, expiry] : m_connman.mDandelionEmbargo) {
+            snapshots.push_back({txid, expiry, m_connman.m_dandelion_stem_routed.count(txid) != 0});
+        }
+    } // m_dandelion_embargo_mutex released here.
 
-        // Log embargo checks (debug level only — this fires every second)
-        if (!m_connman.mDandelionEmbargo.empty()) {
-            LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: Checking %d embargoed transactions (stempool=%d, mempool=%d)\n",
-                     m_connman.mDandelionEmbargo.size(), m_stempool.size(), m_mempool.size());
+    if (snapshots.empty()) return;
+    // Log embargo checks (debug level only — this fires every second)
+    LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: Checking %d embargoed transactions (stempool=%d, mempool=%d)\n",
+             snapshots.size(), m_stempool.size(), m_mempool.size());
+
+    // Entries to erase from the embargo map in Phase 3: those already in the
+    // mempool, and those whose embargo expired and was processed here.
+    std::vector<EmbargoSnapshot> finished;
+    // Transactions that still need stem routing in Phase 4.
+    std::vector<uint256> txidsNeedingStemRoute;
+
+    // Phase 2: classify each snapshot and move expired transactions from the
+    // stempool to the mempool, all WITHOUT holding m_dandelion_embargo_mutex.
+    // cs_main is taken here, per transaction, exactly as AcceptToMemoryPool
+    // requires.
+    for (const EmbargoSnapshot& snap : snapshots) {
+        if (m_mempool.exists(snap.txid)) {
+            LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", snap.txid.ToString());
+            finished.push_back(snap);
+            continue;
+        }
+        if (snap.expiry >= current_time) {
+            // Embargo not yet expired — check if this TX needs stem routing:
+            // 1. We have Dandelion destinations available
+            // 2. This TX has NOT already been successfully routed
+            //    (prevents the spam bug where we re-send every second)
+            // 3. OR the previous Dandelion destination disconnected (destination changed)
+            //
+            // We only COLLECT the txid here.  The actual push happens in Phase 4,
+            // because localDandelionDestinationPushInventory() acquires m_nodes_mutex.
+            if (hasDandelionDestinations && !snap.already_stem_routed && m_stempool.exists(snap.txid)) {
+                txidsNeedingStemRoute.push_back(snap.txid);
+            }
+            // Log remaining time
+            auto remaining = std::chrono::duration_cast<std::chrono::seconds>(snap.expiry - current_time).count();
+            LogPrint(BCLog::DANDELION, "Transaction %s embargo expires in %d seconds\n", snap.txid.ToString(), remaining);
+            continue;
         }
 
-        for (auto iter = m_connman.mDandelionEmbargo.begin(); iter != m_connman.mDandelionEmbargo.end();) {
-            if (m_mempool.exists(iter->first)) {
-                LogPrint(BCLog::DANDELION, "Embargoed dandeliontx %s found in mempool; removing from embargo map\n", iter->first.ToString());
-                m_connman.m_dandelion_stem_routed.erase(iter->first);
-                iter = m_connman.mDandelionEmbargo.erase(iter);
-            } else if (iter->second < current_time) {
-                LogPrintf("CheckDandelionEmbargoes: dandeliontx %s embargo expired\n", iter->first.ToString());
-                CTransactionRef ptx = m_stempool.get(iter->first);
-                if (ptx) {
-                    LogPrintf("CheckDandelionEmbargoes: Moving transaction %s from stempool to mempool for broadcast\n", iter->first.ToString());
-                    bool accepted_to_mempool{false};
-                    {
-                        LOCK(cs_main);
-                        const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
-                        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                            accepted_to_mempool = true;
-                            LogPrintf("CheckDandelionEmbargoes: Successfully moved tx %s to mempool\n", iter->first.ToString());
-                            LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: accepted %s (poolsz %u txn, %u kB)\n",
-                                                     iter->first.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
-                            RelayTransaction(ptx->GetHash(), ptx->GetWitnessHash());
-                        } else {
-                            LogPrintf("CheckDandelionEmbargoes: Failed to move tx %s to mempool: %s\n",
-                                     iter->first.ToString(), result.m_state.ToString());
-                        }
-                    }
-                    WITH_LOCK(m_stempool.cs, m_stempool.removeRecursive(*ptx, accepted_to_mempool ? MemPoolRemovalReason::REORG : MemPoolRemovalReason::EXPIRY));
-                } else {
-                    LogPrintf("CheckDandelionEmbargoes: Transaction %s not found in stempool!\n", iter->first.ToString());
-                }
-                m_connman.m_dandelion_stem_routed.erase(iter->first);
-                iter = m_connman.mDandelionEmbargo.erase(iter);
+        LogPrintf("CheckDandelionEmbargoes: dandeliontx %s embargo expired\n", snap.txid.ToString());
+        finished.push_back(snap);
+        // The CTransactionRef keeps the transaction alive across the
+        // unlocked interval below.
+        const CTransactionRef ptx = m_stempool.get(snap.txid);
+        if (!ptx) {
+            LogPrintf("CheckDandelionEmbargoes: Transaction %s not found in stempool!\n", snap.txid.ToString());
+            continue;
+        }
+        LogPrintf("CheckDandelionEmbargoes: Moving transaction %s from stempool to mempool for broadcast\n", snap.txid.ToString());
+        bool accepted_to_mempool{false};
+        {
+            LOCK(cs_main);
+            const MempoolAcceptResult result = AcceptToMemoryPool(m_chainman.ActiveChainstate(), m_mempool, ptx, false);
+            if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                accepted_to_mempool = true;
+                LogPrintf("CheckDandelionEmbargoes: Successfully moved tx %s to mempool\n", snap.txid.ToString());
+                LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: accepted %s (poolsz %u txn, %u kB)\n",
+                                         snap.txid.ToString(), m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
+                RelayTransaction(ptx->GetHash(), ptx->GetWitnessHash());
             } else {
-                // Embargo not yet expired — check if this TX needs stem routing:
-                // 1. We have Dandelion destinations available
-                // 2. This TX has NOT already been successfully routed
-                //    (prevents the spam bug where we re-send every second)
-                // 3. OR the previous Dandelion destination disconnected (destination changed)
-                //
-                // We only COLLECT the txid here.  The actual push happens in Phase 2,
-                // after we release m_dandelion_embargo_mutex, because
-                // localDandelionDestinationPushInventory() acquires m_nodes_mutex.
-                if (hasDandelionDestinations && m_connman.m_dandelion_stem_routed.count(iter->first) == 0) {
-                    if (m_stempool.exists(iter->first)) {
-                        txidsNeedingStemRoute.push_back(iter->first);
-                    }
-                }
-
-                // Log remaining time
-                auto remaining = std::chrono::duration_cast<std::chrono::seconds>(iter->second - current_time).count();
-                LogPrint(BCLog::DANDELION, "Transaction %s embargo expires in %d seconds\n", iter->first.ToString(), remaining);
-                iter++;
+                LogPrintf("CheckDandelionEmbargoes: Failed to move tx %s to mempool: %s\n",
+                         snap.txid.ToString(), result.m_state.ToString());
             }
         }
-    } // m_dandelion_embargo_mutex released here — safe to touch m_nodes_mutex now.
+        WITH_LOCK(m_stempool.cs, m_stempool.removeRecursive(*ptx, accepted_to_mempool ? MemPoolRemovalReason::REORG : MemPoolRemovalReason::EXPIRY));
+    }
 
-    // Phase 2: perform stem routing WITHOUT holding m_dandelion_embargo_mutex.
+    // Phase 3: erase the finished entries under the embargo mutex. Re-check
+    // each one first: while the mutex was released the txid may have been
+    // erased, or re-inserted with a new expiry by insertDandelionEmbargo()
+    // (a peer re-sent the transaction, or the wallet re-broadcast it). A new
+    // embargo is left in place so it can run its course. The old stem-routed
+    // mark is cleared either way because the stem phase it belonged to is over.
+    // Even the logger takes a lock of its own, so nothing is logged while the
+    // embargo mutex is held; re-embargoed entries are noted and logged after.
+    std::vector<uint256> re_embargoed;
+    if (!finished.empty()) {
+        LOCK(m_connman.m_dandelion_embargo_mutex);
+        for (const EmbargoSnapshot& snap : finished) {
+            m_connman.m_dandelion_stem_routed.erase(snap.txid);
+            auto entry = m_connman.mDandelionEmbargo.find(snap.txid);
+            if (entry == m_connman.mDandelionEmbargo.end()) continue;
+            if (entry->second != snap.expiry) {
+                re_embargoed.push_back(snap.txid);
+                continue;
+            }
+            m_connman.mDandelionEmbargo.erase(entry);
+        }
+    }
+    for (const uint256& txid : re_embargoed) {
+        LogPrint(BCLog::DANDELION, "CheckDandelionEmbargoes: dandeliontx %s was re-embargoed while unlocked; keeping the new embargo\n", txid.ToString());
+    }
+
+    // Phase 4: perform stem routing WITHOUT holding m_dandelion_embargo_mutex.
     // localDandelionDestinationPushInventory() acquires m_nodes_mutex, which is
     // now safe because we no longer hold the embargo lock.
     for (const auto& txid : txidsNeedingStemRoute) {
@@ -1906,16 +1967,29 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         // Dandelion: Handle any pending Dandelion transactions
         auto tx_relay = peer->GetTxRelay();
         if (tx_relay) {
-            LOCK(tx_relay->m_tx_inventory_mutex);
-            if (!tx_relay->vInventoryDandelionTxToSend.empty()) {
-                LogPrintf("FinalizeNode: Peer %d disconnecting with %d pending Dandelion transactions\n", 
-                         nodeid, tx_relay->vInventoryDandelionTxToSend.size());
-                
+            // Copy the pending hashes out and release this peer's inventory
+            // lock BEFORE calling getLocalDandelionDestination() (which takes
+            // m_nodes_mutex) or PushDandelionInventory() (which takes
+            // m_peer_mutex and then the destination's inventory lock). The
+            // stem push path takes those same locks in the opposite order, so
+            // holding this peer's inventory lock across these calls could
+            // deadlock the node. The copy is a plain vector owned by this
+            // function; the peer is being finalized, so its own queue is
+            // never sent again and nothing below needs it after the unlock.
+            std::vector<uint256> pending_dandelion_txs;
+            {
+                LOCK(tx_relay->m_tx_inventory_mutex);
+                pending_dandelion_txs = tx_relay->vInventoryDandelionTxToSend;
+            }
+            if (!pending_dandelion_txs.empty()) {
+                LogPrintf("FinalizeNode: Peer %d disconnecting with %d pending Dandelion transactions\n",
+                         nodeid, pending_dandelion_txs.size());
+
                 // Get the current local Dandelion destination
                 CNode* newDestination = m_connman.getLocalDandelionDestination();
                 if (newDestination && newDestination != &node) {
                     // Re-queue the pending transactions to the new destination
-                    for (const uint256& txhash : tx_relay->vInventoryDandelionTxToSend) {
+                    for (const uint256& txhash : pending_dandelion_txs) {
                         CInv inv(MSG_DANDELION_TX, txhash);
                         if (PushDandelionInventory(newDestination, inv)) {
                             LogPrintf("FinalizeNode: Re-queued Dandelion transaction %s to peer %d\n", 
@@ -2912,7 +2986,7 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
         const CBlockIndex *tip = m_chainman.ActiveChain().Tip();
         // Use a 144 block buffer, so that we'll accept headers that fork from
         // near our tip.
-        near_chaintip_work = tip->nChainWork - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->nChainWork);
+        near_chaintip_work = tip->GetChainWork() - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->GetChainWork());
     }
     return std::max(near_chaintip_work, m_chainman.MinimumChainWork());
 }
@@ -3056,7 +3130,7 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
 bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlockIndex* chain_start_header, std::vector<CBlockHeader>& headers)
 {
     // Calculate the total work on this chain.
-    arith_uint256 total_work = chain_start_header->nChainWork + CalculateHeadersWork(headers);
+    arith_uint256 total_work = chain_start_header->GetChainWork() + CalculateHeadersWork(headers);
 
     // Our dynamic anti-DoS threshold (minimum work required on a headers chain
     // before we'll store it)
@@ -3139,7 +3213,7 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     CNodeState *nodestate = State(pfrom.GetId());
 
-    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
+    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->GetChainWork() <= last_header.GetChainWork()) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
@@ -3216,7 +3290,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     // because it is set in UpdateBlockAvailability. Some nullptr checks
     // are still present, however, as belt-and-suspenders.
 
-    if (received_new_header && last_header.nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+    if (received_new_header && last_header.GetChainWork() > m_chainman.ActiveChain().Tip()->GetChainWork()) {
         nodestate->m_last_block_announcement = GetTime();
     }
 
@@ -3225,7 +3299,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     if (m_chainman.IsInitialBlockDownload() && !may_have_more_headers) {
         // If the peer has no more headers to give us, then we know we have
         // their tip.
-        if (nodestate->pindexBestKnownBlock && nodestate->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
+        if (nodestate->pindexBestKnownBlock && nodestate->pindexBestKnownBlock->GetChainWork() < m_chainman.MinimumChainWork()) {
             // This peer has too little work on their headers chain to help
             // us sync -- disconnect if it is an outbound disconnection
             // candidate.
@@ -3247,7 +3321,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     // thus always subject to eviction under the bad/lagging chain logic.
     // See ChainSyncTimeoutState.
     if (!pfrom.fDisconnect && pfrom.IsFullOutboundConn() && nodestate->pindexBestKnownBlock != nullptr) {
-        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork && !nodestate->m_chain_sync.m_protect) {
+        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->GetChainWork() >= m_chainman.ActiveChain().Tip()->GetChainWork() && !nodestate->m_chain_sync.m_protect) {
             LogPrint(BCLog::NET, "Protecting outbound peer=%d from eviction\n", pfrom.GetId());
             nodestate->m_chain_sync.m_protect = true;
             ++m_outbound_peers_with_protect_from_disconnect;
@@ -3379,8 +3453,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     if (!m_chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, &pindexLast)) {
         if (state.IsInvalid()) {
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
-            return;
         }
+        return;
     }
     assert(pindexLast);
 
@@ -4644,16 +4718,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             } else if (inv.IsDandelionMsg()) {
                 if (auto tx_relay = peer->GetTxRelay(); tx_relay != nullptr) {
+                    // Ask connman whether this is a Dandelion inbound peer
+                    // BEFORE taking the inventory lock. isDandelionInbound()
+                    // takes m_nodes_mutex, and the stem push path holds
+                    // m_nodes_mutex while taking a peer's inventory lock, so
+                    // nesting them the other way round here could deadlock the
+                    // node. Every peer announces the discovery hash right
+                    // after its handshake, so this runs on every connection.
+                    const bool is_dandelion_inbound = m_connman.isDandelionInbound(&pfrom);
                     LOCK(tx_relay->m_tx_inventory_mutex);
                     auto result = tx_relay->setDandelionInventoryKnown.insert(inv.hash);
                     const bool fAlreadyHave = !result.second;
                     LogPrint(BCLog::DANDELION, "ProcessMessage INV: Got dandelion inv: %s  %s peer=%d\n", inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
                     if ((!fAlreadyHave && !m_chainman.IsInitialBlockDownload() &&
-                        m_connman.isDandelionInbound(&pfrom)) || (inv.hash == DANDELION_DISCOVERYHASH)) {
+                        is_dandelion_inbound) || (inv.hash == DANDELION_DISCOVERYHASH)) {
                         std::vector<CInv> vInv{inv};
-                        LogPrintf("ProcessMessage INV: Requesting dandelion inv %s from peer=%d (is_inbound=%d, is_discovery=%d)\n", 
-                                 inv.hash.ToString(), pfrom.GetId(), 
-                                 m_connman.isDandelionInbound(&pfrom), 
+                        LogPrintf("ProcessMessage INV: Requesting dandelion inv %s from peer=%d (is_inbound=%d, is_discovery=%d)\n",
+                                 inv.hash.ToString(), pfrom.GetId(),
+                                 is_dandelion_inbound,
                                  inv.hash == DANDELION_DISCOVERYHASH);
                         m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETDATA, vInv));
                     }
@@ -4849,71 +4931,70 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        LOCK(cs_main);
+        std::vector<const CBlockIndex*> indices;
+        const CBlockIndex* best_header_sent;
+        {
+            LOCK(cs_main);
 
-        // Note that if we were to be on a chain that forks from the checkpointed
-        // chain, then serving those headers to a peer that has seen the
-        // checkpointed chain would cause that peer to disconnect us. Requiring
-        // that our chainwork exceed the minimum chain work is a protection against
-        // being fed a bogus chain when we started up for the first time and
-        // getting partitioned off the honest network for serving that chain to
-        // others.
-        if (m_chainman.ActiveTip() == nullptr ||
-                (m_chainman.ActiveTip()->nChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
-            LogPrint(BCLog::NET, "Ignoring getheaders from peer=%d because active chain has too little work; sending empty response\n", pfrom.GetId());
-            // Just respond with an empty headers message, to tell the peer to
-            // go away but not treat us as unresponsive.
-            m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::HEADERS, std::vector<CBlock>()));
+            // Serving headers from a low-work fork can cause honest peers to
+            // disconnect us. Keep the existing minimum-work serving rule.
+            if (m_chainman.ActiveTip() == nullptr ||
+                    (m_chainman.ActiveTip()->GetChainWork() < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
+                LogPrint(BCLog::NET, "Ignoring getheaders from peer=%d because active chain has too little work; sending empty response\n", pfrom.GetId());
+                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::HEADERS, std::vector<CBlock>()));
+                return;
+            }
+
+            const CBlockIndex* pindex = nullptr;
+            if (locator.IsNull()) {
+                // If locator is null, return the hashStop block.
+                pindex = m_chainman.m_blockman.LookupBlockIndex(hashStop);
+                if (!pindex) return;
+                if (!BlockRequestAllowed(pindex)) {
+                    LogPrint(BCLog::NET, "%s: ignoring request from peer=%i for old block header that isn't in the main chain\n", __func__, pfrom.GetId());
+                    return;
+                }
+            } else {
+                pindex = m_chainman.ActiveChainstate().FindForkInGlobalIndex(locator);
+                if (pindex) pindex = m_chainman.ActiveChain().Next(pindex);
+            }
+
+            // Index entries and their immutable headers outlive peer work.
+            // Capture one branch before reading any headers from storage.
+            indices.reserve(MAX_HEADERS_RESULTS);
+            LogPrint(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
+            for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex)) {
+                indices.push_back(pindex);
+                if (indices.size() == MAX_HEADERS_RESULTS || pindex->GetBlockHash() == hashStop) break;
+            }
+            // A null terminal pointer means we reached the captured tip, or
+            // the peer already has it and will receive an empty response.
+            best_header_sent = pindex ? pindex : m_chainman.ActiveChain().Tip();
+        }
+
+        // CBlock includes the zero transaction count required on the wire.
+        std::vector<CBlock> vHeaders;
+        vHeaders.reserve(indices.size());
+        try {
+            for (const auto* index : indices) {
+                if (interruptMsgProc || pfrom.fDisconnect) return;
+                vHeaders.emplace_back(index->GetBlockHeader());
+            }
+        } catch (const dbwrapper_error& error) {
+            LogPrintf("Cannot serve getheaders: local block header storage error: %s\n", error.what());
             return;
         }
-
-        CNodeState *nodestate = State(pfrom.GetId());
-        const CBlockIndex* pindex = nullptr;
-        if (locator.IsNull())
+        if (interruptMsgProc || pfrom.fDisconnect) return;
+        auto response = msgMaker.Make(NetMsgType::HEADERS, vHeaders);
         {
-            // If locator is null, return the hashStop block
-            pindex = m_chainman.m_blockman.LookupBlockIndex(hashStop);
-            if (!pindex) {
-                return;
-            }
-
-            if (!BlockRequestAllowed(pindex)) {
-                LogPrint(BCLog::NET, "%s: ignoring request from peer=%i for old block header that isn't in the main chain\n", __func__, pfrom.GetId());
-                return;
-            }
+            LOCK(cs_main);
+            auto* nodestate = State(pfrom.GetId());
+            if (!nodestate || interruptMsgProc || pfrom.fDisconnect) return;
+            m_connman.PushMessage(&pfrom, std::move(response));
+            // Reset this to the captured response, even if a newer compact
+            // block was announced during the read. It may need announcing again.
+            nodestate->pindexBestHeaderSent = best_header_sent;
         }
-        else
-        {
-            // Find the last block the caller has in the main chain
-            pindex = m_chainman.ActiveChainstate().FindForkInGlobalIndex(locator);
-            if (pindex)
-                pindex = m_chainman.ActiveChain().Next(pindex);
-        }
-
-        // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
-        std::vector<CBlock> vHeaders;
-        int nLimit = MAX_HEADERS_RESULTS;
-        LogPrint(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
-        for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex))
-        {
-            vHeaders.emplace_back(pindex->GetBlockHeader());
-            if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
-                break;
-        }
-        // pindex can be nullptr either if we sent m_chainman.ActiveChain().Tip() OR
-        // if our peer has m_chainman.ActiveChain().Tip() (and thus we are sending an empty
-        // headers message). In both cases it's safe to update
-        // pindexBestHeaderSent to be our tip.
-        //
-        // It is important that we simply reset the BestHeaderSent value here,
-        // and not max(BestHeaderSent, newHeaderSent). We might have announced
-        // the currently-being-connected tip using a compact block, which
-        // resulted in the peer sending a headers request, which we respond to
-        // without the new block. By resetting the BestHeaderSent, we ensure we
-        // will re-announce the new block via headers (or compact blocks again)
-        // in the SendMessages logic.
-        nodestate->pindexBestHeaderSent = pindex ? pindex : m_chainman.ActiveChain().Tip();
-        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::HEADERS, vHeaders));
         return;
     }
 
@@ -5140,7 +5221,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer);
             }
             return;
-        } else if (prev_block->nChainWork + CalculateHeadersWork({cmpctblock.header}) < GetAntiDoSWorkThreshold()) {
+        } else if (prev_block->GetChainWork() + CalculateHeadersWork({cmpctblock.header}) < GetAntiDoSWorkThreshold()) {
             // If we get a low-work header in a compact block, we can ignore it.
             LogPrint(BCLog::NET, "Ignoring low-work compact block from peer %d\n", pfrom.GetId());
             return;
@@ -5156,8 +5237,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!m_chainman.ProcessNewBlockHeaders({cmpctblock.header}, /*min_pow_checked=*/true, state, &pindex)) {
             if (state.IsInvalid()) {
                 MaybePunishNodeForBlock(pfrom.GetId(), state, /*via_compact_block=*/true, "invalid header via cmpctblock");
-                return;
             }
+            return;
         }
 
         if (received_new_header) {
@@ -5186,7 +5267,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // If this was a new header with more work than our tip, update the
         // peer's last block announcement time
-        if (received_new_header && pindex->nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+        if (received_new_header && pindex->GetChainWork() > m_chainman.ActiveChain().Tip()->GetChainWork()) {
             nodestate->m_last_block_announcement = GetTime();
         }
 
@@ -5208,7 +5289,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             range_flight.first++;
         }
 
-        if (pindex->nChainWork <= m_chainman.ActiveChain().Tip()->nChainWork || // We know something better
+        if (pindex->GetChainWork() <= m_chainman.ActiveChain().Tip()->GetChainWork() || // We know something better
                 pindex->nTx != 0) { // We had this block at some point, but pruned it
             if (requested_block_from_this_peer) {
                 // We requested this block for some reason, but our mempool will probably be useless
@@ -5461,7 +5542,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
 
             // Check work on this block against our anti-dos thresholds.
-            if (prev_block && prev_block->nChainWork + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
+            if (prev_block && prev_block->GetChainWork() + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
                 min_pow_checked = true;
             }
         }
@@ -6811,13 +6892,13 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
         // their chain has more work than ours, we should sync to it,
         // unless it's invalid, in which case we should find that out and
         // disconnect from them elsewhere).
-        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork) {
+        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->GetChainWork() >= m_chainman.ActiveChain().Tip()->GetChainWork()) {
             if (state.m_chain_sync.m_timeout != 0s) {
                 state.m_chain_sync.m_timeout = 0s;
                 state.m_chain_sync.m_work_header = nullptr;
                 state.m_chain_sync.m_sent_getheaders = false;
             }
-        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= state.m_chain_sync.m_work_header->nChainWork)) {
+        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->GetChainWork() >= state.m_chain_sync.m_work_header->GetChainWork())) {
             // Our best block known by this peer is behind our tip, and we're either noticing
             // that for the first time, OR this peer was able to catch up to some earlier point
             // where we checked against our tip.
@@ -7111,7 +7192,7 @@ void PeerManagerImpl::MaybeSendSendHeaders(CNode& node, Peer& peer)
         LOCK(cs_main);
         CNodeState &state = *State(node.GetId());
         if (state.pindexBestKnownBlock != nullptr &&
-                state.pindexBestKnownBlock->nChainWork > m_chainman.MinimumChainWork()) {
+                state.pindexBestKnownBlock->GetChainWork() > m_chainman.MinimumChainWork()) {
             // Tell our peer we prefer to receive headers rather than inv's
             // We send this to non-NODE NETWORK peers as well, because even
             // non-NODE NETWORK peers can announce blocks (such as pruning
@@ -7366,7 +7447,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Try sending block announcements via headers
         //
-        {
+        try {
             // If we have no more than MAX_BLOCKS_TO_ANNOUNCE in our
             // list of block hashes we're relaying, and our peer wants
             // headers announcements, then find the first header
@@ -7494,6 +7575,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }
             peer->m_blocks_for_headers_relay.clear();
+        } catch (const dbwrapper_error& error) {
+            LogPrintf("Cannot announce headers: local block header storage error: %s\n", error.what());
+            return true;
         }
 
         //

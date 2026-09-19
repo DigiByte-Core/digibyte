@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/volatility.h>
+#include <chain.h>
+#include <consensus/params.h>
 #include <consensus/digidollar.h>
 #include <primitives/oracle.h>
 #include <logging.h>
@@ -87,6 +89,79 @@ double CalculateStandardDeviationDouble(const std::vector<double>& values)
 
 } // namespace
 
+MintReference BuildMintReference(int candidate_height, const CBlockIndex* parent,
+                                const Consensus::Params& params, const AncestorPriceReader& read_price)
+{
+    MintReference result;
+    result.candidate_height = candidate_height;
+    result.genesis_hash = params.hashGenesisBlock;
+    if (candidate_height < 0 || (parent ? parent->nHeight != candidate_height - 1 : candidate_height != 0)) {
+        result.error = "DigiDollar volatility state not ready: candidate parent is unavailable or mismatched";
+        return result;
+    }
+    if (parent) result.parent_hash = parent->GetBlockHash();
+    result.window_start_height = std::max(0, candidate_height - MINT_REFERENCE_MAX_DEPTH);
+    result.window_end_height = candidate_height - MINT_REFERENCE_MIN_DEPTH;
+    const int first_dd_height = params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR);
+    const int oldest = std::max(result.window_start_height, first_dd_height);
+    std::vector<CAmount> prices;
+    prices.reserve(MINT_REFERENCE_SAMPLES);
+    if (result.window_end_height >= oldest) {
+        const CBlockIndex* ancestor = parent;
+        while (ancestor && ancestor->nHeight > result.window_end_height) ancestor = ancestor->pprev;
+        for (int height = result.window_end_height; height >= oldest && prices.size() < MINT_REFERENCE_SAMPLES; --height) {
+            if (!ancestor || ancestor->nHeight != height || !read_price) {
+                result.error = "DigiDollar volatility state not ready: required ancestor data is unavailable";
+                return result;
+            }
+            CAmount price{0};
+            const auto status = read_price(*ancestor, price, result.error);
+            if (status == AncestorPriceResult::UNAVAILABLE || (status == AncestorPriceResult::PRICE && price <= 0)) {
+                if (result.error.empty()) result.error = "DigiDollar volatility state not ready: required ancestor price is unavailable";
+                return result;
+            }
+            if (status == AncestorPriceResult::PRICE) prices.push_back(price);
+            ancestor = ancestor->pprev;
+        }
+    }
+    result.sample_count = prices.size();
+    if (!prices.empty()) {
+        std::sort(prices.begin(), prices.end());
+        result.price_micro_usd = prices[(prices.size() - 1) / 2];
+    }
+    result.ready = true;
+    return result;
+}
+
+MintPriceStatus EvaluateMintPrice(CAmount candidate_price_micro_usd, const MintReference& reference)
+{
+    MintPriceStatus result;
+    result.quote_available = candidate_price_micro_usd > 0;
+    result.ready = reference.ready;
+    if (!result.quote_available) {
+        result.reason = "oracle_unavailable";
+    } else if (!reference.ready || reference.rules_version != MINT_REFERENCE_RULE_VERSION) {
+        result.ready = false;
+        result.reason = "volatility_state_not_ready";
+    } else if (reference.sample_count == 0) {
+        result.reason = "none";
+    } else if (reference.price_micro_usd <= 0 || reference.sample_count > MINT_REFERENCE_SAMPLES) {
+        result.ready = false;
+        result.reason = "volatility_state_not_ready";
+    } else {
+        // Positive int64 operands and these fixed multipliers fit in signed 128 bits.
+        // Widen before subtraction or multiplication; equality at 20% rejects.
+        const util::int128_t reference_price = reference.price_micro_usd;
+        const util::int128_t candidate_price = candidate_price_micro_usd;
+        const util::int128_t difference = candidate_price >= reference_price ? candidate_price - reference_price : reference_price - candidate_price;
+        const util::int128_t numerator = difference * 10000;
+        result.restricted = numerator >= reference_price * MINT_MAX_DEVIATION_BPS;
+        result.deviation_bps = SaturatingInt64(numerator / reference_price);
+        result.reason = result.restricted ? "volatility_pause" : "none";
+    }
+    return result;
+}
+
 // ============================================================================
 // Static Member Definitions
 // ============================================================================
@@ -125,7 +200,7 @@ void VolatilityMonitor::RecordPrice(CAmount price, int64_t timestamp, uint32_t h
 
         // Don't record if too recent (< 1 hour interval)
         if (timestamp - lastPrice.timestamp < MIN_PRICE_INTERVAL) {
-            LogPrintf("VolatilityMonitor: Skipping price update (too recent: %d seconds)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Skipping price update (too recent: %d seconds)\n",
                      timestamp - lastPrice.timestamp);
             return;
         }
@@ -135,7 +210,7 @@ void VolatilityMonitor::RecordPrice(CAmount price, int64_t timestamp, uint32_t h
     // Add new price point
     priceHistory.emplace_back(price, timestamp, height);
 
-    LogPrintf("VolatilityMonitor: Recorded price %s at height %d (timestamp %d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Recorded price %s at height %d (timestamp %d)\n",
              FormatMoney(price), height, timestamp);
 
     // Clean old history to maintain size limits
@@ -172,7 +247,7 @@ void VolatilityMonitor::ClearHistory()
     currentState = VolatilityState();
     lastUpdateHeight = 0;
 
-    LogPrintf("VolatilityMonitor: History cleared\n");
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: History cleared\n");
 }
 
 double VolatilityMonitor::CalculateVolatility(int64_t timeWindow)
@@ -444,7 +519,7 @@ void VolatilityMonitor::RemovePriceForHeight(uint32_t height)
         UpdateVolatilityState();
     }
 
-    LogPrintf("VolatilityMonitor: Removed price data for height %u, remaining=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "VolatilityMonitor: Removed price data for height %u, remaining=%d\n",
               height, priceHistory.size());
 }
 

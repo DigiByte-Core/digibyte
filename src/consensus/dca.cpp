@@ -158,6 +158,13 @@ int DynamicCollateralAdjustment::ApplyDCA(int baseRatio, int systemHealth)
         return std::numeric_limits<int>::max();
     }
 
+    return ApplyDCAForHealth(baseRatio, std::clamp(resolvedHealth, 0, 30000));
+}
+
+int DynamicCollateralAdjustment::ApplyDCAForHealth(int baseRatio, int systemHealth)
+{
+    if (baseRatio <= 0 || systemHealth < 0 || systemHealth > 30000) return 0;
+    const int resolvedHealth = systemHealth;
     int multiplierBps = GetDCAMultiplierBps(resolvedHealth);
 
     util::int128_t adjustedRatio = static_cast<util::int128_t>(baseRatio) *

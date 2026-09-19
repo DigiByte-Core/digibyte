@@ -35,6 +35,7 @@ private Q_SLOTS:
     void positionsWidgetTierZeroTooltipIsCanonical();
     void overviewWidgetUsesProtocolAcronymTooltips();
     void walletModelAndSendValidatorRejectCrossNetworkDDAddresses();
+    void sendAddressValidatorTakesAnAddressTypedOneCharacterAtATime();
     void sendAmountValidatorUsesCentsPrecisionAndBounds();
     void mintWidgetUsdEquivalentUsesCentsPrecision();
     void positionsWidgetMissingOracleHealthIsUnavailable();

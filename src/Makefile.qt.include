@@ -183,6 +183,7 @@ DIGIBYTE_QT_H = \
   qt/winshutdownmonitor.h \
   qt/digidollartab.h \
   qt/paymasterconfirmation.h \
+  qt/paymasterwidget.h \
   qt/digidollar_qt_translate.h \
   qt/digidollarstatus.h \
   qt/digidollarmintwidget.h \
@@ -309,6 +310,7 @@ DIGIBYTE_QT_WALLET_CPP = \
   qt/walletview.cpp \
   qt/ddaddressbookpage.cpp \
   qt/digidollartab.cpp \
+  qt/paymasterwidget.cpp \
   qt/digidollarmintwidget.cpp \
   qt/digidollaroverviewwidget.cpp \
   qt/digidollarpositionswidget.cpp \

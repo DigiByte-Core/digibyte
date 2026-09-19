@@ -100,7 +100,7 @@ class PaymasterFailoverTest(DigiByteTestFramework):
 
         def send():
             return client.senddigidollar(
-                recipient, 1_000, "", 0, None, options)
+                recipient, 1_000, "", 0, None, "cents", options)
 
         initial = send()
         assert_equal(initial["provider_id"], expected_provider_id)
@@ -254,7 +254,7 @@ class PaymasterFailoverTest(DigiByteTestFramework):
 
         def fallback_send():
             return fallback_client.senddigidollar(
-                recipient_address, 1_000, "", 0, None, fallback_options)
+                recipient_address, 1_000, "", 0, None, "cents", fallback_options)
 
         first_attempt = fallback_send()
         assert_equal(

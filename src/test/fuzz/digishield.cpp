@@ -52,14 +52,6 @@ static CBlockIndex* MakeBlock(std::vector<std::unique_ptr<CBlockIndex>>& blocks,
     std::memcpy(hashes.back().begin(), buf, std::min(sizeof(buf), (size_t)32));
     block->phashBlock = &hashes.back();
 
-    // Initialize lastAlgoBlocks for GetLastBlockIndexForAlgoFast
-    for (int a = 0; a < NUM_ALGOS_IMPL; a++) {
-        block->lastAlgoBlocks[a] = pprev ? pprev->lastAlgoBlocks[a] : nullptr;
-    }
-    if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-        block->lastAlgoBlocks[algo] = block.get();
-    }
-
     CBlockIndex* raw = block.get();
     blocks.push_back(std::move(block));
     return raw;

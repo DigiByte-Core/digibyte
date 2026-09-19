@@ -264,7 +264,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
             -4, "PAYMASTER_NO_ELIGIBLE_OFFER",
             client.senddigidollar,
             recipient.getdigidollaraddress(), 1_000, "", 0, None,
-            isolated_options)
+            "cents", isolated_options)
 
         self.log.info("A direct current-current link restores discovery")
         self.connect_nodes(2, 0)
@@ -283,7 +283,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         direct_options["request_id"] = direct_request_id
         pending = client.senddigidollar(
             recipient.getdigidollaraddress(), 1_000, "", 0, None,
-            direct_options)
+            "cents", direct_options)
         assert_equal(pending["provider_id"], provider_id)
         assert_equal(pending["status"], "pending")
         direct_inputs = pending["reserved_user_inputs"]

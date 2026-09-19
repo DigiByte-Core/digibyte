@@ -43,23 +43,19 @@ QString DigiDollarReceiveRequestDialogStyleSheet(bool dark_theme)
             "  background-color: #0b2419;"
             "  color: #ffffff;"
             "}"
+            "QDialog#DigiDollarReceiveRequestDialog QWidget {"
+            "  background-color: transparent;"
+            "  color: #ffffff;"
+            "}"
             "QDialog#DigiDollarReceiveRequestDialog QLabel {"
             "  color: #ffffff;"
             "  background-color: transparent;"
             "}"
-            "QDialog#DigiDollarReceiveRequestDialog QRImageWidget[qrAvailable=\"true\"] {"
+            "QDialog#DigiDollarReceiveRequestDialog QRImageWidget {"
             "  background-color: #ffffff;"
-            "  color: #102018;"
             "  border: 2px solid #42d884;"
             "  border-radius: 4px;"
             "  padding: 10px;"
-            "}"
-            "QDialog#DigiDollarReceiveRequestDialog QRImageWidget[qrAvailable=\"false\"] {"
-            "  background-color: #113a29;"
-            "  color: #ffffff;"
-            "  border: 1px solid #42d884;"
-            "  border-radius: 4px;"
-            "  padding: 12px;"
             "}"
             "QDialog#DigiDollarReceiveRequestDialog QTextEdit,"
             "QDialog#DigiDollarReceiveRequestDialog QLineEdit {"
@@ -95,23 +91,19 @@ QString DigiDollarReceiveRequestDialogStyleSheet(bool dark_theme)
         "  background-color: #eef9f2;"
         "  color: #123f2b;"
         "}"
+        "QDialog#DigiDollarReceiveRequestDialog QWidget {"
+        "  background-color: transparent;"
+        "  color: #123f2b;"
+        "}"
         "QDialog#DigiDollarReceiveRequestDialog QLabel {"
         "  color: #123f2b;"
         "  background-color: transparent;"
         "}"
-        "QDialog#DigiDollarReceiveRequestDialog QRImageWidget[qrAvailable=\"true\"] {"
+        "QDialog#DigiDollarReceiveRequestDialog QRImageWidget {"
         "  background-color: #ffffff;"
-        "  color: #123f2b;"
         "  border: 2px solid #1f9d57;"
         "  border-radius: 4px;"
         "  padding: 10px;"
-        "}"
-        "QDialog#DigiDollarReceiveRequestDialog QRImageWidget[qrAvailable=\"false\"] {"
-        "  background-color: #ffffff;"
-        "  color: #123f2b;"
-        "  border: 1px solid #1f9d57;"
-        "  border-radius: 4px;"
-        "  padding: 12px;"
         "}"
         "QDialog#DigiDollarReceiveRequestDialog QTextEdit,"
         "QDialog#DigiDollarReceiveRequestDialog QLineEdit {"
@@ -179,9 +171,6 @@ void DigiDollarReceiveRequestDialog::setupUI()
 
     // Row 0: QR Code - centered, spanning both columns (EXACTLY like DGB)
     m_qrWidget = new QRImageWidget(this);
-    m_qrWidget->setObjectName(QStringLiteral("digidollarRequestQrCode"));
-    m_qrWidget->setAlignment(Qt::AlignCenter);
-    m_qrWidget->setTextInteractionFlags(Qt::NoTextInteraction);
     gridLayout->addWidget(m_qrWidget, row, 0, 1, 2, Qt::AlignHCenter);
     row++;
 
@@ -320,18 +309,10 @@ void DigiDollarReceiveRequestDialog::setInfo(const SendCoinsRecipient &info)
     QString uri = formatDDURI(info);
 
     // Set QR code
-    m_qrWidget->setMinimumSize(QSize(0, 0));
-    const bool qr_available = m_qrWidget->setQR(uri, info.address);
-    m_qrWidget->setProperty("qrAvailable", qr_available);
-    if (qr_available) {
-        // Protect the square QR image against style/layout compression.
-        m_qrWidget->setMinimumSize(m_qrWidget->sizeHint());
-        m_saveQRButton->setVisible(true);
+    if (m_qrWidget->setQR(uri, info.address)) {
         m_saveQRButton->setEnabled(true);
     } else {
-        m_qrWidget->setMinimumWidth(360);
-        m_qrWidget->setToolTip(tr("This build does not include QR code support. The address and payment URI below remain fully usable."));
-        m_saveQRButton->setVisible(false);
+        m_saveQRButton->setEnabled(false);
     }
 
     updateUriContent();
@@ -388,12 +369,6 @@ void DigiDollarReceiveRequestDialog::setInfo(const SendCoinsRecipient &info)
             });
         }
     }
-
-    // Re-polish labels which became visible after the initial theme pass and
-    // apply the qrAvailable dynamic-property selector immediately.
-    applyTheme();
-    style()->unpolish(this);
-    style()->polish(this);
 }
 
 void DigiDollarReceiveRequestDialog::updateDisplayUnit()

@@ -35,43 +35,25 @@
 #include <consensus/amount.h>
 #include <util/int128.h>
 #include <consensus/digidollar.h>
-#include <util/int128.h>
 #include <consensus/volatility.h>
-#include <util/int128.h>
 #include <chainparams.h>
-#include <util/int128.h>
 #include <digidollar/digidollar.h>
-#include <util/int128.h>
 #include <digidollar/scripts.h>
-#include <util/int128.h>
 #include <digidollar/validation.h>
-#include <util/int128.h>
 #include <key.h>
-#include <util/int128.h>
 #include <kernel/chainparams.h>
-#include <util/int128.h>
 #include <primitives/transaction.h>
-#include <util/int128.h>
 #include <pubkey.h>
-#include <util/int128.h>
 #include <script/script.h>
-#include <util/int128.h>
 #include <test/util/setup_common.h>
-#include <util/int128.h>
 #include <uint256.h>
-#include <util/int128.h>
 #include <util/chaintype.h>
-#include <util/int128.h>
 
 #include <boost/test/unit_test.hpp>
-#include <util/int128.h>
 
 #include <cstdint>
-#include <util/int128.h>
 #include <string>
-#include <util/int128.h>
 #include <vector>
-#include <util/int128.h>
 
 namespace {
 

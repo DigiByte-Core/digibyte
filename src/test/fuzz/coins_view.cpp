@@ -11,16 +11,21 @@
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <pubkey.h>
+#include <script/script.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
 #include <test/util/setup_common.h>
+#include <txdb.h>
 #include <validation.h>
 
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -32,6 +37,20 @@ bool operator==(const Coin& a, const Coin& b)
     if (a.IsSpent() && b.IsSpent()) return true;
     return a.fCoinBase == b.fCoinBase && a.nHeight == b.nHeight && a.out == b.out;
 }
+
+//! A distinct hash value made from a number, so the test data is easy to follow.
+//! Write the number into the first four hash bytes.
+uint256 HashFromNumber(uint32_t n)
+{
+    uint256 out;
+    unsigned char* bytes = out.begin();
+    bytes[0] = static_cast<unsigned char>(n);
+    bytes[1] = static_cast<unsigned char>(n >> 8);
+    bytes[2] = static_cast<unsigned char>(n >> 16);
+    bytes[3] = static_cast<unsigned char>(n >> 24);
+    return out;
+}
+
 } // namespace
 
 void initialize_coins_view()
@@ -170,13 +189,10 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
     }
 
     {
-        bool expected_code_path = false;
-        try {
-            (void)coins_view_cache.Cursor();
-        } catch (const std::logic_error&) {
-            expected_code_path = true;
-        }
-        assert(expected_code_path);
+        // This cache sits on a backing view that cannot be walked at all, so it
+        // has nothing to walk either and says so. Callers must check for that.
+        // A cache over a real coins database is walked further down.
+        assert(coins_view_cache.Cursor() == nullptr);
         (void)coins_view_cache.DynamicMemoryUsage();
         (void)coins_view_cache.EstimateSize();
         (void)coins_view_cache.GetBestBlock();
@@ -191,6 +207,121 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
         (void)backend_coins_view.EstimateSize();
         (void)backend_coins_view.GetBestBlock();
         (void)backend_coins_view.GetHeadBlocks();
+    }
+
+    {
+        // Walking a cache has to hand out every unspent coin exactly once and
+        // nothing else. A cache holds only the changes made since the last write
+        // to the database, so the walk has to combine the database contents with
+        // those changes. Build both, make and spend coins, then compare the walk
+        // against a plain map of what should be there.
+        CCoinsViewDB database{{.path = "coins-fuzz", .cache_bytes = 1 << 20, .memory_only = true}, {}};
+        CCoinsViewCache db_backed_cache{&database, /*deterministic=*/true};
+        std::map<COutPoint, Coin> model;
+        std::vector<COutPoint> known;
+        uint32_t block_counter = 0;
+        db_backed_cache.SetBestBlock(HashFromNumber(++block_counter));
+
+        auto make_coin = [&](uint32_t tag) {
+            std::vector<unsigned char> key_hash(20, 0);
+            key_hash[0] = static_cast<unsigned char>(tag);
+            CScript script;
+            script << OP_DUP << OP_HASH160 << key_hash << OP_EQUALVERIFY << OP_CHECKSIG;
+            return Coin{CTxOut{CAmount{1 + tag}, script}, int(1 + tag % 100), false};
+        };
+        auto add = [&](const COutPoint& outpoint, uint32_t tag) {
+            Coin coin = make_coin(tag);
+            model[outpoint] = coin;
+            db_backed_cache.AddCoin(outpoint, std::move(coin), /*possible_overwrite=*/true);
+            known.push_back(outpoint);
+        };
+
+        // Always do some work, so an input that has run out of bytes still
+        // checks a real mix: some coins only in the database, some only in the
+        // cache, and one the cache has hidden. The hidden one is the lowest
+        // outpoint, so it is the first thing the walk has to get right.
+        for (uint32_t i = 0; i < 8; ++i) add(COutPoint{HashFromNumber(i + 1), i % 3}, i);
+        const uint256 shared_hash = HashFromNumber(0x20);
+        for (uint32_t n : {128, 16512, 256}) add(COutPoint{shared_hash, n}, n);
+        db_backed_cache.SetBestBlock(HashFromNumber(++block_counter));
+        assert(db_backed_cache.Flush());
+        for (uint32_t i = 8; i < 12; ++i) add(COutPoint{HashFromNumber(i + 1), i % 3}, i);
+        db_backed_cache.SpendCoin(known.front());
+        model.erase(known.front());
+        const COutPoint spent{shared_hash, 256};
+        assert(db_backed_cache.SpendCoin(spent));
+        model.erase(spent);
+
+        LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300) {
+            CallOneOf(
+                fuzzed_data_provider,
+                [&] {
+                    const uint32_t tag = fuzzed_data_provider.ConsumeIntegral<uint8_t>();
+                    const uint32_t n = fuzzed_data_provider.ConsumeBool()
+                        ? fuzzed_data_provider.PickValueInArray<uint32_t>({0, 127, 128, 255, 256, 16511, 16512, 2113663, 2113664, 270549119, 270549120})
+                        : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+                    add(COutPoint{HashFromNumber(tag % 8 + 1), n}, tag);
+                },
+                [&] {
+                    if (known.empty()) return;
+                    const COutPoint outpoint = known[fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, known.size() - 1)];
+                    db_backed_cache.SpendCoin(outpoint);
+                    model.erase(outpoint);
+                },
+                [&] {
+                    db_backed_cache.SetBestBlock(HashFromNumber(++block_counter));
+                    assert(db_backed_cache.Flush());
+                },
+                [&] {
+                    db_backed_cache.SetBestBlock(HashFromNumber(++block_counter));
+                    assert(db_backed_cache.Sync());
+                });
+        }
+
+        std::unique_ptr<CCoinsViewCursor> cursor = db_backed_cache.Cursor();
+        assert(cursor);
+        // The walk covers the cache's own block, not the database's older one.
+        assert(cursor->GetBestBlock() == db_backed_cache.GetBestBlock());
+        std::map<COutPoint, Coin> walked;
+        std::vector<COutPoint> order;
+        size_t handed_out = 0;
+        for (; cursor->Valid(); cursor->Next()) {
+            COutPoint key;
+            Coin coin;
+            // A cursor that says it has a coin must be able to name it.
+            assert(cursor->GetKey(key));
+            assert(cursor->GetValue(coin));
+            assert(!coin.IsSpent());
+            order.push_back(key);
+            ++handed_out;
+            walked.emplace(key, coin);
+        }
+        cursor->CheckStatus();
+        // No coin handed out twice, and exactly the coins that should be there.
+        assert(handed_out == walked.size());
+        assert(walked.size() == model.size());
+        for (const auto& [outpoint, coin] : model) {
+            const auto it = walked.find(outpoint);
+            assert(it != walked.end());
+            assert(it->second == coin);
+        }
+
+        // Writing the cache must leave both the coin set and its order unchanged.
+        // The real database defines that order, including large output numbers.
+        cursor.reset();
+        assert(db_backed_cache.Flush());
+        cursor = database.Cursor();
+        assert(cursor);
+        for (const auto& expected : order) {
+            COutPoint key;
+            Coin coin;
+            assert(cursor->Valid());
+            assert(cursor->GetKey(key) && key == expected);
+            assert(cursor->GetValue(coin) && coin == model.at(expected));
+            cursor->Next();
+        }
+        assert(!cursor->Valid());
+        cursor->CheckStatus();
     }
 
     if (fuzzed_data_provider.ConsumeBool()) {

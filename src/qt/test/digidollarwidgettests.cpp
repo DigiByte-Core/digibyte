@@ -7,14 +7,21 @@
 
 #include <consensus/digidollar.h>
 #include <consensus/merkle.h>
+#include <consensus/volatility.h>
+#include <coins.h>
+#include <digidollar/health.h>
+#include <digidollar/scripts.h>
+#include <digidollar/validation.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <key_io.h>
+#include <node/interface_ui.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
 #include <paymaster/provider.h>
 #include <pow.h>
 #include <primitives/transaction.h>
+#include <script/interpreter.h>
 #include <qt/clientmodel.h>
 #include <qt/optionsmodel.h>
 #include <qt/paymasterconfirmation.h>
@@ -38,9 +45,11 @@
 #include <script/standard.h>
 #include <support/allocators/secure.h>
 #include <test/util/setup_common.h>
+#include <timedata.h>
 #include <validation.h>
 #include <wallet/ddcoincontrol.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -53,6 +62,8 @@
 #include <condition_variable>
 #include <future>
 #include <memory>
+#include <map>
+#include <optional>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -101,6 +112,7 @@
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QTabWidget>
 #include <QWheelEvent>
 #include <QWizard>
@@ -265,6 +277,19 @@ public:
         RemoveWallet(context, wallet, std::nullopt);
     }
 };
+
+std::map<uint256, int64_t> MintDescriptorNextIndexes(const wallet::CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    std::map<uint256, int64_t> indexes;
+    for (auto* manager : wallet.GetAllScriptPubKeyMans()) {
+        if (auto* descriptor = dynamic_cast<wallet::DescriptorScriptPubKeyMan*>(manager)) {
+            LOCK(descriptor->cs_desc_man);
+            indexes.emplace(descriptor->GetID(), descriptor->GetWalletDescriptor().next_index);
+        }
+    }
+    return indexes;
+}
 
 void TestOverviewWidget(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wallet)
 {
@@ -432,6 +457,42 @@ QDialog* FindVisibleDialogByTitle(const QString& title)
     }
     return nullptr;
 }
+
+// The redeem widget shows a "Confirm Redeem" box before it asks the wallet to
+// unlock. That box runs its own event loop, so the test cannot press Yes from
+// the line after the click. Call this first instead. It waits for the box and
+// presses Yes, which lets the test reach the unlock step.
+void AcceptConfirmRedeemDialogWhenShown()
+{
+    QTimer::singleShot(0, []() {
+        QMessageBox* box = nullptr;
+        for (int attempt = 0; attempt < 40 && !box; ++attempt) {
+            box = qobject_cast<QMessageBox*>(FindVisibleDialogByTitle(QStringLiteral("Confirm Redeem")));
+            if (!box) QTest::qWait(25);
+        }
+        QVERIFY2(box != nullptr, "Confirm Redeem dialog did not open");
+        QAbstractButton* yes = box->button(QMessageBox::Yes);
+        QVERIFY2(yes != nullptr, "Confirm Redeem dialog has no Yes button");
+        yes->click();
+    });
+}
+
+// Adds a wallet to the node's wallet list so that wallet RPC calls can find it
+// by name, and takes it out again on every exit path. A test that fails early
+// and leaves the wallet in that list hangs when the fixture shuts down.
+struct ScopedWalletRegistration {
+    WalletContext& context;
+    std::shared_ptr<wallet::CWallet> wallet;
+
+    ScopedWalletRegistration(WalletContext& context_in, std::shared_ptr<wallet::CWallet> wallet_in)
+        : context(context_in), wallet(std::move(wallet_in))
+    {
+        AddWallet(context, wallet);
+    }
+    ~ScopedWalletRegistration() { RemoveWallet(context, wallet, std::nullopt); }
+    ScopedWalletRegistration(const ScopedWalletRegistration&) = delete;
+    ScopedWalletRegistration& operator=(const ScopedWalletRegistration&) = delete;
+};
 
 bool SelectCoinControlDialogInput(const COutPoint& outpoint, QString& error)
 {
@@ -991,9 +1052,18 @@ void DigiDollarWidgetTests::mintWidgetUsesChainParamMintLimits()
     pos = 0;
     QCOMPARE(amountEdit->validator()->validate(maxAmount, pos), QValidator::Acceptable);
 
+    // An amount over the limit can be typed but is never acceptable, the same
+    // way an amount under the limit behaves. If the box refused the keystroke
+    // the number would silently change under the user's hands, and the warning
+    // line below the box would never get a chance to say what is wrong.
     QString aboveMax = QString::number((ddParams.maxMintAmount + 1) / 100.0, 'f', 2);
     pos = 0;
-    QCOMPARE(amountEdit->validator()->validate(aboveMax, pos), QValidator::Invalid);
+    QCOMPARE(amountEdit->validator()->validate(aboveMax, pos), QValidator::Intermediate);
+    amountEdit->setText(aboveMax);
+    QCoreApplication::processEvents();
+    QCOMPARE(amountEdit->text(), aboveMax);
+    QVERIFY2(warningLabel->text().contains("Maximum mint amount is $"),
+             qPrintable(warningLabel->text()));
 }
 
 void DigiDollarWidgetTests::mintConfirmationCopyExplainsConfirmationBuffer()
@@ -1264,10 +1334,18 @@ void DigiDollarWidgetTests::qtFailedMintAbandonsRejectedDraft()
     QVERIFY2(result.status != WalletModel::OK,
              "mint unexpectedly succeeded despite a forced commit rejection");
 
-    // No vault position may be created for a rejected mint.
+    // No live vault may be created for a rejected mint. The mint writes its
+    // position record before it sends the transaction, so the record is on
+    // disk by the time the send is refused. It is kept, but marked inactive,
+    // so that a reorg or a late confirmation can bring the vault back; it is
+    // no longer counted as an open position and holds no collateral.
     DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
     QVERIFY(dd_wallet != nullptr);
-    QCOMPARE(dd_wallet->GetDDTimeLocks(/*active_only=*/false).size(), static_cast<size_t>(0));
+    QCOMPARE(dd_wallet->GetDDTimeLocks(/*active_only=*/true).size(), static_cast<size_t>(0));
+    QCOMPARE(dd_wallet->GetLockedCollateral(), CAmount(0));
+    for (const WalletCollateralPosition& position : dd_wallet->GetDDTimeLocks(/*active_only=*/false)) {
+        QVERIFY(!position.is_active);
+    }
 
     // Crucially: no rejected mint draft may linger as a live (non-abandoned) wallet
     // transaction that generic history would render as phantom DigiDollar activity.
@@ -1733,7 +1811,7 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForPrivateKeyDisabledWa
     QVERIFY(redeemButton->toolTip().contains("Watch-only"));
 }
 
-void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForLockedEncryptedWallet()
+void DigiDollarWidgetTests::positionsWidgetEnablesRedeemForLockedEncryptedWallet()
 {
 #ifdef Q_OS_MACOS
     if (QApplication::platformName() == "minimal") {
@@ -1774,9 +1852,20 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForLockedEncryptedWalle
     QPushButton* redeemButton = qobject_cast<QPushButton*>(
         table->cellWidget(0, DigiDollarPositionsWidget::COL_ACTIONS));
     QVERIFY(redeemButton != nullptr);
-    QCOMPARE(redeemButton->text(), QString("Wallet Locked"));
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    // A locked wallet still holds its keys, so a vault past its lock stays
+    // clickable. The Redeem tab asks for the passphrase when the user clicks
+    // Redeem there.
+    QCOMPARE(redeemButton->text(), QString("Redeem"));
+    QVERIFY2(redeemButton->isEnabled(), "locked wallet must keep the Vault tab's Redeem button enabled");
+    QVERIFY(redeemButton->toolTip().contains("passphrase"));
+
+    // Clicking it hands the vault to the Redeem tab, where the unlock prompt lives.
+    QSignalSpy redeemRequests(&positionsWidget, &DigiDollarPositionsWidget::redeemRequested);
+    redeemButton->click();
+    QCoreApplication::processEvents();
+    QCOMPARE(redeemRequests.count(), 1);
+    QCOMPARE(redeemRequests.at(0).at(0).toString(), QString::fromStdString(uint256::ONE.GetHex()));
+    QVERIFY(wallet->IsLocked());
 }
 
 void DigiDollarWidgetTests::redeemWidgetButtonStateNoSelection()
@@ -1967,8 +2056,7 @@ void DigiDollarWidgetTests::redeemWidgetButtonStatePrivateKeyDisabledWallet()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    WalletContext& context = *m_node.walletLoader().context();
-    AddWallet(context, wallet);
+    ScopedWalletRegistration registration(*m_node.walletLoader().context(), wallet);
 
     DigiDollarRedeemWidget redeemWidget;
     redeemWidget.setWalletModel(mini_gui.walletModel.get());
@@ -1976,12 +2064,21 @@ void DigiDollarWidgetTests::redeemWidgetButtonStatePrivateKeyDisabledWallet()
     redeemWidget.setPosition(QString::fromStdString(uint256::ONE.GetHex()));
     QCoreApplication::processEvents();
 
-    RemoveWallet(context, wallet, std::nullopt);
-
     QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
     QVERIFY(redeemButton != nullptr);
+    QVERIFY2(!redeemWidget.canWalletSignRedemption(), "a wallet without private keys can never sign");
     QVERIFY(!redeemButton->isEnabled());
+    QCOMPARE(redeemButton->text(), QString("Cannot Redeem"));
     QVERIFY(redeemButton->toolTip().contains("Watch-only"));
+
+    // A disabled button swallows the click. No unlock prompt, no redemption.
+    QSignalSpy unlockRequests(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy messages(&redeemWidget, &DigiDollarRedeemWidget::message);
+    redeemButton->click();
+    QCoreApplication::processEvents();
+    QCOMPARE(unlockRequests.count(), 0);
+    QCOMPARE(messages.count(), 0);
+
     QLabel* validationLabel = redeemWidget.findChild<QLabel*>("positionValidationLabel");
     QVERIFY(validationLabel != nullptr);
     QVERIFY(validationLabel->toolTip().contains("Watch-only"));
@@ -2005,9 +2102,11 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWallet()
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-wallet-locked");
     AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
-    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 10000);
+    // Plenty of $DD so the balance rule cannot be what disables the button here.
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
     SecureString passphrase{"qt-dd-redeem-wallet-locked"};
     QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
@@ -2022,13 +2121,148 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateLockedWallet()
 
     RemoveWallet(context, wallet, std::nullopt);
 
+    // A locked wallet still holds its private keys. The button stays enabled,
+    // and the text tells the user the click will ask for the passphrase, instead
+    // of sending them to the console to unlock first.
     QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
     QVERIFY(redeemButton != nullptr);
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    QCOMPARE(mini_gui.walletModel->getEncryptionStatus(), WalletModel::Locked);
+    QVERIFY2(redeemWidget.canWalletSignRedemption(), "a locked wallet can sign once the passphrase is entered");
+    QVERIFY2(redeemButton->isEnabled(), "locked wallet must keep the Redeem button enabled");
+    QCOMPARE(redeemButton->text(), QString("Redeem && Unlock DGB"));
+    QVERIFY(redeemButton->toolTip().contains("passphrase"));
     QLabel* validationLabel = redeemWidget.findChild<QLabel*>("positionValidationLabel");
     QVERIFY(validationLabel != nullptr);
-    QVERIFY(validationLabel->toolTip().contains("Unlock"));
+    QVERIFY(validationLabel->text().contains("passphrase"));
+    QVERIFY(validationLabel->toolTip().contains("passphrase"));
+}
+
+void DigiDollarWidgetTests::redeemWidgetLockedWalletClickRequestsUnlock()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-locked-click");
+    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
+    SecureString passphrase{"qt-dd-redeem-locked-click"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    ScopedWalletRegistration registration(*m_node.walletLoader().context(), wallet);
+
+    DigiDollarRedeemWidget redeemWidget;
+    redeemWidget.setWalletModel(mini_gui.walletModel.get());
+    redeemWidget.setClientModel(mini_gui.clientModel.get());
+    redeemWidget.setPosition(QString::fromStdString(uint256::ONE.GetHex()));
+    QCoreApplication::processEvents();
+
+    QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
+    QVERIFY(redeemButton != nullptr);
+    QVERIFY2(redeemButton->isEnabled(), "locked wallet must keep the Redeem button enabled");
+
+    // Stand in for the passphrase dialog. The wallet model asks the GUI to
+    // unlock, and this handler answers with the right passphrase.
+    QSignalSpy unlockRequests(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    connect(mini_gui.walletModel.get(), &WalletModel::requireUnlock, &redeemWidget, [&]() {
+        QVERIFY(mini_gui.walletModel->setWalletLocked(false, passphrase));
+    });
+    QSignalSpy messages(&redeemWidget, &DigiDollarRedeemWidget::message);
+    QSignalSpy completions(&redeemWidget, &DigiDollarRedeemWidget::redemptionCompleted);
+
+    AcceptConfirmRedeemDialogWhenShown();
+    redeemButton->click();
+    QCoreApplication::processEvents();
+
+    QCOMPARE(unlockRequests.count(), 1);
+    // The redemption was attempted after the unlock. This test has no wallet RPC
+    // server, so the attempt fails and says so through message(). The balance
+    // check reports before any unlock, so a different title here proves the click
+    // got past it.
+    QCOMPARE(messages.count(), 1);
+    QVERIFY2(messages.at(0).at(0).toString() != QStringLiteral("Insufficient DigiDollar Balance"),
+             "redemption must get past the balance check before asking to unlock");
+    QCOMPARE(completions.count(), 0);
+    QVERIFY2(wallet->IsLocked(), "the unlock context must relock the wallet once the attempt is over");
+}
+
+void DigiDollarWidgetTests::redeemWidgetCancelledUnlockLeavesFormUnchanged()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-redeem-unlock-cancel");
+    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 100000000);
+    SecureString passphrase{"qt-dd-redeem-unlock-cancel"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    ScopedWalletRegistration registration(*m_node.walletLoader().context(), wallet);
+
+    DigiDollarRedeemWidget redeemWidget;
+    redeemWidget.setWalletModel(mini_gui.walletModel.get());
+    redeemWidget.setClientModel(mini_gui.clientModel.get());
+    const QString positionHex = QString::fromStdString(uint256::ONE.GetHex());
+    redeemWidget.setPosition(positionHex);
+    QCoreApplication::processEvents();
+
+    QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
+    QVERIFY(redeemButton != nullptr);
+    QVERIFY2(redeemButton->isEnabled(), "locked wallet must keep the Redeem button enabled");
+    QLineEdit* positionIdEdit = redeemWidget.findChild<QLineEdit*>("positionIdEdit");
+    QLineEdit* amountEdit = redeemWidget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(positionIdEdit != nullptr);
+    QVERIFY(amountEdit != nullptr);
+    const QString amountBefore = amountEdit->text();
+    QCOMPARE(amountBefore, QStringLiteral("100.00"));
+
+    // Nobody answers the unlock request. That is what the wallet model sees when
+    // the user closes the passphrase dialog. The wallet stays locked.
+    QSignalSpy unlockRequests(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy messages(&redeemWidget, &DigiDollarRedeemWidget::message);
+    QSignalSpy completions(&redeemWidget, &DigiDollarRedeemWidget::redemptionCompleted);
+
+    AcceptConfirmRedeemDialogWhenShown();
+    redeemButton->click();
+    QCoreApplication::processEvents();
+
+    QCOMPARE(unlockRequests.count(), 1);
+    QCOMPARE(messages.count(), 0);
+    QCOMPARE(completions.count(), 0);
+    QVERIFY(wallet->IsLocked());
+    // The form is untouched and still ready for another try.
+    QCOMPARE(positionIdEdit->text(), positionHex);
+    QCOMPARE(amountEdit->text(), amountBefore);
+    QVERIFY(redeemWidget.m_positionFound);
+    QVERIFY(redeemButton->isEnabled());
+    QCOMPARE(redeemButton->text(), QString("Redeem && Unlock DGB"));
 }
 
 void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
@@ -2055,8 +2289,7 @@ void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    WalletContext& context = *m_node.walletLoader().context();
-    AddWallet(context, wallet);
+    ScopedWalletRegistration registration(*m_node.walletLoader().context(), wallet);
 
     DigiDollarRedeemWidget redeemWidget;
     redeemWidget.setWalletModel(mini_gui.walletModel.get());
@@ -2066,8 +2299,9 @@ void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
 
     QPushButton* redeemButton = redeemWidget.findChild<QPushButton*>("redeemButton");
     QVERIFY(redeemButton != nullptr);
-    QVERIFY(!redeemButton->isEnabled());
-    QVERIFY(redeemButton->toolTip().contains("Unlock"));
+    // Locked: still enabled, and the text warns that the click asks for the passphrase.
+    QVERIFY(redeemButton->isEnabled());
+    QVERIFY(redeemButton->toolTip().contains("passphrase"));
 
     QVERIFY(mini_gui.walletModel->setWalletLocked(false, passphrase));
     mini_gui.walletModel->updateStatus();
@@ -2082,8 +2316,8 @@ void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
     QVERIFY(redeemButton->isEnabled());
     QCOMPARE(redeemButton->text(), QString("Redeem && Unlock DGB"));
     QVERIFY(redeemButton->toolTip().contains("Ready to redeem"));
-
-    RemoveWallet(context, wallet, std::nullopt);
+    // Unlocked: the passphrase warning is gone.
+    QVERIFY(!redeemButton->toolTip().contains("passphrase"));
 }
 
 void DigiDollarWidgetTests::redeemWidgetButtonStateReady()
@@ -2141,6 +2375,264 @@ void DigiDollarWidgetTests::redeemWidgetButtonStateReady()
     QVERIFY(validationLabel != nullptr);
     QVERIFY(validationLabel->text().contains("ready", Qt::CaseInsensitive));
     QVERIFY(validationLabel->toolTip().contains("Ready to redeem"));
+}
+
+void DigiDollarWidgetTests::redeemWidgetCanonicalHealthDoesNotRequireCirculatingSupply()
+{
+    TestChain100Setup test(ChainType::REGTEST,
+        {"-digidollaractivationheight=100", "-ddthawdayheight=400", "-digidollarstatsindex=0"});
+    struct ResetOracleState {
+        ~ResetOracleState()
+        {
+            OracleBundleManager::GetInstance().Clear();
+            MockOracleManager::GetInstance().Reset();
+            DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+            DigiDollar::SystemHealthMonitor::ResetMetrics();
+        }
+    } reset_oracle;
+    OracleBundleManager::GetInstance().Clear();
+    MockOracleManager::GetInstance().Reset();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    DigiDollar::SystemHealthMonitor::ResetMetrics();
+
+    const CScript coinbase_script = GetScriptForRawPubKey(test.coinbaseKey.GetPubKey());
+    std::vector<CMutableTransaction> funding;
+    for (int i = 0; i < 4; ++i) {
+        funding.push_back(test.CreateValidMempoolTransaction(test.m_coinbase_txns[i], 0, i + 1,
+            test.coinbaseKey, CScript() << OP_TRUE, 31 * COIN, false));
+    }
+    const auto funding_block = test.CreateAndProcessBlock(funding, coinbase_script);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == funding_block.GetHash());
+    QCOMPARE(funding_block.vtx.size(), size_t{5});
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+
+    CKey owner;
+    owner.MakeNewKey(true);
+    const XOnlyPubKey owner_pubkey{owner.GetPubKey()};
+    const int mint_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height() + 1);
+    DigiDollar::MintParams mint_params;
+    mint_params.ddAmount = 100;
+    mint_params.lockHeight = mint_height + DigiDollar::LockDaysToBlocks(0);
+    mint_params.ownerKey = owner_pubkey;
+    mint_params.internalKey = DigiDollar::GetCollateralNUMSKey();
+    mint_params.oracleKeys = DigiDollar::GetOracleKeys(15);
+    std::vector<CMutableTransaction> mints;
+    for (int i = 0; i < 3; ++i) {
+        CMutableTransaction mint;
+        mint.SetDigiDollarType(DD_TX_MINT);
+        mint.vin.emplace_back(COutPoint{funding_block.vtx[i + 1]->GetHash(), 0});
+        mint.vout.emplace_back(30 * COIN, DigiDollar::CreateCollateralP2TR(mint_params));
+        mint.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner_pubkey, 100));
+        mint.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(1) << CScriptNum(100) << CScriptNum(mint_params.lockHeight) << CScriptNum(0)
+            << std::vector<unsigned char>(owner_pubkey.begin(), owner_pubkey.end()));
+        mints.push_back(std::move(mint));
+    }
+    const auto minted = test.CreateAndProcessBlock(mints, coinbase_script);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == minted.GetHash());
+    QCOMPARE(minted.vtx.size(), size_t{4});
+    for (int height = mint_height + 1; height <= mint_params.lockHeight + 1; ++height) {
+        const auto block = test.CreateAndProcessBlock({}, coinbase_script);
+        QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    }
+
+    // Mining through the timelock crosses oracle epochs. Commit a fresh signed
+    // quote for the redemption's current epoch.
+    const int redemption_quote_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height() + 1);
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    QCOMPARE(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()), redemption_quote_height);
+
+    // A legacy redemption can leave change whose amount cannot be counted: its
+    // metadata appears twice, so no node can tell which record is the amount.
+    // Every node still accepts the block. A separate token remains known and
+    // can fund another vault's redemption.
+    CMutableTransaction legacy_redeem;
+    legacy_redeem.SetDigiDollarType(DD_TX_REDEEM);
+    legacy_redeem.nLockTime = mint_params.lockHeight;
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[1]->GetHash(), 0}, CScript{}, 0xfffffffe);
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[1]->GetHash(), 1});
+    legacy_redeem.vin.emplace_back(COutPoint{minted.vtx[2]->GetHash(), 1});
+    legacy_redeem.vin.emplace_back(COutPoint{funding_block.vtx[4]->GetHash(), 0});
+    legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
+    legacy_redeem.vout.emplace_back(30 * COIN, CScript() << OP_TRUE);
+    legacy_redeem.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(owner_pubkey, 100));
+    const CScript legacy_metadata = CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                              << CScriptNum(3) << CScriptNum(100);
+    legacy_redeem.vout.emplace_back(0, legacy_metadata);
+    legacy_redeem.vout.emplace_back(1, legacy_metadata);
+    const CScript normal = DigiDollar::CreateNormalRedemptionPath(mint_params);
+    TaprootBuilder tree;
+    tree.Add(1, normal, 0xc0);
+    tree.Add(1, DigiDollar::CreateERRPath(mint_params), 0xc0);
+    tree.Finalize(mint_params.internalKey);
+    QVERIFY(tree.IsComplete());
+    const auto spend_data = tree.GetSpendData();
+    const auto paths = spend_data.scripts.find({normal, 0xc0});
+    QVERIFY(paths != spend_data.scripts.end());
+    QVERIFY(!paths->second.empty());
+    PrecomputedTransactionData data;
+    data.Init(legacy_redeem, std::vector<CTxOut>{minted.vtx[1]->vout[0], minted.vtx[1]->vout[1],
+        minted.vtx[2]->vout[1], funding_block.vtx[4]->vout[0]}, true);
+    ScriptExecutionData execution;
+    execution.m_annex_init = true;
+    execution.m_annex_present = false;
+    execution.m_tapleaf_hash_init = true;
+    execution.m_tapleaf_hash = ComputeTapleafHash(0xc0, normal);
+    execution.m_codeseparator_pos_init = true;
+    execution.m_codeseparator_pos = 0xffffffff;
+    uint256 hash;
+    std::vector<unsigned char> signature(64);
+    QVERIFY(SignatureHashSchnorr(hash, execution, legacy_redeem, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT,
+                                data, MissingDataBehavior::ASSERT_FAIL));
+    QVERIFY(owner.SignSchnorr(hash, signature, nullptr, uint256{}));
+    legacy_redeem.vin[0].scriptWitness.stack = {signature, std::vector<unsigned char>(normal.begin(), normal.end()),
+                                             *paths->second.begin()};
+    const uint256 no_script_tree;
+    for (int i = 1; i <= 2; ++i) {
+        QVERIFY(SignatureHashSchnorr(hash, execution, legacy_redeem, i, SIGHASH_DEFAULT, SigVersion::TAPROOT,
+                                    data, MissingDataBehavior::ASSERT_FAIL));
+        QVERIFY(owner.SignSchnorr(hash, signature, &no_script_tree, uint256{}));
+        legacy_redeem.vin[i].scriptWitness.stack = {signature};
+    }
+    auto& chainstate = test.m_node.chainman->ActiveChainstate();
+    const auto redeemed = test.CreateBlock({legacy_redeem}, coinbase_script, chainstate);
+    BlockValidationState redemption_state;
+    const bool redemption_valid = WITH_LOCK(cs_main, return TestBlockValidity(redemption_state, Params(), chainstate,
+        redeemed, chainstate.m_chain.Tip(), GetAdjustedTime));
+    QVERIFY2(redemption_valid, redemption_state.ToString().c_str());
+    QVERIFY(test.m_node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(redeemed), true, true, nullptr));
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == redeemed.GetHash());
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()) < 400);
+    const int redeemed_height = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height());
+    for (int height = redeemed_height + 1; height <= 400; ++height) {
+        const auto block = test.CreateAndProcessBlock({}, coinbase_script);
+        QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    }
+    // The candidate health request needs a quote for the epoch after activation.
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    QCOMPARE(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Height()), 401);
+    const auto canonical = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip().GetDigiDollarState());
+    QVERIFY(canonical && canonical->history_checked);
+    QCOMPARE(canonical->open_vault_principal, CAmount{200});
+    QCOMPARE(canonical->collateral, CAmount{60 * COIN});
+    QCOMPARE(canonical->active_vaults, uint64_t{2});
+
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-unknown-supply");
+    const auto position_id = minted.vtx[2]->GetHash();
+    wallet->EnsureDDWallet();
+    auto* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet);
+    WalletCollateralPosition position;
+    QVERIFY(dd_wallet->ExtractPositionFromMintTx(*minted.vtx[2], mint_height, position));
+    // The vault remains open after its token was spent. Store only the vault
+    // metadata; adding a new mint position would also add its spent token.
+    QVERIFY(dd_wallet->WriteDDTimeLock(position));
+    const COutPoint spent_position_token{position_id, 1};
+    QVERIFY(!WITH_LOCK(cs_main, return chainstate.CoinsTip().HaveCoin(spent_position_token)));
+    QVERIFY(WITH_LOCK(cs_main, return chainstate.CoinsTip().HaveCoin(COutPoint{position_id, 0})));
+    QVERIFY(!dd_wallet->HasDDUTXO(spent_position_token));
+    dd_wallet->StoreOwnerKey(position_id, owner);
+    const auto token_key = owner_pubkey.CreateTapTweak(nullptr);
+    QVERIFY(token_key);
+    dd_wallet->StoreAddressKey(token_key->first, owner);
+    {
+        LOCK(wallet->cs_wallet);
+        // Keep wallet confirmation depths aligned with the accepted chain.
+        wallet->SetLastBlockProcessed(401, canonical->best_block);
+        wallet->AddToWallet(minted.vtx[3], wallet::TxStateConfirmed{minted.GetHash(), mint_height, 3});
+    }
+    const COutPoint known_token{minted.vtx[3]->GetHash(), 1};
+    dd_wallet->AddDDUTXO(known_token, 100);
+    QVERIFY(WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip().HaveCoin(known_token)));
+    CKey spending_key;
+    QVERIFY(dd_wallet->GetDDOutputSpendingKey(minted.vtx[3]->vout[1], spending_key));
+    QVERIFY(spending_key.GetPubKey() == owner.GetPubKey());
+    QCOMPARE(dd_wallet->GetTotalDDBalance(), CAmount{100});
+    const auto spendable_tokens = dd_wallet->GetDDUTXOs();
+    QCOMPARE(spendable_tokens.size(), size_t{1});
+    QVERIFY(spendable_tokens.front().outpoint == known_token);
+    QCOMPARE(spendable_tokens.front().dd_amount, CAmount{100});
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    WalletContext& context = *m_node.walletLoader().context();
+    AddWallet(context, wallet);
+    struct RemoveTestWallet {
+        WalletContext& context;
+        const std::shared_ptr<wallet::CWallet>& wallet;
+        ~RemoveTestWallet() { RemoveWallet(context, wallet, std::nullopt); }
+    } remove_wallet{context, wallet};
+
+    const UniValue params(UniValue::VARR);
+    bool supply_unavailable{false};
+    try {
+        mini_gui.walletModel->executeRpc("getdigidollarstats", params);
+    } catch (const UniValue& error) {
+        supply_unavailable = error["message"].get_str().find("invalid creating token metadata") != std::string::npos;
+    }
+    QVERIFY2(supply_unavailable, "Legacy token change must leave circulating supply unavailable");
+    const auto protection = mini_gui.walletModel->executeRpc("getprotectionstatus", params);
+    QVERIFY(protection["next_block_health"]["ready"].get_bool());
+    QVERIFY(protection["next_block_health"]["health_percentage"].getInt<int>() >= 100);
+
+    DigiDollarRedeemWidget redeem_widget;
+    redeem_widget.setWalletModel(mini_gui.walletModel.get());
+    redeem_widget.setClientModel(mini_gui.clientModel.get());
+    redeem_widget.m_selectedPositionId = QString::fromStdString(position_id.GetHex());
+    redeem_widget.m_positionIdEdit->setText(redeem_widget.m_selectedPositionId);
+    redeem_widget.m_positionFound = true;
+    redeem_widget.m_positionDDMinted = 1.0;
+    redeem_widget.m_positionDGBCollateral = 30.0;
+    redeem_widget.m_positionLockTier = 0;
+    redeem_widget.m_positionBlocksRemaining = 0;
+    redeem_widget.m_redeemableAmount = 1.0;
+    redeem_widget.m_amountEdit->setText(QStringLiteral("1.00"));
+    QVERIFY(redeem_widget.validateDDBalance());
+    redeem_widget.updateRedeemButtons();
+    QVERIFY(redeem_widget.m_redeemButton->isEnabled());
+
+    bool confirmation_seen{false};
+    QTimer close_confirmation;
+    connect(&close_confirmation, &QTimer::timeout, [&] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            confirmation_seen = dialog->windowTitle() == QStringLiteral("Confirm Redeem");
+            dialog->done(QMessageBox::No);
+        }
+    });
+    close_confirmation.start(0);
+    redeem_widget.onRedeemClicked();
+    close_confirmation.stop();
+    QVERIFY(confirmation_seen);
+
+    auto& coins = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChainstate().CoinsTip());
+    const auto saved = WITH_LOCK(cs_main, return coins.GetDigiDollarState());
+    QVERIFY(saved);
+    {
+        LOCK(cs_main);
+        auto unchecked = *saved;
+        unchecked.history_checked = false;
+        coins.SetDigiDollarState(unchecked);
+    }
+    struct RestoreCanonicalState {
+        CCoinsViewCache& coins;
+        std::optional<DigiDollar::ChainstateHealth> saved;
+        ~RestoreCanonicalState() { LOCK(cs_main); coins.SetDigiDollarState(saved); }
+    } restore{coins, saved};
+    QVERIFY(!mini_gui.walletModel->executeRpc("getprotectionstatus", params)["next_block_health"]["ready"].get_bool());
+    QVERIFY(!redeem_widget.validateDDBalance());
+    redeem_widget.updateRedeemButtons();
+    QVERIFY(!redeem_widget.m_redeemButton->isEnabled());
+    QSignalSpy messages(&redeem_widget, &DigiDollarRedeemWidget::message);
+    confirmation_seen = false;
+    close_confirmation.start(0);
+    redeem_widget.onRedeemClicked();
+    close_confirmation.stop();
+    QVERIFY(!confirmation_seen);
+    QCOMPARE(messages.count(), 1);
+    QCOMPARE(messages.at(0).at(0).toString(), QStringLiteral("Redemption unavailable"));
 }
 
 void DigiDollarWidgetTests::positionsWidgetLockedTooltipShowsRemainingBlocksAndTime()
@@ -2259,6 +2751,194 @@ void DigiDollarWidgetTests::mintDigiDollarRejectsPrivateKeyDisabledWallet()
     // so the txid/positionId remain empty for the rejected attempt.
     QVERIFY(result.txid.isEmpty());
     QVERIFY(result.positionId.isEmpty());
+}
+
+void DigiDollarWidgetTests::mintWidgetRejectsUnsupportedWalletBeforeConfirmation_data()
+{
+    QTest::addColumn<QString>("kind");
+    QTest::addColumn<QString>("reason");
+    QTest::newRow("legacy") << QStringLiteral("legacy") << QStringLiteral("legacy wallet cannot mint DigiDollar");
+    QTest::newRow("watch-only") << QStringLiteral("watch-only") << QStringLiteral("Private keys are disabled");
+    QTest::newRow("blank") << QStringLiteral("blank") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("missing-taproot") << QStringLiteral("missing-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("public-taproot") << QStringLiteral("public-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("nonranged-taproot") << QStringLiteral("nonranged-taproot") << QStringLiteral("cannot generate DigiDollar owner keys");
+    QTest::newRow("missing-change") << QStringLiteral("missing-change") << QStringLiteral("cannot generate the change addresses");
+    QTest::newRow("public-change") << QStringLiteral("public-change") << QStringLiteral("cannot generate the change addresses");
+}
+
+void DigiDollarWidgetTests::mintWidgetRejectsUnsupportedWalletBeforeConfirmation()
+{
+    QFETCH(QString, kind);
+    QFETCH(QString, reason);
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    std::shared_ptr<wallet::CWallet> wallet;
+    if (kind == "legacy" || kind == "blank") {
+        wallet = std::make_shared<wallet::CWallet>(
+            test.m_node.chain.get(), "unsupported-mint", CreateMockableWalletDatabase());
+        wallet->LoadWallet();
+        if (kind == "blank") wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS | wallet::WALLET_FLAG_BLANK_WALLET);
+    } else {
+        wallet = SetupDescriptorsWallet(m_node, test);
+    }
+    if (kind == "watch-only") wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    if (kind == "missing-taproot" || kind == "missing-change") {
+        LOCK(wallet->cs_wallet);
+        const bool internal = kind == "missing-change";
+        const OutputType type = internal ? OutputType::BECH32 : OutputType::BECH32M;
+        auto* manager = wallet->GetScriptPubKeyMan(type, internal);
+        QVERIFY(manager);
+        wallet->DeactivateScriptPubKeyMan(manager->GetID(), type, internal);
+    }
+    if (kind == "public-taproot" || kind == "public-change" || kind == "nonranged-taproot") {
+        CExtKey master;
+        master.SetSeed(MakeByteSpan(uint256::ONE));
+        const std::string public_key = EncodeExtPubKey(master.Neuter());
+        const bool internal = kind == "public-change";
+        const std::string text = internal ? "wpkh(" + public_key + "/0/*)" :
+            (kind == "public-taproot" ? "tr(" + public_key + "/0/*)" : "tr(" + EncodeSecret(master.key) + ")");
+        FlatSigningProvider provider;
+        std::string error;
+        auto descriptor = Parse(text, provider, error, /*require_checksum=*/false);
+        QVERIFY2(descriptor, error.c_str());
+        wallet::WalletDescriptor record(std::move(descriptor), 0, 0, 2, 0);
+        LOCK(wallet->cs_wallet);
+        auto* manager = wallet->AddWalletDescriptor(record, provider, "", internal);
+        QVERIFY(manager);
+        wallet->AddActiveScriptPubKeyMan(manager->GetID(), internal ? OutputType::BECH32 : OutputType::BECH32M, internal);
+    }
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    DigiDollarMintWidget widget;
+    widget.setWalletModel(mini_gui.walletModel.get());
+    widget.setClientModel(mini_gui.clientModel.get());
+    auto* amount = widget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(amount);
+    amount->setText("100.00");
+
+    const auto before = MintDescriptorNextIndexes(*wallet);
+    const size_t transaction_count = wallet->mapWallet.size();
+    QSignalSpy messages(&widget, &DigiDollarMintWidget::message);
+    QSignalSpy unlocks(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    int confirmation_count = 0;
+    QTimer close_unexpected_dialogs;
+    connect(&close_unexpected_dialogs, &QTimer::timeout, [&]() {
+        for (QWidget* top : QApplication::topLevelWidgets()) {
+            if (auto* dialog = qobject_cast<QMessageBox*>(top); dialog && dialog->isVisible()) {
+                ++confirmation_count;
+                dialog->done(QMessageBox::No);
+            }
+        }
+    });
+    close_unexpected_dialogs.start(0);
+    QVERIFY(QMetaObject::invokeMethod(&widget, "onMintClicked", Qt::DirectConnection));
+    close_unexpected_dialogs.stop();
+    QCOMPARE(confirmation_count, 0);
+    QCOMPARE(unlocks.count(), 0);
+    QCOMPARE(messages.count(), 1);
+    QCOMPARE(messages.at(0).at(0).toString(), QStringLiteral("Cannot Mint DigiDollar"));
+    QVERIFY2(messages.at(0).at(1).toString().contains(reason), qPrintable(messages.at(0).at(1).toString()));
+
+    const auto result = mini_gui.walletModel->mintDigiDollar(10000, 0);
+    QCOMPARE(result.status, WalletModel::TransactionCreationFailed);
+    QVERIFY2(result.reasonFailed.contains(reason), qPrintable(result.reasonFailed));
+    QVERIFY(result.txid.isEmpty());
+    QVERIFY(result.positionId.isEmpty());
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    QCOMPARE(wallet->mapWallet.size(), transaction_count);
+}
+
+void DigiDollarWidgetTests::mintWidgetPreservesEncryptedWalletUnlockFlow()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    const SecureString passphrase{"mint-widget-passphrase"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+
+    struct MockPriceGuard {
+        MockOracleManager& mock{MockOracleManager::GetInstance()};
+        CAmount price{mock.GetCurrentPrice()};
+        bool enabled{mock.IsEnabled()};
+        ~MockPriceGuard() { mock.SetMockPrice(price); mock.SetEnabled(enabled); }
+    } mock_guard;
+    mock_guard.mock.SetEnabled(true);
+    mock_guard.mock.SetMockPrice(500000);
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    mini_gui.walletModel->startPollBalance();
+    const CAmount funded_balance = mini_gui.walletModel->wallet().getBalances().balance;
+    QVERIFY(funded_balance > 0);
+    QCOMPARE(mini_gui.walletModel->getAvailableDGBBalance(), funded_balance);
+    const CAmount required_collateral = mini_gui.walletModel->calculateRequiredCollateral(10000, 0);
+    QVERIFY(required_collateral > 0);
+    QVERIFY(funded_balance >= required_collateral);
+    QVERIFY(mini_gui.walletModel->getDigiDollarMintWalletError().isEmpty());
+    const auto before = MintDescriptorNextIndexes(*wallet);
+    const size_t transaction_count = wallet->mapWallet.size();
+    DigiDollarMintWidget widget;
+    widget.setWalletModel(mini_gui.walletModel.get());
+    widget.setClientModel(mini_gui.clientModel.get());
+    widget.show();
+    widget.updateView();
+    auto* amount = widget.findChild<QLineEdit*>("amountEdit");
+    auto* mint_button = widget.findChild<QPushButton*>("mintButton");
+    QVERIFY(amount);
+    QVERIFY(mint_button);
+    amount->setText("100.00");
+    QVERIFY(mint_button->isEnabled());
+
+    QSignalSpy unlocks(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy messages(&widget, &DigiDollarMintWidget::message);
+    QStringList confirmation_titles;
+    QTimer confirm;
+    connect(&confirm, &QTimer::timeout, [&]() {
+        for (QWidget* top : QApplication::topLevelWidgets()) {
+            if (auto* dialog = qobject_cast<QMessageBox*>(top); dialog && dialog->isVisible()) {
+                confirmation_titles.push_back(dialog->windowTitle());
+                dialog->done(QMessageBox::Yes);
+            }
+        }
+    });
+    confirm.start(0);
+    QVERIFY(QMetaObject::invokeMethod(&widget, "onMintClicked", Qt::DirectConnection));
+    confirm.stop();
+    QCOMPARE(confirmation_titles.size(), 2);
+    QCOMPARE(confirmation_titles.at(0), QStringLiteral("Confirm DigiDollar Mint"));
+    QVERIFY(confirmation_titles.at(1).contains("FINAL CONFIRMATION"));
+    QCOMPARE(unlocks.count(), 1);
+    QCOMPARE(messages.count(), 0);
+    QVERIFY(wallet->IsLocked());
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    QCOMPARE(wallet->mapWallet.size(), transaction_count);
+
+    connect(mini_gui.walletModel.get(), &WalletModel::requireUnlock, [&]() {
+        QVERIFY(wallet->Unlock(passphrase));
+    });
+    {
+        auto context = mini_gui.walletModel->requestUnlock();
+        QVERIFY(context.isValid());
+        QVERIFY(!wallet->IsLocked());
+        QVERIFY(mini_gui.walletModel->getDigiDollarMintWalletError().isEmpty());
+    }
+    QVERIFY(wallet->IsLocked());
+    QCOMPARE(unlocks.count(), 2);
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
 }
 
 void DigiDollarWidgetTests::transactionsWidgetTests()
@@ -3070,24 +3750,6 @@ void DigiDollarWidgetTests::digiDollarPersistentStatusesUseSharedSemantics()
     QVERIFY(clientSafety != nullptr);
     QCOMPARE(addressStatus->property("digidollarRole").toString(), QStringLiteral("statusText"));
     QCOMPARE(clientSafety->property("digidollarRole").toString(), QStringLiteral("statusBanner"));
-
-    DigiDollarMintWidget mintWidget;
-    QLabel* mintWarning = mintWidget.findChild<QLabel*>("amountWarningLabel");
-    QLabel* mintOracle = mintWidget.findChild<QLabel*>("oraclePriceValue");
-    QVERIFY(mintWarning != nullptr);
-    QVERIFY(mintOracle != nullptr);
-    QCOMPARE(mintWarning->property("digidollarRole").toString(), QStringLiteral("statusBanner"));
-    QCOMPARE(mintOracle->property("digidollarRole").toString(), QStringLiteral("statusText"));
-
-    DigiDollarRedeemWidget redeemWidget;
-    QLabel* redeemStatus = redeemWidget.findChild<QLabel*>("positionValidationLabel");
-    QVERIFY(redeemStatus != nullptr);
-    QCOMPARE(redeemStatus->property("statusKind").toString(), QStringLiteral("info"));
-
-    DigiDollarPositionsWidget positionsWidget;
-    QLabel* positionsStatus = positionsWidget.findChild<QLabel*>("statusLabel");
-    QVERIFY(positionsStatus != nullptr);
-    QCOMPARE(positionsStatus->property("statusKind").toString(), QStringLiteral("waiting"));
 
     DigiDollarTransactionsWidget transactionsWidget;
     QLabel* transactionsStatus =
@@ -6772,7 +7434,8 @@ void DigiDollarWidgetTests::paymasterClientAuthorizationIsTwoStageAndFailClosed(
     primary->click();
     QCOMPARE(send_calls, 1);
     QVERIFY(state->text().contains(QStringLiteral("paused by user")));
-    const UniValue& canceled_options = send_parameters.at(0)[5];
+    QCOMPARE(send_parameters.at(0)[5].get_str(), std::string{"cents"});
+    const UniValue& canceled_options = send_parameters.at(0)[6];
     QCOMPARE(canceled_options.find_value("prepare_only").get_bool(), true);
     QVERIFY(canceled_options.find_value("authorization_commitment").isNull());
 
@@ -6785,8 +7448,8 @@ void DigiDollarWidgetTests::paymasterClientAuthorizationIsTwoStageAndFailClosed(
     QCOMPARE(primary->text(), QStringLiteral("Review exact offer"));
     primary->click();
     QCOMPARE(send_calls, 3);
-    const UniValue& reviewed_options = send_parameters.at(1)[5];
-    const UniValue& authorized_options = send_parameters.at(2)[5];
+    const UniValue& reviewed_options = send_parameters.at(1)[6];
+    const UniValue& authorized_options = send_parameters.at(2)[6];
     QCOMPARE(reviewed_options.find_value("prepare_only").get_bool(), true);
     QVERIFY(reviewed_options.find_value("authorization_commitment").isNull());
     QVERIFY(authorized_options.find_value("prepare_only").isNull());
@@ -7045,7 +7708,7 @@ void DigiDollarWidgetTests::paymasterClientSessionRpcActionsAreBound()
                           QStringLiteral("resolvepaymastersession"),
                           QStringLiteral("senddigidollar")}));
     QCOMPARE(send_parameters.size(), size_t{1});
-    const UniValue& options = send_parameters.front()[5];
+    const UniValue& options = send_parameters.front()[6];
     QCOMPARE(options.find_value("prepare_only").get_bool(), true);
     QVERIFY(options.find_value("authorization_commitment").isNull());
     QCOMPARE(QString::fromStdString(options.find_value("request_id").get_str()),
@@ -10597,7 +11260,8 @@ void DigiDollarWidgetTests::transactionsWidgetDoubleClickShowsDetailsDialog()
     QVERIFY2(plainDetails.contains(QString::fromStdString(tx.txid)), "details text must include the full transaction id");
     QVERIFY2(plainDetails.contains(QStringLiteral("Mint 1-yr")), "details text must include the transaction type");
     QVERIFY2(plainDetails.contains(QStringLiteral("+43.21 $DD")), "details text must include the signed $DD amount");
-    QVERIFY2(plainDetails.contains(QStringLiteral("Status:")), "details text must include the confirmation status");
+    QVERIFY2(plainDetails.contains(QStringLiteral("Confirmations:")),
+             "the details dialog must label the confirmation count for what it is");
     QVERIFY2(plainDetails.contains(QStringLiteral("detail dialog note")), "details text must include the local note");
 
     RemoveWallet(context, wallet, std::nullopt);
@@ -11412,4 +12076,97 @@ void DigiDollarWidgetTests::customTooltipRenderersNormalizeQtRichTextEnvelope()
              "OverviewPage should use GUIUtil::TooltipToHtml for custom tooltip rendering");
     QVERIFY2(transactionOverviewWidget.contains(QStringLiteral("GUIUtil::TooltipToHtml")),
              "TransactionOverviewWidget should use GUIUtil::TooltipToHtml for custom tooltip rendering");
+}
+
+
+void DigiDollarWidgetTests::redeemResultAlwaysReachesTheUser()
+{
+    // The wallet window turns a widget message into a dialog only when the
+    // message style carries the modal flag. Without that flag the words are
+    // handed to the desktop notification service, so on a machine with no
+    // notification service, or with notifications switched off, a user who
+    // redeems sees nothing at all: no transaction id, no confirmation, and no
+    // reason when the redemption is refused.
+    const unsigned int done = DigiDollarRedeemWidget::resultMessageStyle(true);
+    const unsigned int refused = DigiDollarRedeemWidget::resultMessageStyle(false);
+
+    QVERIFY2(done & CClientUIInterface::MODAL,
+             "a finished redemption must open a dialog, not a desktop notification");
+    QVERIFY2(refused & CClientUIInterface::MODAL,
+             "a refused redemption must open a dialog, not a desktop notification");
+    QVERIFY2(refused & CClientUIInterface::ICON_ERROR,
+             "a refused redemption must be shown as an error");
+
+    const QString txid = QStringLiteral("eba20fe261ed7f7c0000000000000000000000000000000000000000004c610f");
+    const QString text = DigiDollarRedeemWidget::redemptionBroadcastText(txid);
+    QVERIFY2(text.contains(txid), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("broadcast"), Qt::CaseInsensitive), qPrintable(text));
+}
+
+void DigiDollarWidgetTests::transactionsConfirmationsColumnIsAlwaysACount()
+{
+    // The Confirmations column used to print the number for the first five
+    // blocks and the word "Confirmed" after that, so one list held both a
+    // number and a word. It now shows the count for anything in a block, and a
+    // word only where there is no count to show.
+    DigiDollarTransactionsWidget widget;
+
+    QCOMPARE(widget.confirmationsTextForTesting(1), QStringLiteral("1"));
+    QCOMPARE(widget.confirmationsTextForTesting(5), QStringLiteral("5"));
+    QCOMPARE(widget.confirmationsTextForTesting(6), QStringLiteral("6"));
+    QCOMPARE(widget.confirmationsTextForTesting(1440), QStringLiteral("1440"));
+
+    QCOMPARE(widget.confirmationsTextForTesting(0), QStringLiteral("Pending"));
+    QCOMPARE(widget.confirmationsTextForTesting(0, false, true), QStringLiteral("Local"));
+    QCOMPARE(widget.confirmationsTextForTesting(-1), QStringLiteral("Conflicted"));
+    QCOMPARE(widget.confirmationsTextForTesting(3, true), QStringLiteral("Abandoned"));
+}
+
+void DigiDollarWidgetTests::sendWidgetSaysWhyAnAmountIsRefused()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget sendWidget(platformStyle.get());
+
+    QLineEdit* amountEdit = sendWidget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(amountEdit != nullptr);
+    QLabel* amountMessage = sendWidget.findChild<QLabel*>("amountValidationLabel");
+    QVERIFY2(amountMessage != nullptr, "the amount box must have a line under it that explains itself");
+
+    // With nothing typed the form says what it will take.
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("1.00")), qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("100000.00")), qPrintable(amountMessage->text()));
+
+    // Below the minimum. This used to turn the box red and say nothing.
+    amountEdit->setText(QStringLiteral("0.50"));
+    QCoreApplication::processEvents();
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("smallest"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("1.00")), qPrintable(amountMessage->text()));
+
+    // Over the limit. The box takes the number so the user can see what they
+    // typed, and the line under it says which limit was passed.
+    amountEdit->setText(QStringLiteral("200000"));
+    QCoreApplication::processEvents();
+    QCOMPARE(amountEdit->text(), QStringLiteral("200000"));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("most you can send"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("100000.00")), qPrintable(amountMessage->text()));
+
+    // More than the wallet holds. With no wallet model the balance is zero, so
+    // any amount inside the limits is more than the balance.
+    amountEdit->setText(QStringLiteral("25.00"));
+    QCoreApplication::processEvents();
+    QVERIFY2(amountMessage->text().contains(QStringLiteral("only have"), Qt::CaseInsensitive),
+             qPrintable(amountMessage->text()));
+
+    // The Send button stays off for every one of those.
+    QPushButton* sendButton = sendWidget.findChild<QPushButton*>("sendButton");
+    QVERIFY(sendButton != nullptr);
+    QVERIFY2(!sendButton->isEnabled(), "an amount the form refuses must leave the Send button off");
 }

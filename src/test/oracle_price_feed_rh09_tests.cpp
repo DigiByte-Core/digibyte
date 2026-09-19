@@ -14,28 +14,17 @@
 #include <util/int128.h>
 
 #include <key.h>
-#include <util/int128.h>
 #include <oracle/bundle_manager.h>
-#include <util/int128.h>
 #include <oracle/exchange.h>
-#include <util/int128.h>
 #include <primitives/oracle.h>
-#include <util/int128.h>
 #include <chainparams.h>
-#include <util/int128.h>
 #include <test/util/setup_common.h>
-#include <util/int128.h>
 #include <util/time.h>
-#include <util/int128.h>
 
 #include <climits>
-#include <util/int128.h>
 #include <cstdint>
-#include <util/int128.h>
 #include <limits>
-#include <util/int128.h>
 #include <vector>
-#include <util/int128.h>
 
 using namespace ExchangeAPI;
 

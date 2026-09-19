@@ -21,6 +21,16 @@ class TransactionRecord;
 class TransactionTablePriv;
 class WalletModel;
 
+/** Wording the wallet uses for DigiDollar rows. The main transaction history
+    and the DigiDollar tab both call these so they say the same thing. */
+namespace DigiDollarLabels {
+/** Name for DigiDollars handed back by a redemption. */
+QString ChangeReturned();
+/** Why those DigiDollars came back. */
+QString ChangeReturnedExplanation();
+} // namespace DigiDollarLabels
+
+
 /** UI model for the transaction table of a wallet.
  */
 class TransactionTableModel : public QAbstractTableModel
@@ -37,7 +47,12 @@ public:
         Date = 2,
         Type = 3,
         ToAddress = 4,
-        Amount = 5
+        //! DigiByte amount of the row.
+        Amount = 5,
+        //! DigiDollar amount of the row, in dollars and cents. A row carries a
+        //! DigiByte amount or a DigiDollar amount, so only one of these two
+        //! columns holds a number on any given row.
+        AmountDD = 6
     };
 
     /** Roles to get specific information from a transaction row.
@@ -58,8 +73,10 @@ public:
         AddressRole,
         /** Label of address related to transaction */
         LabelRole,
-        /** Net amount of transaction */
+        /** Net DigiByte amount of transaction */
         AmountRole,
+        /** DigiDollar amount of transaction, in cents */
+        AmountDDRole,
         /** Transaction hash */
         TxHashRole,
         /** Transaction data, hex-encoded */
@@ -68,13 +85,34 @@ public:
         TxPlainTextRole,
         /** Is transaction confirmed? */
         ConfirmedRole,
-        /** Formatted amount, without brackets when unconfirmed */
+        /** Formatted DigiByte amount, without brackets when unconfirmed */
         FormattedAmountRole,
+        /** Formatted DigiDollar amount, without brackets when unconfirmed */
+        FormattedAmountDDRole,
+        /** The one amount a row has, for the places with room for a single
+            figure: the DigiByte amount with its unit, or the DigiDollar amount
+            on a row that carries dollars and no DigiByte. */
+        FormattedSingleAmountRole,
+        /** The number behind FormattedSingleAmountRole: DigiByte in satoshis,
+            or DigiDollar in cents on a row that carries dollars and no
+            DigiByte. Negative when money left the wallet. */
+        SingleAmountRole,
         /** Transaction status (TransactionRecord::Status) */
         StatusRole,
         /** Unprocessed icon */
         RawDecorationRole,
     };
+
+    /** Text for the type column. */
+    static QString formatTxType(const TransactionRecord *wtx);
+    /** Icon resource for the type of a row. */
+    static QString txTypeIconPath(const TransactionRecord *wtx);
+    /** Text for the DigiByte amount column. Empty on a row that carries a
+        DigiDollar amount instead, so the two columns never repeat each other. */
+    static QString formatAmountDGB(const TransactionRecord *wtx, DigiByteUnit unit, bool showUnconfirmed=true, DigiByteUnits::SeparatorStyle separators=DigiByteUnits::SeparatorStyle::STANDARD);
+    /** Text for the DigiDollar amount column. Empty on a row that carries no
+        DigiDollars. */
+    static QString formatAmountDD(const TransactionRecord *wtx, bool showUnconfirmed=true);
 
     int rowCount(const QModelIndex &parent) const override;
     int columnCount(const QModelIndex &parent) const override;
@@ -99,9 +137,7 @@ private:
     QVariant addressColor(const TransactionRecord *wtx) const;
     QString formatTxStatus(const TransactionRecord *wtx) const;
     QString formatTxDate(const TransactionRecord *wtx) const;
-    QString formatTxType(const TransactionRecord *wtx) const;
     QString formatTxToAddress(const TransactionRecord *wtx, bool tooltip) const;
-    QString formatTxAmount(const TransactionRecord *wtx, bool showUnconfirmed=true, DigiByteUnits::SeparatorStyle separators=DigiByteUnits::SeparatorStyle::STANDARD) const;
     QString formatTooltip(const TransactionRecord *rec) const;
     QVariant txStatusDecoration(const TransactionRecord *wtx) const;
     QVariant txWatchonlyDecoration(const TransactionRecord *wtx) const;
@@ -112,7 +148,7 @@ public Q_SLOTS:
     void updateTransaction(const QString &hash, int status, bool showTransaction);
     void updateConfirmations();
     void updateDisplayUnit();
-    /** Updates the column title to "Amount (DisplayUnit)" and emits headerDataChanged() signal for table headers to react. */
+    /** Updates the DigiByte amount column title to "Amount (DisplayUnit)" and emits headerDataChanged() signal for table headers to react. */
     void updateAmountColumnTitle();
     /* Needed to update fProcessingQueuedTransactions through a QueuedConnection */
     void setProcessingQueuedTransactions(bool value) { fProcessingQueuedTransactions = value; }

@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <dbwrapper.h>
+#include <dbwrapper_env.h>
 
 #include <logging.h>
 #include <random.h>
@@ -109,7 +110,7 @@ public:
     }
 };
 
-static void SetMaxOpenFiles(leveldb::Options *options) {
+static void SetMaxOpenFiles(leveldb::Options *options, std::optional<int> max_open_files) {
     // On most platforms the default setting of max_open_files (which is 1000)
     // is optimal. On Windows using a large file count is OK because the handles
     // do not interfere with select() loops. On 64-bit Unix hosts this value is
@@ -125,16 +126,20 @@ static void SetMaxOpenFiles(leveldb::Options *options) {
     // See PR #12495 for further discussion.
 
     int default_open_files = options->max_open_files;
+    if (max_open_files) {
+        options->max_open_files = *max_open_files;
+    } else {
 #ifndef WIN32
-    if (sizeof(void*) < 8) {
-        options->max_open_files = 64;
-    }
+        if (sizeof(void*) < 8) {
+            options->max_open_files = 64;
+        }
 #endif
+    }
     LogPrint(BCLog::LEVELDB, "LevelDB using max_open_files=%d (default=%d)\n",
              options->max_open_files, default_open_files);
 }
 
-static leveldb::Options GetOptions(size_t nCacheSize)
+static leveldb::Options GetOptions(size_t nCacheSize, std::optional<int> max_open_files)
 {
     leveldb::Options options;
     options.block_cache = leveldb::NewLRUCache(nCacheSize / 2);
@@ -147,7 +152,7 @@ static leveldb::Options GetOptions(size_t nCacheSize)
         // on corruption in later versions.
         options.paranoid_checks = true;
     }
-    SetMaxOpenFiles(&options);
+    SetMaxOpenFiles(&options, max_open_files);
     return options;
 }
 
@@ -198,7 +203,7 @@ void CDBBatch::EraseImpl(Span<const std::byte> key)
 
 struct LevelDBContext {
     //! custom environment this database is using (may be nullptr in case of default environment)
-    leveldb::Env* penv;
+    leveldb::Env* penv{nullptr};
 
     //! database options used
     leveldb::Options options;
@@ -216,8 +221,23 @@ struct LevelDBContext {
     leveldb::WriteOptions syncoptions;
 
     //! the database itself
-    leveldb::DB* pdb;
+    leveldb::DB* pdb{nullptr};
+
+    ~LevelDBContext()
+    {
+        // The database may still use its environment while it shuts down.
+        delete pdb;
+        delete options.filter_policy;
+        delete options.info_log;
+        delete options.block_cache;
+        delete penv;
+    }
 };
+
+const leveldb::Options& dbwrapper_private::GetOptions(const CDBWrapper& wrapper)
+{
+    return wrapper.DBContext().options;
+}
 
 CDBWrapper::CDBWrapper(const DBParams& params)
     : m_db_context{std::make_unique<LevelDBContext>()}, m_name{fs::PathToString(params.path.stem())}, m_path{params.path}, m_is_memory{params.memory_only}
@@ -227,12 +247,16 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     DBContext().iteroptions.verify_checksums = true;
     DBContext().iteroptions.fill_cache = false;
     DBContext().syncoptions.sync = true;
-    DBContext().options = GetOptions(params.cache_bytes);
+    DBContext().options = GetOptions(params.cache_bytes, params.max_open_files);
     DBContext().options.create_if_missing = true;
     if (params.memory_only) {
         DBContext().penv = leveldb::NewMemEnv(leveldb::Env::Default());
         DBContext().options.env = DBContext().penv;
     } else {
+        if (!params.use_mmap) {
+            DBContext().penv = dbwrapper_private::MakeNoMmapEnv().release();
+            DBContext().options.env = DBContext().penv;
+        }
         if (params.wipe_data) {
             LogPrintf("Wiping LevelDB in %s\n", fs::PathToString(params.path));
             leveldb::Status result = leveldb::DestroyDB(fs::PathToString(params.path), DBContext().options);
@@ -275,19 +299,7 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     LogPrintf("Using obfuscation key for %s: %s\n", fs::PathToString(params.path), HexStr(obfuscate_key));
 }
 
-CDBWrapper::~CDBWrapper()
-{
-    delete DBContext().pdb;
-    DBContext().pdb = nullptr;
-    delete DBContext().options.filter_policy;
-    DBContext().options.filter_policy = nullptr;
-    delete DBContext().options.info_log;
-    DBContext().options.info_log = nullptr;
-    delete DBContext().options.block_cache;
-    DBContext().options.block_cache = nullptr;
-    delete DBContext().penv;
-    DBContext().options.env = nullptr;
-}
+CDBWrapper::~CDBWrapper() = default;
 
 bool CDBWrapper::WriteBatch(CDBBatch& batch, bool fSync)
 {
@@ -415,6 +427,7 @@ Span<const std::byte> CDBIterator::GetValueImpl() const
 
 CDBIterator::~CDBIterator() = default;
 bool CDBIterator::Valid() const { return m_impl_iter->iter->Valid(); }
+void CDBIterator::CheckStatus() const { HandleError(m_impl_iter->iter->status()); }
 void CDBIterator::SeekToFirst() { m_impl_iter->iter->SeekToFirst(); }
 void CDBIterator::Next() { m_impl_iter->iter->Next(); }
 

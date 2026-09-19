@@ -915,6 +915,16 @@ class DigiDollarRescanTest(DigiByteTestFramework):
             sorted((tx["address"], tx["amount"]) for tx in original_rows),
         )
 
+        # A rescan has no wallet record to read a timestamp from, so it takes
+        # the timestamp of the block the transaction is in. The rescan is not
+        # allowed to ask the chain for that block while it holds the wallet
+        # lock, so the block time is handed to it instead. Check the figure that
+        # arrives is the right one.
+        block_hash = self.nodes[1].getrawtransaction(txid, True)["blockhash"]
+        block_time = self.nodes[1].getblock(block_hash)["time"]
+        for tx in restored_rows:
+            assert_equal(tx["time"], block_time)
+
         try:
             self.nodes[1].unloadwallet("dd_receive_history_restored")
         except Exception:
@@ -934,9 +944,12 @@ class DigiDollarRescanTest(DigiByteTestFramework):
         bounded_wallet = self.nodes[0].get_wallet_rpc("bounded_rescan")
         tip = self.nodes[0].getblockcount()
 
+        # A rescan bounded to one block only records that the positions still
+        # need checking against the chain. A rescan of the whole chain rebuilds
+        # the wallet's DigiDollar state, which is the expensive part.
         with self.nodes[0].assert_debug_log(
-            expected_msgs=[],
-            unexpected_msgs=["DigiDollar: Running post-rescan position validation"],
+            expected_msgs=["DigiDollar: bounded rescan finished"],
+            unexpected_msgs=["DigiDollar: rebuilt DigiDollar state after rescan"],
             timeout=1):
             rescan_result = bounded_wallet.rescanblockchain(tip, tip)
 
@@ -944,7 +957,7 @@ class DigiDollarRescanTest(DigiByteTestFramework):
         assert_equal(rescan_result["stop_height"], tip)
 
         with self.nodes[0].assert_debug_log(
-            expected_msgs=["DigiDollar: Running post-rescan position validation"],
+            expected_msgs=["DigiDollar: rebuilt DigiDollar state after rescan"],
             unexpected_msgs=[],
             timeout=5):
             bounded_wallet.rescanblockchain()

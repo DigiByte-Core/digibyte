@@ -108,7 +108,7 @@ void RPCNestedTests::rpcNestedTests()
     RPCConsole::RPCParseCommandLine(nullptr, result, "requestpaymasterquote(abc, {\"sponsorship_capability\":\"PAYMASTER_SECRET\"})", false, &filtered);
     QVERIFY(filtered == "requestpaymasterquote(…)");
     QVERIFY(filtered.find("PAYMASTER_SECRET") == std::string::npos);
-    RPCConsole::RPCParseCommandLine(nullptr, result, "help(senddigidollar(abc, 100, false, null, null, {\"sponsorship_capability\":\"PAYMASTER_SECRET\"}))", false, &filtered);
+    RPCConsole::RPCParseCommandLine(nullptr, result, "help(senddigidollar(abc, 100, false, null, null, cents, {\"sponsorship_capability\":\"PAYMASTER_SECRET\"}))", false, &filtered);
     QVERIFY(filtered == "help(senddigidollar(…))");
     QVERIFY(filtered.find("PAYMASTER_SECRET") == std::string::npos);
     RPCConsole::RPCParseCommandLine(nullptr, result, "walletprocesspaymasterpsbt(PAYMASTER_PSBT)", false, &filtered);

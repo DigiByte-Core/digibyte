@@ -11,14 +11,50 @@
 #include <util/time.h>
 #include <logging.h>
 
-/**
- * CBlockIndex default constructor
- */
-CBlockIndex::CBlockIndex()
+namespace {
+class LocalBlockHeader final : public BlockHeaderSource {
+    const BlockHeaderData m_data;
+public:
+    explicit LocalBlockHeader(const BlockHeaderData& data) : m_data{data} {}
+    BlockHeaderData Read(const uint256&) const override { return m_data; }
+    bool IsShared() const override { return false; }
+};
+} // namespace
+
+BlockHeaderData CBlockIndex::GetHeaderData() const
 {
-    for (unsigned i = 0; i < NUM_ALGOS_IMPL; i++) {
-        lastAlgoBlocks[i] = nullptr;
-    }
+    if (!m_header_source) return {};
+    return m_header_source->Read(m_header_source->IsShared() ? GetBlockHash() : uint256{});
+}
+
+void CBlockIndex::SetHeaderData(const BlockHeaderData& data)
+{
+    auto replacement = std::make_unique<LocalBlockHeader>(data);
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+    m_header_source = replacement.release();
+}
+
+void CBlockIndex::UseHeaderSource(const BlockHeaderSource& source)
+{
+    assert(source.IsShared());
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+    m_header_source = &source;
+}
+
+CBlockIndex::~CBlockIndex()
+{
+    if (m_header_source && !m_header_source->IsShared()) delete m_header_source;
+}
+
+CBlockIndex::CBlockIndex(const CBlockIndex& other)
+    : m_chain_work{other.m_chain_work},
+      phashBlock{other.phashBlock}, pprev{other.pprev}, pskip{other.pskip},
+      nHeight{other.nHeight}, nFile{other.nFile}, nDataPos{other.nDataPos}, nUndoPos{other.nUndoPos},
+      nTx{other.nTx}, nChainTx{other.nChainTx}, nStatus{other.nStatus},
+      nVersion{other.nVersion}, nTime{other.nTime}, nBits{other.nBits},
+      nSequenceId{other.nSequenceId}, nTimeMax{other.nTimeMax}
+{
+    SetHeaderData(other.GetHeaderData());
 }
 
 /**
@@ -27,22 +63,14 @@ CBlockIndex::CBlockIndex()
  */
 CBlockIndex::CBlockIndex(const CBlockHeader& block)
     : nVersion(block.nVersion),
-      hashMerkleRoot(block.hashMerkleRoot),
       nTime(block.nTime),
-      nBits(block.nBits),
-      nNonce(block.nNonce)
+      nBits(block.nBits)
 {
-    // Initialize lastAlgoBlocks to null.
-    for (unsigned i = 0; i < NUM_ALGOS_IMPL; i++) {
-        lastAlgoBlocks[i] = nullptr;
-    }
-
-    // Determine raw algo index from version bits:
-    int rawAlgo = block.GetAlgo(); // This returns ALGO_UNKNOWN if it doesn't match recognized bits
-    if (rawAlgo >= 0 && rawAlgo < NUM_ALGOS_IMPL) {
-        lastAlgoBlocks[rawAlgo] = this;
-    } else {
-        // We can log this occurrence:
+    SetHeaderData({block.hashMerkleRoot, block.nNonce});
+    // A block header names its mining algorithm in its version bits. Say so
+    // once here if the bits are not one of DigiByte's five algorithms; GetAlgo
+    // below then treats the block as Scrypt.
+    if (block.GetAlgo() == ALGO_UNKNOWN) {
         LogPrintf("CBlockIndex ctor: ALGO_UNKNOWN in block version=0x%08x\n", block.nVersion);
     }
 }
@@ -55,7 +83,7 @@ std::string CBlockFileInfo::ToString() const
 std::string CBlockIndex::ToString() const
 {
     return strprintf("CBlockIndex(pprev=%p, nHeight=%d, merkle=%s, hashBlock=%s)",
-                     pprev, nHeight, hashMerkleRoot.ToString(), GetBlockHash().ToString());
+                     pprev, nHeight, GetHeaderData().merkle_root.ToString(), GetBlockHash().ToString());
 }
 
 void CChain::SetTip(CBlockIndex& block) {
@@ -116,8 +144,8 @@ CBlockIndex* CChain::FindEarliestAtLeast(int64_t nTime, int height) const
 }
 
 /**
- * Return recognized mining algo for this block, forcibly mapping blocks
- * below height 145,000 to ALGO_SCRYPT. If none recognized, logs a warning.
+ * Return the mining algorithm named in this block's version bits. If the bits
+ * name none of them, log a warning and call it Scrypt.
  */
 int CBlockIndex::GetAlgo() const
 {
@@ -126,13 +154,13 @@ int CBlockIndex::GetAlgo() const
     // that naturally map to BLOCK_VERSION_SCRYPT (algo bits = 0x0000), so no
     // special height check is needed.
     //
-    // CRITICAL FIX: Previously this had a hardcoded `if (nHeight < 145000)`
-    // check that forced ALGO_SCRYPT for all blocks below mainnet's multi-algo
-    // height. This broke testnet/regtest where multi-algo activates much earlier
-    // (block 100), causing the lastAlgoBlocks[] index to only track Scrypt.
-    // As a result, GetLastBlockIndexForAlgoFast() returned NULL for all non-Scrypt
-    // algos, and DigiShield V4 fell back to InitialDifficulty (powLimit) every
-    // time — difficulty never adjusted for Qubit, Skein, SHA256D, or Odocrypt.
+    // This used to force Scrypt for every block below mainnet height 145,000.
+    // That broke testnet and regtest, where multi-algorithm mining starts much
+    // earlier, at block 100: every earlier block looked like a Scrypt block,
+    // the difficulty rules could not find a previous block of the other
+    // algorithms, and DigiShield V4 fell back to the easiest possible
+    // difficulty every time. Difficulty never adjusted there for Qubit,
+    // Skein, SHA256D or Odocrypt.
     switch (nVersion & BLOCK_VERSION_ALGO) {
         case BLOCK_VERSION_SCRYPT:   return ALGO_SCRYPT;
         case BLOCK_VERSION_SHA256D:  return ALGO_SHA256D;
@@ -264,7 +292,11 @@ arith_uint256 GetBlockProofBase(const CBlockIndex& block)
 
 arith_uint256 GetBlockProof(const CBlockIndex& block)
 {
-    CBlockHeader header = block.GetBlockHeader();
+    // Work uses the header version and time, which remain in memory. Preserve
+    // CBlockHeader's algorithm decoding, including unknown version bits.
+    CBlockHeader header;
+    header.nVersion = block.nVersion;
+    header.nTime = block.nTime;
     int nHeight = block.nHeight;
     const Consensus::Params& params = Params().GetConsensus();
 
@@ -300,7 +332,9 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
 
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo)
 {
-    CBlockHeader header = block.GetBlockHeader();
+    CBlockHeader header;
+    header.nVersion = block.nVersion;
+    header.nTime = block.nTime;
     int nHeight = block.nHeight;
     const Consensus::Params& params = Params().GetConsensus();
 
@@ -327,10 +361,10 @@ int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& fr
 {
     arith_uint256 r;
     int sign = 1;
-    if (to.nChainWork > from.nChainWork) {
-        r = to.nChainWork - from.nChainWork;
+    if (to.GetChainWork() > from.GetChainWork()) {
+        r = to.GetChainWork() - from.GetChainWork();
     } else {
-        r = from.nChainWork - to.nChainWork;
+        r = from.GetChainWork() - to.GetChainWork();
         sign = -1;
     }
     r = r * arith_uint256(params.nPowTargetSpacing) / GetBlockProof(tip);

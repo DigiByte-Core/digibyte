@@ -12,14 +12,25 @@ from test_framework.util import (
 )
 
 
+# Regtest turns DigiDollar on at the genesis block. A node that has DigiDollar
+# keeps every block from the DigiDollar activation height upwards, so that it
+# can always read the block that created a DigiDollar coin. On regtest that
+# would mean keeping the whole chain, and then this test has no history it is
+# allowed to delete. So set DigiDollar activation to a height this test never
+# reaches. Every block it mines is then ordinary history that a pruned node may
+# delete, which is what this test is here to check.
+DIGIDOLLAR_NEVER_ACTIVATES = 2147483646
+DIGIDOLLAR_OFF = f"-digidollaractivationheight={DIGIDOLLAR_NEVER_ACTIVATES}"
+
+
 class FeatureIndexPruneTest(DigiByteTestFramework):
     def set_test_params(self):
         self.num_nodes = 4
         self.extra_args = [
-            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-digidollarstatsindex=0"],
-            ["-fastprune", "-prune=1", "-coinstatsindex=1", "-digidollarstatsindex=0"],
-            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-digidollarstatsindex=0"],
-            []
+            [DIGIDOLLAR_OFF, "-fastprune", "-prune=1", "-blockfilterindex=1", "-digidollarstatsindex=0"],
+            [DIGIDOLLAR_OFF, "-fastprune", "-prune=1", "-coinstatsindex=1", "-digidollarstatsindex=0"],
+            [DIGIDOLLAR_OFF, "-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-digidollarstatsindex=0"],
+            [DIGIDOLLAR_OFF]
         ]
 
     def sync_index(self, height):
@@ -59,7 +70,7 @@ class FeatureIndexPruneTest(DigiByteTestFramework):
 
     def restart_without_indices(self):
         for i in range(3):
-            self.restart_node(i, extra_args=["-fastprune", "-prune=1", "-digidollarstatsindex=0"])
+            self.restart_node(i, extra_args=[DIGIDOLLAR_OFF, "-fastprune", "-prune=1", "-digidollarstatsindex=0"])
         self.reconnect_nodes()
 
     def run_test(self):

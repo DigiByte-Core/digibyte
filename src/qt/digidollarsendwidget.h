@@ -189,6 +189,11 @@ private:
     bool validateAddress() const;
     bool validateAmount() const;
     bool validateBalance() const;
+    /**
+     * What is wrong with the amount in the box, in words the user can act on.
+     * An empty string means the amount can be sent.
+     */
+    QString amountProblem() const;
 
     QString formatDDAmount(double amount) const;
     QString formatUSDAmount(double amount) const;
@@ -255,6 +260,7 @@ private:
     QLineEdit* m_amountEdit;
     QLabel* m_amountSuffix;
     QPushButton* m_useAvailableBalanceButton;
+    QLabel* m_amountValidationLabel;
     QLabel* m_usdEquivalentLabel;
     QLabel* m_usdEquivalentValue;
     QLabel* m_availableBalanceLabel;

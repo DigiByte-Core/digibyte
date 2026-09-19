@@ -19,11 +19,13 @@
 #include <key_io.h>
 #include <logging.h>
 #include <policy/policy.h>
+#include <script/standard.h>
 #include <validation.h>
 #include <wallet/types.h>
 
 #include <stdint.h>
 #include <string>
+#include <variant>
 
 #include <QLatin1String>
 
@@ -31,6 +33,43 @@ using wallet::ISMINE_ALL;
 using wallet::ISMINE_SPENDABLE;
 using wallet::ISMINE_WATCH_ONLY;
 using wallet::isminetype;
+
+namespace {
+
+//! DigiDollar amounts are held in cents. Show them the way money is written.
+QString FormatDigiDollar(CAmount cents)
+{
+    return QStringLiteral("$") + QString::number(cents / 100.0, 'f', 2);
+}
+
+//! How long the collateral of a mint is locked for. The same ten names are
+//! shown by the mint panel, the redeem panel and the positions table; if one
+//! of them changes, change them all together.
+QString LockPeriodName(int tier)
+{
+    switch (tier) {
+    case 0: return QObject::tr("1 hour");
+    case 1: return QObject::tr("30 days");
+    case 2: return QObject::tr("3 months");
+    case 3: return QObject::tr("6 months");
+    case 4: return QObject::tr("1 year");
+    case 5: return QObject::tr("2 years");
+    case 6: return QObject::tr("3 years");
+    case 7: return QObject::tr("5 years");
+    case 8: return QObject::tr("7 years");
+    case 9: return QObject::tr("10 years");
+    default: return QString();
+    }
+}
+
+//! The line to print when the transaction simply does not carry a number. It
+//! must never be shown as a zero, because a zero looks like a real amount.
+QString NotInThisTransaction()
+{
+    return QObject::tr("not recorded in this transaction");
+}
+
+} // namespace
 
 QString TransactionDesc::FormatTxStatus(const interfaces::WalletTxStatus& status, bool inMempool)
 {
@@ -181,6 +220,91 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
     }
 
     //
+    // DigiDollar
+    //
+    // A DigiDollar lives on a taproot output that holds no DGB at all, and the
+    // number of DigiDollars it holds is written in a data output of the same
+    // transaction. Without the lines below the window shows those outputs as
+    // zero DGB and never names the DigiDollars, which is why a mint looked like
+    // it moved nothing.
+    const bool is_dd_tx = DigiDollar::HasDigiDollarMarker(*wtx.tx);
+    const DigiDollar::DigiDollarTxType dd_type = is_dd_tx
+        ? DigiDollar::GetDigiDollarTxType(*wtx.tx)
+        : DigiDollar::DD_TX_NONE;
+    const std::map<unsigned int, CAmount> dd_amounts = is_dd_tx
+        ? DigiDollarTxFacts::TokenAmountsByOutput(*wtx.tx, dd_type)
+        : std::map<unsigned int, CAmount>{};
+
+    if (dd_type == DigiDollar::DD_TX_MINT) {
+        const DigiDollarTxFacts::MintFacts facts = DigiDollarTxFacts::ReadMintFacts(*wtx.tx);
+
+        strHTML += "<b>" + tr("DigiDollar minted") + ":</b> ";
+        strHTML += facts.have_dd_cents ? FormatDigiDollar(facts.dd_cents) : NotInThisTransaction();
+        strHTML += "<br>";
+
+        // A valid mint has one positive Taproot output holding its collateral.
+        for (const CTxOut& output : wtx.tx->vout) {
+            CTxDestination destination;
+            if (output.nValue <= 0 || !ExtractDestination(output.scriptPubKey, destination) ||
+                !std::holds_alternative<WitnessV1Taproot>(destination)) continue;
+            strHTML += "<b>" + tr("Collateral locked") + ":</b> " +
+                       DigiByteUnits::formatHtmlWithUnit(unit, output.nValue) + "<br>";
+            break;
+        }
+
+        strHTML += "<b>" + tr("Lock period") + ":</b> ";
+        const QString period = facts.have_lock_tier ? LockPeriodName(facts.lock_tier) : QString();
+        strHTML += period.isEmpty() ? NotInThisTransaction() : period;
+        strHTML += "<br>";
+
+        strHTML += "<b>" + tr("Collateral unlocks at block") + ":</b> ";
+        strHTML += facts.have_unlock_height ? QString::number(facts.unlock_height) : NotInThisTransaction();
+        strHTML += "<br>";
+
+        // A vault is known by the transaction that created it.
+        strHTML += "<b>" + tr("Vault") + ":</b> " + rec->getTxHash() + "<br>";
+    } else if (dd_type == DigiDollar::DD_TX_TRANSFER) {
+        for (unsigned int i = 0; i < wtx.tx->vout.size(); i++) {
+            if (!DigiDollarTxFacts::IsTokenOutput(wtx.tx->vout[i])) continue;
+
+            const bool to_us = wtx.txout_is_mine[i];
+            strHTML += "<b>" + (to_us ? tr("DigiDollar received") : tr("DigiDollar sent")) + ":</b> ";
+            const auto amount_it = dd_amounts.find(i);
+            strHTML += amount_it != dd_amounts.end() ? FormatDigiDollar(amount_it->second) : NotInThisTransaction();
+            if (IsValidDestination(wtx.txout_address[i])) {
+                strHTML += " (" + GUIUtil::HtmlEscape(EncodeDestination(wtx.txout_address[i])) + ")";
+            }
+            strHTML += "<br>";
+        }
+    } else if (dd_type == DigiDollar::DD_TX_REDEEM) {
+        if (!wtx.tx->vout.empty() && wtx.tx->vout[0].nValue > 0) {
+            strHTML += "<b>" + tr("Collateral returned") + ":</b> " +
+                       DigiByteUnits::formatHtmlWithUnit(unit, wtx.tx->vout[0].nValue) + "<br>";
+        }
+
+        for (unsigned int i = 0; i < wtx.tx->vout.size(); i++) {
+            if (!DigiDollarTxFacts::IsTokenOutput(wtx.tx->vout[i])) continue;
+            const auto amount_it = dd_amounts.find(i);
+            if (amount_it == dd_amounts.end()) continue;
+            strHTML += "<b>" + tr("DigiDollar change returned") + ":</b> " +
+                       FormatDigiDollar(amount_it->second) + "<br>";
+        }
+
+        // The amount burned is carried by the DigiDollar inputs this
+        // transaction spends, which live in earlier transactions, so it cannot
+        // be read here. Say so rather than print a zero.
+        strHTML += "<b>" + tr("DigiDollar burned") + ":</b> " +
+                   tr("held by the inputs this transaction spent, so it is not shown here") + "<br>";
+
+        // The first input of a redemption is always the locked vault, and a
+        // vault is known by the transaction that created it.
+        if (!wtx.tx->vin.empty()) {
+            strHTML += "<b>" + tr("Vault closed") + ":</b> " +
+                       QString::fromStdString(wtx.tx->vin[0].prevout.hash.ToString()) + "<br>";
+        }
+    }
+
+    //
     // Amount
     //
     if (wtx.is_coinbase && nCredit == 0)
@@ -227,13 +351,22 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
             //
             // Debit
             //
-            auto mine = wtx.txout_is_mine.begin();
-            for (const CTxOut& txout : wtx.tx->vout)
+            for (unsigned int i = 0; i < wtx.tx->vout.size(); i++)
             {
+                const CTxOut& txout = wtx.tx->vout[i];
                 // Ignore change
-                isminetype toSelf = *(mine++);
+                isminetype toSelf = wtx.txout_is_mine[i];
                 if ((toSelf == ISMINE_SPENDABLE) && (fAllFromMe == ISMINE_SPENDABLE))
                     continue;
+
+                // In a DigiDollar transaction the data output and the outputs
+                // that hold DigiDollars are worth no DGB. Listing them here as
+                // a payment of zero DGB is what produced the empty amounts
+                // people reported. The DigiDollar lines above already say what
+                // they carry.
+                if (is_dd_tx && txout.nValue == 0) continue;
+                // The collateral of a mint has its own line above as well.
+                if (dd_type == DigiDollar::DD_TX_MINT && i == 0) continue;
 
                 if (!wtx.value_map.count("to") || wtx.value_map["to"].empty())
                 {

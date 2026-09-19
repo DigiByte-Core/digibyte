@@ -34,6 +34,36 @@
 //! Global oracle manager instance
 std::unique_ptr<OracleManager> g_oracle_manager;
 
+namespace {
+/**
+ * One lock for starting and stopping an oracle price thread, and one flag that
+ * says no more may start.
+ *
+ * Starting creates a thread and stopping waits for that thread to finish, so
+ * the two must never run at the same time.
+ *
+ * Shutdown sets the flag before it stops the running price threads. A start
+ * that is already part way through when that happens either takes the lock
+ * first, and then the stop that follows waits for the thread it created, or
+ * takes the lock afterwards, sees the flag and does nothing. Either way no
+ * price thread is left running once shutdown has stopped them, and none can
+ * appear afterwards.
+ *
+ * This matters because a price thread reaches exchanges over the network and
+ * hands messages to the connection manager, and shutdown destroys the
+ * connection manager a few steps after it stops the price threads. A thread
+ * that survived that step would read memory that has already been freed.
+ */
+std::mutex g_oracle_price_thread_lifecycle;
+
+/** Guards building and clearing the one oracle manager, so two callers cannot each
+ *  build one and leave the loser holding a reference to a destroyed object. It is
+ *  held only across storing or clearing the pointer, never across stopping an
+ *  oracle, because a price thread being waited for can ask for the manager. */
+std::mutex g_oracle_manager_creation;
+bool g_oracle_price_thread_starts_refused{false};
+} // namespace
+
 // CURL callback function for writing response data
 [[maybe_unused]] static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* response)
 {
@@ -131,7 +161,7 @@ void OracleNode::Initialize(uint32_t oracle_id_in, const CKey& key, const CPubKe
     private_key = key;
     public_key = pubkey;
     enabled.store(true);
-    LogPrintf("Oracle: Test-initialized oracle %d\n", oracle_id);
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Test-initialized oracle %d\n", oracle_id);
 }
 
 void OracleNode::SetExchangeEndpoints(const std::vector<std::string>& endpoints)
@@ -142,6 +172,15 @@ void OracleNode::SetExchangeEndpoints(const std::vector<std::string>& endpoints)
 
 void OracleNode::Start()
 {
+    // Held for the whole of starting, so a start and a stop can never overlap,
+    // and so a start that arrives while the node is shutting down is refused.
+    std::lock_guard<std::mutex> lifecycle_lock(g_oracle_price_thread_lifecycle);
+
+    if (g_oracle_price_thread_starts_refused) {
+        LogPrintf("Oracle: Not starting oracle %d: the node is shutting down\n", oracle_id);
+        return;
+    }
+
     if (running.load()) {
         LogPrintf("Oracle: Oracle %d is already running\n", oracle_id);
         return;
@@ -171,6 +210,10 @@ void OracleNode::Start()
 
 void OracleNode::Stop()
 {
+    // The same lock Start() takes. Waiting for the price thread here while
+    // another thread is creating one would leave that new thread behind.
+    std::lock_guard<std::mutex> lifecycle_lock(g_oracle_price_thread_lifecycle);
+
     const bool was_running = running.exchange(false);
     cv_stop.notify_all();
     if (price_thread.joinable()) {
@@ -299,7 +342,7 @@ bool OracleNode::BroadcastPriceMessage(const COraclePriceMessage& message)
         return false;
     }
 
-    LogPrintf("Oracle: Broadcasting price message - Oracle: %d, Price: %llu micro-USD, Time: %lld\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcasting price message - Oracle: %d, Price: %llu micro-USD, Time: %lld\n",
              message.oracle_id, message.price_micro_usd, message.timestamp);
 
     // Send to bundle manager for processing
@@ -383,12 +426,17 @@ void OracleNode::PriceThreadFunc()
                     BroadcastVersionHeartbeat();
                 }
 
-                // Fetch and update price
-                FetchAndUpdatePrice();
+                // Tests turn the exchange fetch off. The thread still runs, still
+                // sends heartbeats and still stops the same way, but it asks no
+                // exchange for a price. Always false on a real node.
+                if (!skip_exchange_fetch.load()) {
+                    // Fetch and update price
+                    FetchAndUpdatePrice();
 
-                // Broadcast if needed
-                if (ShouldBroadcast()) {
-                    BroadcastCurrentPrice();
+                    // Broadcast if needed
+                    if (ShouldBroadcast()) {
+                        BroadcastCurrentPrice();
+                    }
                 }
             }
 
@@ -427,7 +475,7 @@ void OracleNode::FetchAndUpdatePrice()
         last_update_time = GetTime();
         consecutive_fetch_failures = 0;
 
-        LogPrintf("Oracle: Updated price for oracle %d: %d micro-USD\n", oracle_id, median_price);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Updated price for oracle %d: %d micro-USD\n", oracle_id, median_price);
     } else {
         std::lock_guard<std::mutex> lock(mtx_price);
         consecutive_fetch_failures++;
@@ -473,7 +521,7 @@ CAmount OracleNode::FetchMedianPrice()
     CAmount price = aggregator.FetchAggregatePrice();
 
     if (price > 0) {
-        LogPrintf("Oracle: Fetched aggregate price from exchanges: %lld micro-USD ($%.6f)\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Fetched aggregate price from exchanges: %lld micro-USD ($%.6f)\n",
                  price, static_cast<double>(price) / 1000000.0);
     } else {
         LogPrintf("Oracle: Failed to fetch aggregate price from exchanges\n");
@@ -760,7 +808,7 @@ ExchangePriceFetcher::ExchangePrice ExchangePriceFetcher::FetchFromPoloniex()
 std::string ExchangePriceFetcher::HttpRequest(const std::string& url)
 {
     // Mock HTTP request - in real implementation would use CURL
-    LogPrintf("Oracle: Mock HTTP request to %s\n", url);
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Mock HTTP request to %s\n", url);
     return "{\"price\":\"0.05\"}"; // Mock JSON response
 }
 
@@ -846,52 +894,115 @@ void OracleManager::Shutdown()
     LogPrintf("Oracle: Shutting down Oracle Manager\n");
     StopAll();
 
-    std::lock_guard<std::mutex> lock(mtx_manager);
-    oracle_nodes.clear();
-    initialized = false;
+    // Take the oracles out of the manager while holding the lock, then destroy
+    // them with the lock released. Destroying an oracle waits for its price
+    // thread, and a price thread that is part way through broadcasting a price
+    // needs this same lock before it can finish. With this, no code anywhere
+    // holds the manager's lock while it starts, stops or destroys an oracle.
+    std::vector<std::unique_ptr<OracleNode>> nodes;
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        nodes.swap(oracle_nodes);
+        initialized = false;
+    }
 }
 
 bool OracleManager::AddOracleNode(uint32_t oracle_id, const std::string& private_key_hex)
 {
-    std::lock_guard<std::mutex> lock(mtx_manager);
-
-    // Check if oracle already exists
-    for (const auto& node : oracle_nodes) {
-        if (node->GetOracleId() == oracle_id) {
-            LogPrintf("Oracle: Oracle %d already exists\n", oracle_id);
-            return false;
+    // Build the oracle with this manager's lock released. Building it can fail, a
+    // failed oracle is destroyed here, destroying one stops it, and stopping takes
+    // the start-and-stop lock. Taking that lock while holding this one is the
+    // opposite order from a stop that is waiting for a price thread, because that
+    // thread needs this lock before it can finish. Both orders together wait for
+    // each other for ever. This is the rule the rest of this file already follows:
+    // never hold the manager's lock while starting, stopping or destroying an oracle.
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        for (const auto& node : oracle_nodes) {
+            if (node->GetOracleId() == oracle_id) {
+                LogPrintf("Oracle: Oracle %d already exists\n", oracle_id);
+                return false;
+            }
         }
     }
 
-    // Create new oracle node
     auto oracle_node = std::make_unique<OracleNode>();
     if (!oracle_node->Initialize(oracle_id, private_key_hex)) {
         LogPrintf("Oracle: Failed to initialize oracle %d\n", oracle_id);
         return false;
     }
 
-    oracle_nodes.push_back(std::move(oracle_node));
+    // The lock was released while the oracle was being built, so another caller may
+    // have added this same one in the meantime. Look again before keeping it.
+    bool already_there = false;
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        for (const auto& node : oracle_nodes) {
+            if (node->GetOracleId() == oracle_id) {
+                already_there = true;
+                break;
+            }
+        }
+        if (!already_there) {
+            oracle_nodes.push_back(std::move(oracle_node));
+        }
+    }
+
+    // Past the end of that block, so an oracle this call built and did not keep is
+    // destroyed with no lock held.
+    if (already_there) {
+        LogPrintf("Oracle: Oracle %d already exists\n", oracle_id);
+        return false;
+    }
+
     LogPrintf("Oracle: Added oracle %d to manager\n", oracle_id);
     return true;
 }
 
 bool OracleManager::RemoveOracleNode(uint32_t oracle_id)
 {
-    std::lock_guard<std::mutex> lock(mtx_manager);
+    const auto find_node = [this, oracle_id] {
+        return std::find_if(oracle_nodes.begin(), oracle_nodes.end(),
+            [oracle_id](const std::unique_ptr<OracleNode>& node) {
+                return node->GetOracleId() == oracle_id;
+            });
+    };
 
-    auto it = std::find_if(oracle_nodes.begin(), oracle_nodes.end(),
-        [oracle_id](const std::unique_ptr<OracleNode>& node) {
-            return node->GetOracleId() == oracle_id;
-        });
-
-    if (it != oracle_nodes.end()) {
-        (*it)->Stop();
-        oracle_nodes.erase(it);
-        LogPrintf("Oracle: Removed oracle %d from manager\n", oracle_id);
-        return true;
+    // Stop the oracle with this manager's lock released. Stopping waits for the
+    // price thread, and a price thread that is part way through broadcasting a
+    // price needs this manager's lock before it can finish, so waiting for it
+    // while holding that lock leaves the two waiting on each other for ever.
+    OracleNode* node{nullptr};
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        auto it = find_node();
+        if (it == oracle_nodes.end()) {
+            return false;
+        }
+        node = it->get();
     }
 
-    return false;
+    node->Stop();
+
+    // Take the oracle out of the manager while holding the lock, then destroy it
+    // with the lock released. Erasing it here would destroy it, destroying it stops
+    // it, and stopping takes the start-and-stop lock, which is the opposite order
+    // from a stop that is waiting for a price thread needing this lock to finish.
+    // It was already stopped above so there is nothing left to wait for, but it is
+    // the order the locks are taken in that deadlocks, not the waiting.
+    std::unique_ptr<OracleNode> removed;
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        auto it = find_node();
+        if (it == oracle_nodes.end()) {
+            return false;
+        }
+        removed = std::move(*it);
+        oracle_nodes.erase(it);
+    }
+
+    LogPrintf("Oracle: Removed oracle %d from manager\n", oracle_id);
+    return true;
 }
 
 OracleNode* OracleManager::GetOracleNode(uint32_t oracle_id)
@@ -908,19 +1019,49 @@ OracleNode* OracleManager::GetOracleNode(uint32_t oracle_id)
 
 void OracleManager::StartAll()
 {
-    std::lock_guard<std::mutex> lock(mtx_manager);
+    // Collect the oracles while holding the lock, then start them with the lock
+    // released, the same way StopAll() does. Starting waits for the lock that
+    // pairs starts with stops, and stopping waits for a price thread that needs
+    // this manager's lock, so holding both at once can leave threads waiting on
+    // each other.
+    std::vector<OracleNode*> nodes;
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        nodes.reserve(oracle_nodes.size());
+        for (const auto& node : oracle_nodes) {
+            nodes.push_back(node.get());
+        }
+    }
 
-    for (auto& node : oracle_nodes) {
+    for (OracleNode* node : nodes) {
         node->Start();
     }
-    LogPrintf("Oracle: Started all oracle nodes (%d total)\n", oracle_nodes.size());
+    LogPrintf("Oracle: Started all oracle nodes (%d total)\n", nodes.size());
 }
 
 void OracleManager::StopAll()
 {
-    std::lock_guard<std::mutex> lock(mtx_manager);
+    // Collect the oracles while holding the lock, then wait for their price
+    // threads with the lock released.
+    //
+    // A price thread that is part way through broadcasting a price asks this
+    // manager which oracle sent it, so the thread needs this same lock before
+    // it can finish. Holding the lock while waiting for the thread leaves the
+    // two waiting on each other for ever, and the node never shuts down.
+    //
+    // The collected pointers stay good here. Oracles are only added or removed
+    // when an operator starts or stops one, which does not happen while the
+    // node is shutting down.
+    std::vector<OracleNode*> nodes;
+    {
+        std::lock_guard<std::mutex> lock(mtx_manager);
+        nodes.reserve(oracle_nodes.size());
+        for (const auto& node : oracle_nodes) {
+            nodes.push_back(node.get());
+        }
+    }
 
-    for (auto& node : oracle_nodes) {
+    for (OracleNode* node : nodes) {
         node->Stop();
     }
     LogPrintf("Oracle: Stopped all oracle nodes\n");
@@ -973,8 +1114,33 @@ bool OracleManager::IsOracleRunning(uint32_t oracle_id) const
     return (it != oracle_nodes.end()) && (*it)->IsRunning();
 }
 
+/**
+ * The one oracle manager, or nothing when none has been built.
+ *
+ * Building it and clearing it both happen under g_oracle_manager_creation. A
+ * reader that does not take that lock races those writes, so every read goes
+ * through here. The lock is held only long enough to copy the pointer out, never
+ * across using it: using it can mean waiting for a price thread, and a price
+ * thread can ask for the manager.
+ */
+static OracleManager* OracleManagerIfBuilt()
+{
+    std::lock_guard<std::mutex> lock(g_oracle_manager_creation);
+    return g_oracle_manager.get();
+}
+
+bool OracleManager::IsBuilt()
+{
+    return OracleManagerIfBuilt() != nullptr;
+}
+
 OracleManager& OracleManager::GetInstance()
 {
+    // Two callers arriving together both used to see no manager, both build one, and
+    // whichever stored its own second destroyed the object the first had just been
+    // handed. The first then used freed memory: the command that lists oracles takes
+    // this reference and immediately locks a mutex inside it. Build it once.
+    std::lock_guard<std::mutex> lock(g_oracle_manager_creation);
     if (!g_oracle_manager) {
         g_oracle_manager = std::make_unique<OracleManager>();
     }
@@ -992,11 +1158,53 @@ void OracleManager::StartOracleService()
     LogPrintf("Oracle: Oracle service initialized. Use 'startoracle <id> <privkey>' to start an oracle.\n");
 }
 
+void OracleManager::StopOraclePriceThreads()
+{
+    {
+        // No more price threads from here on. This happens before the stop
+        // below, and before the check for a manager, because the manager is
+        // created by whichever thread asks for one first: a start that is
+        // already part way through can build a new manager after this point.
+        std::lock_guard<std::mutex> lifecycle_lock(g_oracle_price_thread_lifecycle);
+        g_oracle_price_thread_starts_refused = true;
+    }
+
+    OracleManager* const manager = OracleManagerIfBuilt();
+    if (manager == nullptr) {
+        return;
+    }
+
+    manager->StopAll();
+    LogPrintf("Oracle: Oracle price threads stopped, oracles kept until the rest of shutdown is done\n");
+}
+
 void OracleManager::StopOracleService()
 {
-    if (g_oracle_manager) {
-        g_oracle_manager->Shutdown();
-        g_oracle_manager.reset();
+    std::unique_ptr<OracleManager> doomed;
+    OracleManager* const manager = OracleManagerIfBuilt();
+    if (manager != nullptr) {
+        // Shutdown is called without the creation lock held on purpose: it waits
+        // for price threads, and a price thread can ask for the manager.
+        manager->Shutdown();
+        {
+            // Clear the pointer under the same lock that builds it, so a caller
+            // arriving at this moment sees either a manager or none, and never a
+            // pointer being changed underneath it. The lock is deliberately not held
+            // across Shutdown above: that waits for price threads, and a price
+            // thread can ask for the manager, which would need this lock.
+            std::lock_guard<std::mutex> lock(g_oracle_manager_creation);
+            doomed = std::move(g_oracle_manager);
+        }
         LogPrintf("Oracle: Oracle service stopped\n");
+        // Destroyed here with no lock held. Shutdown above already took the oracles
+        // out and destroyed them, so there is nothing left for this to stop.
+        doomed.reset();
     }
+
+    // The oracle service is gone, so the refusal to start one goes with it. A
+    // node destroys the service and then exits, so nothing can start an oracle
+    // after this. Tests destroy the service and build a new one in the same
+    // process, and they have to be able to start oracles again.
+    std::lock_guard<std::mutex> lifecycle_lock(g_oracle_price_thread_lifecycle);
+    g_oracle_price_thread_starts_refused = false;
 }

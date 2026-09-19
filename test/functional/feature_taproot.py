@@ -646,7 +646,7 @@ MIN_FEE = 130000000
 # === Actual test cases ===
 
 
-def spenders_taproot_active():
+def spenders_taproot_active(digidollar_active=False):
     """Return a list of Spenders for testing post-Taproot activation behavior."""
 
     secs = [generate_privkey() for _ in range(8)]
@@ -1142,7 +1142,7 @@ def spenders_taproot_active():
     hashtype = lambda _: random.choice(VALID_SIGHASHES_TAPROOT)
     for opval in range(76, 0x100):
         opcode = CScriptOp(opval)
-        if not is_op_success(opcode):
+        if not is_op_success(opcode, digidollar_active=digidollar_active):
             continue
         scripts = [
             ("bare_success", CScript([opcode])),
@@ -1173,7 +1173,7 @@ def spenders_taproot_active():
     # Non-OP_SUCCESSx (verify that those aren't accidentally treated as OP_SUCCESSx)
     for opval in range(0, 0x100):
         opcode = CScriptOp(opval)
-        if is_op_success(opcode):
+        if is_op_success(opcode, digidollar_active=digidollar_active):
             continue
         scripts = [
             ("normal", CScript([OP_RETURN, opcode] + [OP_NOP] * 75)),
@@ -1278,8 +1278,11 @@ UTXOData = namedtuple('UTXOData', 'outpoint,output,spender')
 class TaprootTest(DigiByteTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser)
-        parser.add_argument("--dumptests", dest="dump_tests", default=False, action="store_true",
-                            help="Dump generated test cases to directory set by TEST_DUMP_DIR environment variable")
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument("--dumptests", dest="dump_tests", default=False, action="store_true",
+                          help="Dump portable pre-DigiDollar test cases to TEST_DUMP_DIR")
+        mode.add_argument("--digidollar-active", action="store_true",
+                          help="Test active DigiDollar opcodes; portable vectors cannot encode that context")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -1288,6 +1291,9 @@ class TaprootTest(DigiByteTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.extra_args = [["-par=1", "-dandelion=0", "-maxtxfee=1000"]]
+        if not self.options.digidollar_active:
+            # Portable vectors contain Taproot flags without DigiDollar's flag.
+            self.extra_args[0].append("-digidollaractivationheight=1000000")
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
 
@@ -1756,15 +1762,17 @@ class TaprootTest(DigiByteTestFramework):
             print(json.dumps(tests, indent=4, sort_keys=False))
 
     def run_test(self):
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["digidollar"]["active"], self.options.digidollar_active)
         self.gen_test_vectors()
 
         self.log.info("Post-activation tests...")
-        self.test_spenders(self.nodes[0], spenders_taproot_active(), input_counts=[1, 2, 2, 2, 2, 3])
+        self.test_spenders(self.nodes[0], spenders_taproot_active(self.options.digidollar_active), input_counts=[1, 2, 2, 2, 2, 3])
         # Run each test twice; once in isolation, and once combined with others. Testing in isolation
         # means that the standardness is verified in every test (as combined transactions are only standard
         # when all their inputs are standard).
         self.test_spenders(self.nodes[0], spenders_taproot_nonstandard(), input_counts=[1])
         self.test_spenders(self.nodes[0], spenders_taproot_nonstandard(), input_counts=[2, 3])
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["digidollar"]["active"], self.options.digidollar_active)
 
 
 if __name__ == '__main__':

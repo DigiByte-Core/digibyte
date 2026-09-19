@@ -15,7 +15,7 @@ height 600 Groestl is deactivated and crafted Groestl blocks must be rejected;
 below it Groestl is still active and accepted (grandfathered).
 
 The rule is enforced both in ContextualCheckBlockHeader (header acceptance) and in
-ConnectBlock (connection/replay). The latter is exercised by reindexing: a block
+ConnectBlock (connection). The latter is exercised by reindexing: a block
 that was valid when mined (a pre-Odocrypt Groestl block) must survive -reindex and
 -reindex-chainstate, proving the connection-time guard grandfathers by height
 rather than rejecting the algorithm outright.
@@ -109,10 +109,10 @@ class GroestlDeactivationTest(DigiByteTestFramework):
         assert_equal(deployments["algolock"]["type"], "buried")
         assert_equal(deployments["algolock"]["active"], True)
 
-        self.log.info("Reindex-safety: the pre-Odocrypt Groestl block is grandfathered through replay")
+        self.log.info("Reindex-safety: the pre-Odocrypt Groestl block is grandfathered through a reindex")
         # The chain contains a Groestl block at height 151 that was valid when mined
         # (pre-Odocrypt). The ConnectBlock guard must grandfather it by height, so a
-        # full replay must reproduce the exact same tip and height.
+        # a full reindex must reproduce the exact same tip and height.
         final_tip = node.getbestblockhash()
         final_height = node.getblockcount()
         # Confirm height 151 really is the grandfathered Groestl block.

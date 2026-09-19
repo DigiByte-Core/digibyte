@@ -300,11 +300,11 @@ explains why these still require separate equivalence review.
 | Request/submit/result handlers and runtime | [paymaster_processing.cpp](../src/wallet/rpc/paymaster_processing.cpp), [paymaster_runtime.cpp](../src/wallet/rpc/paymaster_runtime.cpp), [paymaster_integration.cpp](../src/wallet/rpc/paymaster_integration.cpp) |
 | Wallet signing bridge | [paymasterpsbt.cpp](../src/wallet/paymasterpsbt.cpp), [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp) |
 | Existing wallet integration and protection | [digidollarwallet.cpp](../src/wallet/digidollarwallet.cpp), [spend.cpp](../src/wallet/spend.cpp), [load.cpp](../src/wallet/load.cpp) |
-| Qt | [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider widget in [digidollartab.cpp](../src/qt/digidollartab.cpp), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
+| Qt | [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), embedded through [paymasterwidget.h](../src/qt/paymasterwidget.h), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
 
 The high-level entry is `senddigidollar` in
-[src/rpc/digidollar.cpp](../src/rpc/digidollar.cpp); the optional sixth `options`
-argument preserves existing five-argument direct-DGB callers. `fee_mode=auto`
+[src/rpc/digidollar.cpp](../src/rpc/digidollar.cpp); the optional seventh `options`
+argument follows upstream `amount_unit` and preserves the upstream direct-DGB API. `fee_mode=auto`
 falls back only after a concrete insufficient-DGB preflight, not on wallet lock
 or unrelated failure. Lower-level quote/PSBT APIs are explicit multi-step
 interfaces and do not bypass Core authorization.

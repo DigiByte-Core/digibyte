@@ -204,6 +204,9 @@ public:
     // Mint DigiDollar with collateral
     DigiDollarMintResult mintDigiDollar(CAmount ddAmount, int lockTier);
 
+    //! Empty when this wallet supports minting, including while it is locked.
+    QString getDigiDollarMintWalletError() const;
+
     // Redeem DigiDollar position
     DigiDollarRedeemResult redeemDigiDollar(const QString& positionId, CAmount amount, const QString& redeemAddress = "");
 

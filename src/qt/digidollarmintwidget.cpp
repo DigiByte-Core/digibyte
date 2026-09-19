@@ -6,13 +6,13 @@
 
 #include <qt/digidollarsendwidget.h> // For AmountValidator
 #include <qt/digidollar_qt_translate.h> // DD-FA-FUNC-032 reject-reason translator
-#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
 #include <qt/digibyteunits.h>
 #include <consensus/amount.h>
 #include <consensus/digidollar.h>
+#include <digidollar/digidollar.h>
 #include <digidollar/txbuilder.h>
 #include <logging.h>
 #include <node/interface_ui.h>
@@ -209,7 +209,6 @@ void DigiDollarMintWidget::setupMintAmountSection()
     m_amountWarningLabel = new QLabel(this);
     m_amountWarningLabel->setObjectName("amountWarningLabel");
     m_amountWarningLabel->setWordWrap(true);
-    DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::INFO);
     m_amountWarningLabel->setVisible(false); // Hidden by default
     m_amountLayout->addWidget(m_amountWarningLabel, 3, 0, 1, 2);
 
@@ -309,7 +308,6 @@ void DigiDollarMintWidget::setupCollateralSection()
     m_oraclePriceLabel->setToolTip(tr("Current DGB price from oracle feed"));
     m_oraclePriceValue = new QLabel("0.01 $USD/DGB", this);
     m_oraclePriceValue->setObjectName("oraclePriceValue");
-    DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     m_oraclePriceValue->setFont(monospaceFont);
     // Theme styling applied in applyTheme()
@@ -365,6 +363,12 @@ void DigiDollarMintWidget::setupCollateralSection()
 
     m_collateralLayout->addWidget(m_availableDGBLabel, 5, 0);
     m_collateralLayout->addWidget(m_availableDGBValue, 5, 1);
+
+    m_mintStatusLabel = new QLabel(this);
+    m_mintStatusLabel->setObjectName("mintVolatilityStatus");
+    m_mintStatusLabel->setWordWrap(true);
+    m_mintStatusLabel->hide();
+    m_collateralLayout->addWidget(m_mintStatusLabel, 6, 0, 1, 2);
 
     m_mainLayout->addWidget(m_collateralFrame);
 }
@@ -482,25 +486,61 @@ void DigiDollarMintWidget::updateBalance()
 void DigiDollarMintWidget::updateOraclePrice()
 {
     if (!isVisible()) return;
-    LogPrintf("DigiDollar Mint: updateOraclePrice() called\n");
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateOraclePrice() called\n");
 
     // Get oracle price from RPC for testnet/mainnet, MockOracleManager for regtest
     ChainType chainType = Params().GetChainType();
-    LogPrintf("DigiDollar Mint: ChainType = %d (REGTEST=%d, TESTNET=%d, MAIN=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: ChainType = %d (REGTEST=%d, TESTNET=%d, MAIN=%d)\n",
               (int)chainType, (int)ChainType::REGTEST, (int)ChainType::TESTNET, (int)ChainType::MAIN);
 
-    if (chainType == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
+    m_mintVolatilityAllowed = true;
+    m_mintStatusLabel->hide();
+    if (m_clientModel && DigiDollar::IsThawDayActive(Params().GetConsensus(), m_clientModel->getNumBlocks() + 1)) {
+        m_mintVolatilityAllowed = false;
+        m_oraclePrice = 0;
+        m_mintStatusLabel->show();
+        try {
+            UniValue rpc_params(UniValue::VARR);
+            const UniValue result = m_clientModel->node().executeRpc("getoracleprice", rpc_params, "");
+            const UniValue& status = result.find_value("mint_volatility");
+            const bool ready = status.find_value("ready").get_bool();
+            const bool quoted = status.find_value("quote_available").get_bool();
+            const bool restricted = status.find_value("minting_restricted").get_bool();
+            m_oraclePrice = status.find_value("candidate_price_micro_usd").getInt<int64_t>() / 1000000.0;
+            const UniValue protection = m_clientModel->node().executeRpc("getprotectionstatus", rpc_params, "");
+            const UniValue& health = protection.find_value("next_block_health");
+            const bool healthReady = health.find_value("ready").get_bool();
+            const bool emergency = healthReady && health.find_value("health_percentage").getInt<int>() < 100;
+            m_mintVolatilityAllowed = ready && quoted && !restricted && healthReady && !emergency;
+            const QString reason = !quoted ? tr("No valid oracle quote; minting is paused.") :
+                (!ready ? tr("Required price history is unavailable; restore or download the missing blocks.") :
+                (restricted ? tr("Minting is paused: the quote differs by at least 20% from the ancestor reference.") :
+                 tr("Quote is within the mint volatility limit. Health, collateral and fees must also pass.")));
+            m_mintStatusLabel->setText(!healthReady ? tr("Canonical health is unavailable; wait for synchronization and retry.") :
+                (emergency ? tr("Minting is paused by emergency health calculated from open vaults.") : reason));
+            m_mintStatusLabel->setToolTip(tr("Candidate height: %1\nRule version: %2\nReference: %3 micro-USD\nSamples: %4\nWindow: %5 through %6\nDeviation: %7 basis points\nConfirmation conditions may change.")
+                .arg(status.find_value("candidate_height").getInt<int>())
+                .arg(status.find_value("rule_version").getInt<int>())
+                .arg(status.find_value("reference_price_micro_usd").getInt<int64_t>())
+                .arg(status.find_value("sample_count").getInt<int>())
+                .arg(status.find_value("window_start_height").getInt<int>())
+                .arg(status.find_value("window_end_height").getInt<int>())
+                .arg(status.find_value("deviation_bps").getInt<int64_t>()));
+        } catch (...) {
+            m_mintStatusLabel->setText(tr("Mint eligibility is unavailable. Wait for synchronization and try again."));
+        }
+    } else if (chainType == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
         // BUG #6 FIX: GetCurrentPrice() returns micro-USD, not cents
         CAmount priceMicroUsd = MockOracleManager::GetInstance().GetCurrentPrice();
         m_oraclePrice = priceMicroUsd / 1000000.0;
-        LogPrintf("DigiDollar Mint: Using MockOracle, price = %f USD\n", m_oraclePrice);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Using MockOracle, price = %f USD\n", m_oraclePrice);
     } else if (m_clientModel) {
         // Get actual oracle price from RPC
-        LogPrintf("DigiDollar Mint: Using RPC (m_clientModel is valid)\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Using RPC (m_clientModel is valid)\n");
         try {
             UniValue params(UniValue::VARR);
             UniValue result = m_clientModel->node().executeRpc("getoracleprice", params, "");
-            LogPrintf("DigiDollar Mint: RPC call succeeded\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: RPC call succeeded\n");
 
             // Price is returned in micro-USD (1,000,000 = $1.00)
             const UniValue& priceVal = result.find_value("price_micro_usd");
@@ -510,7 +550,7 @@ void DigiDollarMintWidget::updateOraclePrice()
             } else {
                 int64_t priceMicroUsd = priceVal.getInt<int64_t>();
                 m_oraclePrice = priceMicroUsd / 1000000.0; // Convert micro-USD to dollars
-                LogPrintf("DigiDollar Mint: Got price_micro_usd=%ld, m_oraclePrice=%f\n", priceMicroUsd, m_oraclePrice);
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Got price_micro_usd=%ld, m_oraclePrice=%f\n", priceMicroUsd, m_oraclePrice);
             }
         } catch (const UniValue& e) {
             LogPrintf("DigiDollar Mint: updateOraclePrice RPC error - %s\n", e.write());
@@ -527,14 +567,12 @@ void DigiDollarMintWidget::updateOraclePrice()
         m_oraclePrice = 0.0;
     }
 
-    LogPrintf("DigiDollar Mint: Final m_oraclePrice = %f\n", m_oraclePrice);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: Final m_oraclePrice = %f\n", m_oraclePrice);
 
     if (m_oraclePrice > 0) {
-        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::SUCCESS);
         m_oraclePriceValue->setText(formatUSDAmount(m_oraclePrice) + "/DGB");
     } else {
-        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
-        m_oraclePriceValue->setText(tr("… Oracle unavailable"));
+        m_oraclePriceValue->setText(tr("Oracle unavailable"));
     }
     updateCollateralCalculation();
 }
@@ -542,7 +580,7 @@ void DigiDollarMintWidget::updateOraclePrice()
 void DigiDollarMintWidget::onAmountChanged()
 {
     QString amountText = m_amountEdit->text();
-    LogPrintf("DigiDollar Mint: onAmountChanged called - text='%s', isEnabled=%d, isReadOnly=%d\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: onAmountChanged called - text='%s', isEnabled=%d, isReadOnly=%d\n",
               amountText.toStdString().c_str(), m_amountEdit->isEnabled(), m_amountEdit->isReadOnly());
     if (!amountText.isEmpty()) {
         m_mintAmount = amountText.toDouble();
@@ -565,7 +603,7 @@ void DigiDollarMintWidget::onAmountChanged()
 void DigiDollarMintWidget::onLockTierChanged()
 {
     int newTier = m_lockTierCombo->currentData().toInt();
-    LogPrintf("DigiDollar Qt: Lock tier changed to: %d\n", newTier);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Lock tier changed to: %d\n", newTier);
 
     // Show warning for long lock periods (1 year or more = tier 4+)
     if (newTier >= 4) {
@@ -611,7 +649,7 @@ void DigiDollarMintWidget::onLockTierChanged()
             m_lockTierCombo->setCurrentIndex(1); // 30 days
             m_lockTierCombo->blockSignals(false);
             m_selectedTier = 1;
-            LogPrintf("DigiDollar Qt: User cancelled long lock, reverting to tier 1\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User cancelled long lock, reverting to tier 1\n");
         } else {
             m_selectedTier = newTier;
         }
@@ -630,6 +668,16 @@ void DigiDollarMintWidget::onLockTierChanged()
 
 void DigiDollarMintWidget::onMintClicked()
 {
+    if (!m_walletModel) {
+        Q_EMIT message(tr("Error"), tr("No wallet model available"), CClientUIInterface::MSG_ERROR);
+        return;
+    }
+    const QString capability_error = m_walletModel->getDigiDollarMintWalletError();
+    if (!capability_error.isEmpty()) {
+        Q_EMIT message(tr("Cannot Mint DigiDollar"), capability_error, CClientUIInterface::MSG_WARNING);
+        return;
+    }
+
     if (!validateAmount() || !validateCollateral()) {
         return;
     }
@@ -644,7 +692,12 @@ void DigiDollarMintWidget::onMintClicked()
     // Refresh oracle price (updates m_oraclePrice)
     updateOraclePrice(); // also calls updateCollateralCalculation()
 
-    // Re-validate after refresh — balance may no longer cover new collateral
+    // Re-validate after refresh — balance may no longer cover new collateral.
+    // The style below decides how the wallet window shows this. Only a style
+    // carrying the modal flag opens a dialog; anything else is handed to the
+    // desktop notification service, which may be missing or switched off, and
+    // then a refused mint tells the user nothing. Every message from this form
+    // uses a modal style for that reason.
     if (!validateCollateral()) {
         Q_EMIT message(tr("Insufficient Collateral"),
                        tr("The oracle price has changed and you no longer have "
@@ -652,7 +705,7 @@ void DigiDollarMintWidget::onMintClicked()
                           "Required: %1\nAvailable: %2")
                        .arg(formatDGBAmount(m_requiredCollateral))
                        .arg(formatDGBAmount(m_availableDGBBalance)),
-                       QMessageBox::Warning);
+                       CClientUIInterface::MSG_WARNING);
         return;
     }
 
@@ -676,7 +729,7 @@ void DigiDollarMintWidget::onMintClicked()
 
         if (priceChangeBox.exec() != QMessageBox::Yes) {
             // User chose to review — form is already updated with new values
-            LogPrintf("DigiDollar Qt: User declined mint after oracle price change "
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User declined mint after oracle price change "
                       "(collateral %.8f -> %.8f)\n", previousCollateral, m_requiredCollateral);
             return;
         }
@@ -694,7 +747,7 @@ void DigiDollarMintWidget::onMintClicked()
         if (!validateAmount()) {
             Q_EMIT message(tr("Invalid Amount"),
                            tr("The mint amount is no longer valid under the active chain limits."),
-                           QMessageBox::Warning);
+                           CClientUIInterface::MSG_WARNING);
             return false;
         }
 
@@ -705,7 +758,7 @@ void DigiDollarMintWidget::onMintClicked()
                               "Required: %1\nAvailable: %2")
                            .arg(formatDGBAmount(m_requiredCollateral))
                            .arg(formatDGBAmount(m_availableDGBBalance)),
-                           QMessageBox::Warning);
+                           CClientUIInterface::MSG_WARNING);
             return false;
         }
 
@@ -720,7 +773,7 @@ void DigiDollarMintWidget::onMintClicked()
                            .arg(formatDGBAmount(previousCollateral))
                            .arg(formatUSDAmount(m_oraclePrice))
                            .arg(formatUSDAmount(previousOraclePrice)),
-                           QMessageBox::Information);
+                           CClientUIInterface::MSG_INFORMATION | CClientUIInterface::BTN_OK | CClientUIInterface::MODAL);
             return false;
         }
 
@@ -822,7 +875,7 @@ void DigiDollarMintWidget::onMintClicked()
         finalWarning.button(QMessageBox::Yes)->setStyleSheet("QPushButton { background-color: #388e3c; color: white; font-weight: bold; font-size: 11pt; padding: 8px 16px; }");
 
         if (finalWarning.exec() != QMessageBox::Yes) {
-            LogPrintf("DigiDollar Qt: User cancelled at final confirmation\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: User cancelled at final confirmation\n");
             return;
         }
 
@@ -831,7 +884,7 @@ void DigiDollarMintWidget::onMintClicked()
         }
 
         if (!m_walletModel) {
-            Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+            Q_EMIT message(tr("Error"), tr("No wallet model available"), CClientUIInterface::MSG_ERROR);
             return;
         }
 
@@ -863,7 +916,7 @@ void DigiDollarMintWidget::onMintClicked()
                         .arg(collateralStr)
                         .arg(m_selectedTier);
 
-            LogPrintf("DigiDollar Qt: Showing success message dialog\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Showing success message dialog\n");
 
             // Show modal message box directly
             QMessageBox msgBox(this);
@@ -873,7 +926,7 @@ void DigiDollarMintWidget::onMintClicked()
             msgBox.setStandardButtons(QMessageBox::Ok);
             msgBox.exec();
 
-            LogPrintf("DigiDollar Qt: Success message shown\n");
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Success message shown\n");
 
             onClearClicked();
             updateBalance(); // Refresh balance displays
@@ -905,7 +958,7 @@ void DigiDollarMintWidget::onMintClicked()
                 break;
             }
 
-            Q_EMIT message(errorTitle, errorMessage, QMessageBox::Critical);
+            Q_EMIT message(errorTitle, errorMessage, CClientUIInterface::MSG_ERROR);
         }
     }
 }
@@ -923,10 +976,10 @@ void DigiDollarMintWidget::updateMintButton()
     bool amountValid = validateAmount();
     bool collateralValid = validateCollateral();
 
-    LogPrintf("DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
               amountValid, collateralValid, m_requiredCollateral, m_availableDGBBalance, m_oraclePrice);
 
-    m_mintButton->setEnabled(amountValid && collateralValid);
+    m_mintButton->setEnabled(amountValid && collateralValid && m_mintVolatilityAllowed);
 }
 
 void DigiDollarMintWidget::updateCollateralCalculation()
@@ -963,6 +1016,18 @@ void DigiDollarMintWidget::calculateRequiredCollateral()
         const CAmount ddAmountCents = static_cast<CAmount>(std::llround(m_mintAmount * 100));
         const CAmount oraclePriceMicroUSD = static_cast<CAmount>(std::llround(m_oraclePrice * 1000000.0));
         const int currentHeight = m_clientModel ? m_clientModel->getNumBlocks() : 0;
+        if (DigiDollar::IsThawDayActive(Params().GetConsensus(), currentHeight + 1)) {
+            m_requiredCollateral = 0;
+            try {
+                UniValue params(UniValue::VARR);
+                params.push_back(ddAmountCents);
+                params.push_back(LOCK_DAYS_FOR_TIER[m_selectedTier]);
+                const UniValue quote = m_clientModel->node().executeRpc("calculatecollateralrequirement", params, "");
+                m_requiredCollateral = quote.find_value("wallet_collateral_dgb").get_real();
+                m_collateralRatio = quote.find_value("effective_ratio").getInt<int>();
+            } catch (...) { m_mintVolatilityAllowed = false; }
+            return;
+        }
         DigiDollar::MintTxBuilder builder(Params(), currentHeight, oraclePriceMicroUSD);
         const CAmount requiredCollateralSats = builder.CalculateRequiredCollateral(ddAmountCents, LOCK_DAYS_FOR_TIER[m_selectedTier]);
         m_requiredCollateral = requiredCollateralSats > 0 ? requiredCollateralSats / static_cast<double>(COIN) : 0.0;
@@ -1098,32 +1163,32 @@ void DigiDollarMintWidget::updateAmountValidation()
         if (!numericAmount || validationState == QValidator::Invalid) {
             // Invalid format - only border color, let system handle background
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("✕ Invalid amount · enter a valid DigiDollar value."));
-            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ERR);
+            m_amountWarningLabel->setText(tr("Invalid amount format"));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
             m_amountWarningLabel->setVisible(true);
         } else if (amount < minAmount) {
             // Below minimum
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("! Amount too small · Minimum mint amount is $%1.").arg(QString::number(minAmount, 'f', 2)));
-            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
+            m_amountWarningLabel->setText(tr("⚠️ Minimum mint amount is $%1").arg(QString::number(minAmount, 'f', 2)));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
             m_amountWarningLabel->setVisible(true);
         } else if (amount > maxAmount) {
             // Above maximum
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("! Amount too large · Maximum mint amount is $%1.").arg(QString::number(maxAmount, 'f', 0)));
-            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
+            m_amountWarningLabel->setText(tr("⚠️ Maximum mint amount is $%1").arg(QString::number(maxAmount, 'f', 0)));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
             m_amountWarningLabel->setVisible(true);
         } else if (m_oraclePrice <= 0) {
             // Oracle price is unavailable; minting must remain fail-closed.
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
-            m_amountWarningLabel->setText(tr("… Minting paused · waiting for an Oracle price."));
-            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::WAITING);
+            m_amountWarningLabel->setText(tr("Oracle price unavailable - minting is paused"));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(warningColor));
             m_amountWarningLabel->setVisible(true);
         } else if (!hasCollateral) {
             // Valid format but insufficient collateral
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
-            m_amountWarningLabel->setText(tr("! Action required · insufficient DGB collateral for this amount."));
-            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
+            m_amountWarningLabel->setText(tr("⚠️ Insufficient DGB collateral for this amount"));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(warningColor));
             m_amountWarningLabel->setVisible(true);
         } else {
             // Valid and sufficient collateral
@@ -1143,7 +1208,6 @@ void DigiDollarMintWidget::setPrivacy(bool privacy)
     updateCollateralCalculation();
     if (m_privacy) {
         m_usdValueValue->setText(maskValue(formatDigiDollarUSDEquivalent(0)));
-        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::INFO);
         m_oraclePriceValue->setText(maskValue(formatUSDAmount(0) + "/DGB"));
     } else {
         updateOraclePrice();

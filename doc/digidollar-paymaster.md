@@ -118,8 +118,11 @@ are accepted only on regtest.
 ## Client use
 
 Existing five-argument `senddigidollar` calls are unchanged and continue to use
-the wallet's own DGB. Paymaster use is selected by the optional sixth `options`
-object. Consult `help senddigidollar` for the exact argument schema used by the
+the wallet's own DGB. Paymaster use is selected by the optional seventh `options`
+object, after upstream `amount_unit` (`"cents"` or `"dollars"`). The older
+Paymaster development branch used argument six for options; positional callers
+must insert `"cents"` before that object when upgrading. Named `options` calls
+remain unambiguous. Consult `help senddigidollar` for the exact argument schema used by the
 running binary.
 
 Example options object:
@@ -176,7 +179,7 @@ After configuring client safety limits, prepare a 10.00-DD recipient payment
 using an integer amount of 1,000 cents:
 
 ```text
-senddigidollar <address> 1000 "" 0 null {
+senddigidollar <address> 1000 "" 0 null "cents" {
   "fee_mode": "paymaster",
   "request_id": "550e8400-e29b-41d4-a716-446655440120",
   "maximum_paymaster_fee_cents": 100
@@ -189,7 +192,7 @@ recipient amount, fee and maximum outflow. To approve, repeat the identical
 request with the returned commitment:
 
 ```text
-senddigidollar <same-address> 1000 "" 0 null {
+senddigidollar <same-address> 1000 "" 0 null "cents" {
   "fee_mode": "paymaster",
   "request_id": "550e8400-e29b-41d4-a716-446655440120",
   "maximum_paymaster_fee_cents": 100,
@@ -234,7 +237,7 @@ Preparation example for an exact 50.00 DD wallet sweep; the same explicit
 authorization step above is required before signing:
 
 ```text
-senddigidollar <address> 5000 "" 0 null {
+senddigidollar <address> 5000 "" 0 null "cents" {
   "fee_mode": "paymaster",
   "request_id": "550e8400-e29b-41d4-a716-446655440110",
   "maximum_paymaster_fee_cents": 100,
@@ -843,7 +846,7 @@ the provider identity, endpoint, policy, and current admission reserve.
 
 The sponsor signs a one-payment capability for the descriptor. The client
 supplies `provider_identity_key`, `restricted_service_descriptor`, and
-`sponsorship_capability` together in the sixth `senddigidollar` options object.
+`sponsorship_capability` together in the seventh `senddigidollar` options object.
 Restricted sessions use exactly one provider attempt. The capability plaintext
 exists only in memory and on the encrypted direct connection: wallets persist
 only its hash, payment binding, reservation, and consumed state. Do not pass a

@@ -11,6 +11,7 @@
 #include <qt/digibyteunits.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/transactiontablemodel.h>
 #include <oracle/mock_oracle.h>
 #include <consensus/dca.h>
 #include <digidollar/health.h>
@@ -54,6 +55,8 @@ static const QString MAX_EXPECTED_BLOCKCHAIN_DGB_LOCKED = QStringLiteral("21,000
 static constexpr int TOTALS_VALUE_HORIZONTAL_PADDING = 36;
 static constexpr int TOTALS_FRAME_HORIZONTAL_PADDING = 72;
 static constexpr int RECENT_TX_AMOUNT_COLUMN_MIN_WIDTH = 128;
+// Wide enough for "Redeem 180-day"; longer names widen it at run time.
+static constexpr int RECENT_TX_CATEGORY_COLUMN_MIN_WIDTH = 130;
 static constexpr int RECENT_TX_COLUMN_SPACING = 16;
 
 enum RecentTransactionRole {
@@ -1083,6 +1086,16 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
 
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     QFontMetrics amountMetrics(monospaceFont);
+    // The type column has to fit the longest name a row can carry. Measure it
+    // with the font the row labels really use, which comes from the theme
+    // stylesheet and not from the list.
+    QLabel categoryProbe(this);
+    categoryProbe.setObjectName("recentTxCategoryLabel");
+    categoryProbe.hide();
+    categoryProbe.ensurePolished();
+    const int categoryColumnWidth = std::max(
+        RECENT_TX_CATEGORY_COLUMN_MIN_WIDTH,
+        categoryProbe.fontMetrics().horizontalAdvance(DigiDollarLabels::ChangeReturned()) + 16);
     int amountColumnWidth = RECENT_TX_AMOUNT_COLUMN_MIN_WIDTH;
     int measuredCount = 0;
     for (const auto& tx : transactions) {
@@ -1135,7 +1148,7 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
             categoryText = lockPeriodStr.isEmpty() ? tr("Redeem") : tr("Redeem %1").arg(lockPeriodStr);
         } else if (tx.category == "redeem_change") {
             icon = "💰";
-            categoryText = tr("Redemption Change");
+            categoryText = DigiDollarLabels::ChangeReturned();
         } else if (tx.category == "send") {
             icon = "📤";
             categoryText = tr("Send");
@@ -1155,7 +1168,10 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
 
         QLabel* categoryLabel = new QLabel(categoryText);
         categoryLabel->setObjectName("recentTxCategoryLabel");
-        categoryLabel->setFixedWidth(130);  // Wide enough for "Redeem 180-day"
+        categoryLabel->setFixedWidth(categoryColumnWidth);
+        if (tx.category == "redeem_change") {
+            categoryLabel->setToolTip(DigiDollarLabels::ChangeReturnedExplanation());
+        }
         layout->addWidget(categoryLabel);
 
         // Amount — DDTransaction stores unsigned magnitudes, so derive sign from

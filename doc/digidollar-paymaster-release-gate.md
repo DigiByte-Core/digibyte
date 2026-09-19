@@ -1,5 +1,8 @@
 # DigiDollar Paymaster V1 release gate
 
+The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
+recorded in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md).
+
 **Status review:** 2026-09-11, source commit `bd270044c1` on
 `feature/digidollar-paymaster-v1`. See the [developer starting point](../PAYMASTER.md)
 and [implementation reference](digidollar-paymaster-implementation.md).

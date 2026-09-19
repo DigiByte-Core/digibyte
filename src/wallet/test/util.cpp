@@ -142,15 +142,25 @@ bool MockableBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrit
     if (!m_pass) {
         return false;
     }
-    const size_t write_index = m_write_count++;
-    if (m_fail_write_at && write_index == *m_fail_write_at) return false;
+    if (m_write_count) {
+        const size_t write_index = (*m_write_count)++;
+        if (m_fail_write_at && *m_fail_write_at && write_index == **m_fail_write_at) return false;
+    }
     SerializeData key_data{key.begin(), key.end()};
+    // A test can refuse one row, to stand for a wallet file that takes some rows
+    // and then stops taking them.
+    if (m_refuse_write != nullptr && *m_refuse_write &&
+        (*m_refuse_write)(Span{key_data.data(), key_data.size()})) {
+        return false;
+    }
     SerializeData value_data{value.begin(), value.end()};
     auto [it, inserted] = m_records.emplace(key_data, value_data);
     if (!inserted && overwrite) { // Overwrite if requested
         it->second = value_data;
         inserted = true;
     }
+    // Tell a test that asked to know, now the row is stored.
+    if (m_on_write != nullptr && *m_on_write) (*m_on_write)(Span{key_data.data(), key_data.size()});
     return inserted;
 }
 
@@ -188,33 +198,6 @@ bool MockableBatch::ErasePrefix(Span<const std::byte> prefix)
         }
         it = m_records.erase(it);
     }
-    return true;
-}
-
-bool MockableBatch::TxnBegin()
-{
-    if (!m_pass || m_transaction_snapshot) return false;
-    m_transaction_snapshot = m_records;
-    return true;
-}
-
-bool MockableBatch::TxnCommit()
-{
-    if (!m_pass || !m_transaction_snapshot) return false;
-    if (m_fail_commit) {
-        m_records = std::move(*m_transaction_snapshot);
-        m_transaction_snapshot.reset();
-        return false;
-    }
-    m_transaction_snapshot.reset();
-    return true;
-}
-
-bool MockableBatch::TxnAbort()
-{
-    if (!m_transaction_snapshot) return false;
-    m_records = std::move(*m_transaction_snapshot);
-    m_transaction_snapshot.reset();
     return true;
 }
 

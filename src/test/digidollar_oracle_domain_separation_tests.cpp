@@ -2,26 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
-// Wave 9 Agent A — Oracle Roster Expansion, Quorum, Domain Separation.
-//
-// DD-FA-SEC-008 — A v0x03 MuSig2 oracle bundle is signed over
-// H(epoch || price || timestamp). The aggregate hash carries no chain or
-// genesis identifier, and mainnet+testnet share an identical oracle
-// roster (`vOraclePublicKeys` slots 0..16, see
-// `src/kernel/chainparams.cpp:329-346` vs `:588-604`). A bundle whose
-// payload epoch matches a target chain's `GetCurrentEpoch(block_height)`
-// therefore verifies against any chain that uses the same oracle keys —
-// a cross-chain replay vector that violates Wave-9 invariant
-// "domain tags include genesis/chain-id and deployment so cross-chain or
-// cross-deployment replay is impossible".
-//
-// This file pins the desired domain-separated behavior: the same
-// epoch+price+timestamp values, signed by the same oracles under one
-// chain's `hashGenesisBlock`, must NOT verify when re-presented to a
-// validator running with a different `hashGenesisBlock`.
-//
-// Pre-fix this test fails (the cross-chain bundle verifies). Post-fix it
-// passes (the bundle is rejected by the alternate-chain validator).
+// Bundle verification binds full oracle keys, epoch settings, and the genesis
+// hash to the supplied parameter snapshot, including copies of active params.
 
 #include <boost/test/unit_test.hpp>
 
@@ -49,11 +31,8 @@
 
 namespace {
 
-// Reuse the easypow / local-mini-testnet roster the existing
-// digidollar_oracle_roster_tests harness already exercises. These keys
-// are activated when CTestNetParams sees -easypow=1 and rewrite both
-// `vOraclePublicKeys` and `vOracleNodes` to a deterministic set whose
-// private keys are derivable here.
+// The local testnet roster contains both even- and odd-Y keys. Preserve the
+// secrets' original parity so signing agrees with the configured full keys.
 constexpr int32_t DOMAIN_TEST_HEIGHT = 650;
 constexpr uint64_t DOMAIN_TEST_PRICE = 51000;
 constexpr int64_t DOMAIN_TEST_TIMESTAMP = 1735689600;
@@ -76,19 +55,6 @@ std::array<unsigned char, 32> TestnetOracleSecret(uint8_t oracle_id)
     std::array<unsigned char, 32> secret{};
     std::memcpy(secret.data(), hash.begin(), secret.size());
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-    secp256k1_pubkey pubkey;
-    if (ctx && secp256k1_ec_pubkey_create(ctx, &pubkey, secret.data())) {
-        unsigned char serialized[33];
-        size_t serialized_len = sizeof(serialized);
-        if (secp256k1_ec_pubkey_serialize(ctx, serialized, &serialized_len, &pubkey,
-                                          SECP256K1_EC_COMPRESSED) &&
-            serialized_len == sizeof(serialized) && serialized[0] == 0x03) {
-            const int negated = secp256k1_ec_seckey_negate(ctx, secret.data());
-            BOOST_REQUIRE(negated == 1);
-        }
-    }
-    if (ctx) secp256k1_context_destroy(ctx);
     return secret;
 }
 
@@ -102,9 +68,10 @@ std::vector<unsigned char> EncodeBitmapUnchecked(const std::vector<uint8_t>& ora
     return bitmap;
 }
 
-bool SignBundleUnderActiveConsensus(COracleBundle& bundle,
-                                    const std::vector<uint8_t>& oracle_ids,
-                                    uint16_t total_oracles)
+bool SignBundle(COracleBundle& bundle,
+                const std::vector<uint8_t>& oracle_ids,
+                uint16_t total_oracles,
+                const Consensus::Params& params = Params().GetConsensus())
 {
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!ctx) return false;
@@ -156,10 +123,7 @@ bool SignBundleUnderActiveConsensus(COracleBundle& bundle,
         return false;
     }
 
-    // Sign under the *active* chain's consensus hash (the testnet validator
-    // path). Post-fix this hash will bind hashGenesisBlock; pre-fix it is
-    // just H(epoch || price || timestamp).
-    const uint256 msg_hash = ComputeOracleBundleHash(bundle);
+    const uint256 msg_hash = ComputeOracleBundleHash(bundle, params.hashGenesisBlock);
     unsigned char msg32[32];
     std::memcpy(msg32, msg_hash.begin(), sizeof(msg32));
 
@@ -222,23 +186,26 @@ Consensus::Params AlternateChainParams()
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_oracle_domain_separation_tests, LocalMiniTestnetSetup)
 
-// Baseline sanity: a freshly signed v0x03 bundle verifies under a
-// copy of the active testnet consensus. We pass a copy (not the live
-// reference) so ValidateMuSig2Bundle takes the
-// ComputeAggregatePubkeyFromConsensusParams path and parses x-only
-// pubkeys directly out of params.vOraclePublicKeys — that matches the
-// 0x02-prefix canonical x-only keys produced by the easypow secret
-// derivation in TestnetOracleSecret(). This guards the test harness so
-// a future aggregator change cannot mask the cross-chain failure.
+// A mixed-parity bundle must verify under both the active parameters and a copy.
 BOOST_AUTO_TEST_CASE(bundle_verifies_under_signing_chain)
 {
     COracleBundle bundle = MakeDomainTestBundle();
     const std::vector<uint8_t> signers{0, 1, 2, 3, 4, 5, 6, 7, 8};
     BOOST_REQUIRE_EQUAL(static_cast<int>(signers.size()), DOMAIN_TEST_QUORUM);
-    BOOST_REQUIRE(SignBundleUnderActiveConsensus(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS));
+    BOOST_REQUIRE(SignBundle(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS));
 
+    bool even = false;
+    bool odd = false;
+    for (uint8_t id : signers) {
+        const auto& key = Params().GetOracleNodes()[id].pubkey;
+        even |= key[0] == 0x02;
+        odd |= key[0] == 0x03;
+    }
+    BOOST_REQUIRE(even && odd);
     const Consensus::Params same_chain_params = Params().GetConsensus();
     std::string error;
+    BOOST_REQUIRE(OracleBundleManager::ValidateMuSig2Bundle(
+        bundle, DOMAIN_TEST_HEIGHT, Params().GetConsensus(), error));
     const bool ok = OracleBundleManager::ValidateMuSig2Bundle(
         bundle, DOMAIN_TEST_HEIGHT, same_chain_params, error);
     BOOST_TEST_MESSAGE("baseline same-chain validation: ok=" << ok << " error='" << error << "'");
@@ -246,23 +213,14 @@ BOOST_AUTO_TEST_CASE(bundle_verifies_under_signing_chain)
         "v0x03 bundle must verify under the chain it was signed for");
 }
 
-// DD-FA-SEC-008 — cross-chain replay must be rejected.
-//
-// Re-presenting a v0x03 bundle that was signed for chain A (active
-// testnet) to a validator running on chain B (synthesized via
-// AlternateChainParams: same oracle keys, different hashGenesisBlock)
-// must FAIL. Today it passes because the message hash carries no chain
-// identifier — that is exactly the bug this case pins.
+// Equal oracle rosters do not make two genesis domains interchangeable.
 BOOST_AUTO_TEST_CASE(rejects_bundle_signed_for_different_chain)
 {
     COracleBundle bundle = MakeDomainTestBundle();
     const std::vector<uint8_t> signers{0, 1, 2, 3, 4, 5, 6, 7, 8};
-    BOOST_REQUIRE(SignBundleUnderActiveConsensus(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS));
+    BOOST_REQUIRE(SignBundle(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS));
 
-    // Sanity: the same bundle verifies under a copy of the signing chain
-    // first, so failure under AlternateChainParams can only be due to the
-    // hashGenesisBlock domain change (post-fix). Pre-fix this asserts the
-    // bug is reachable.
+    // Establish a valid signature before changing only the chain domain.
     {
         const Consensus::Params same_chain = Params().GetConsensus();
         std::string err;
@@ -277,13 +235,68 @@ BOOST_AUTO_TEST_CASE(rejects_bundle_signed_for_different_chain)
     BOOST_TEST_MESSAGE("cross-chain replay: ok=" << ok << " error='" << error << "'");
 
     BOOST_CHECK_MESSAGE(!ok,
-        "DD-FA-SEC-008: a v0x03 bundle signed for one DigiByte chain must"
+        "A v0x03 bundle signed for one DigiByte chain must"
         " not validate under another chain (differing hashGenesisBlock),"
         " even when the oracle roster is identical. Domain-separate the"
         " MuSig2 message hash with the chain's hashGenesisBlock.");
     BOOST_CHECK_MESSAGE(error.find("signature") != std::string::npos ||
                         error.find("chain") != std::string::npos,
         "cross-chain rejection should be a signature/chain mismatch, got: '" + error + "'");
+}
+
+BOOST_AUTO_TEST_CASE(copied_chain_domain_is_used_for_signing_and_validation)
+{
+    const auto other_chain = AlternateChainParams();
+    COracleBundle bundle = MakeDomainTestBundle();
+    const std::vector<uint8_t> signers{0, 1, 2, 3, 4, 5, 6};
+    BOOST_REQUIRE(SignBundle(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS, other_chain));
+    std::string error;
+    BOOST_REQUIRE(OracleBundleManager::ValidateMuSig2Bundle(bundle, DOMAIN_TEST_HEIGHT, other_chain, error));
+    BOOST_CHECK(!OracleBundleManager::ValidateMuSig2Bundle(
+        bundle, DOMAIN_TEST_HEIGHT, Params().GetConsensus(), error));
+    BOOST_CHECK(error.find("signature") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(copied_epoch_length_is_independent_of_active_chain)
+{
+    auto params = Params().GetConsensus();
+    const std::vector<uint8_t> signers{0, 1, 2, 3, 4, 5, 6};
+    for (int epoch_length : {13, 0, -1}) {
+        params.nDDOracleEpochBlocks = epoch_length;
+        COracleBundle bundle = MakeDomainTestBundle();
+        bundle.epoch = DOMAIN_TEST_HEIGHT / (epoch_length > 0 ? epoch_length : 1440);
+        BOOST_REQUIRE(SignBundle(bundle, signers, DOMAIN_TEST_TOTAL_SLOTS, params));
+        std::string error;
+        BOOST_REQUIRE(OracleBundleManager::ValidateMuSig2Bundle(bundle, DOMAIN_TEST_HEIGHT, params, error));
+        BOOST_CHECK(!OracleBundleManager::ValidateMuSig2Bundle(
+            bundle, DOMAIN_TEST_HEIGHT, Params().GetConsensus(), error));
+        BOOST_CHECK(error.find("epoch mismatch") != std::string::npos);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(supplied_roster_supports_all_256_oracle_slots)
+{
+    auto params = Params().GetConsensus();
+    params.nOracleTotalOracles = 256;
+    params.nOraclePubkeyCount = 256;
+    params.vOraclePublicKeys.clear();
+    params.vOracleCompressedPublicKeys.clear();
+    for (int id = 0; id < 256; ++id) {
+        const auto secret = TestnetOracleSecret(static_cast<uint8_t>(id));
+        CKey key;
+        key.Set(secret.begin(), secret.end(), true);
+        const auto pubkey = key.GetPubKey();
+        params.vOraclePublicKeys.push_back(HexStr(Span{pubkey.begin() + 1, size_t{32}}));
+        params.vOracleCompressedPublicKeys.emplace_back(pubkey.begin(), pubkey.end());
+    }
+    COracleBundle bundle = MakeDomainTestBundle();
+    const std::vector<uint8_t> signers{0, 1, 2, 3, 4, 5, 255};
+    BOOST_REQUIRE(SignBundle(bundle, signers, 256, params));
+    std::string error;
+    BOOST_REQUIRE(OracleBundleManager::ValidateMuSig2Bundle(bundle, DOMAIN_TEST_HEIGHT, params, error));
+    params.nOraclePubkeyCount = 255;
+    BOOST_CHECK(!OracleBundleManager::ValidateMuSig2Bundle(bundle, DOMAIN_TEST_HEIGHT, params, error));
+    BOOST_CHECK(error.find("outside active oracle roster") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

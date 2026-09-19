@@ -27,6 +27,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <atomic>
 #include <limits>
 #include <util/moneystr.h>
 #include <validation.h>
@@ -41,6 +42,295 @@
 #include <memory>
 
 namespace DigiDollar {
+
+namespace {
+bool IsCanonicalTaproot(const CScript& script)
+{
+    int version;
+    std::vector<unsigned char> program;
+    return script.IsWitnessProgram(version, program) && version == 1 && program.size() == 32;
+}
+
+bool CoinMayContainDigiDollar(const Coin& coin, const Consensus::Params& params)
+{
+    return !coin.IsSpent() && !coin.IsCoinBase() && params.DigiDollarHeight != std::numeric_limits<int>::max() &&
+           coin.nHeight >= static_cast<uint32_t>(params.DigiDollarHeight) &&
+           IsCanonicalTaproot(coin.out.scriptPubKey);
+}
+} // namespace
+
+VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& coin,
+                                      const Consensus::Params& params,
+                                      const CanonicalTxLookup& lookup,
+                                      CanonicalVault& vault, std::string& error)
+{
+    vault = {};
+    if (!CoinMayContainDigiDollar(coin, params) || coin.out.nValue <= 0) return VaultLookupResult::NOT_VAULT;
+    CTransactionRef creating;
+    if (!lookup || !lookup(outpoint.hash, coin.nHeight, creating) || !creating ||
+        creating->GetHash() != outpoint.hash || outpoint.n >= creating->vout.size() ||
+        creating->vout[outpoint.n] != coin.out) {
+        error = strprintf("DigiDollar state not ready: restore the creating block at height %u for %s:%u",
+                          coin.nHeight, outpoint.hash.ToString(), outpoint.n);
+        return VaultLookupResult::NOT_READY;
+    }
+    if (!HasDigiDollarMarker(*creating) || creating->IsCoinBase() || DigiDollar::GetDigiDollarTxType(*creating) != DD_TX_MINT)
+        return VaultLookupResult::NOT_VAULT;
+    CAmount principal{0}, collateral{0};
+    if (!ExtractMintAccountingAmounts(*creating, principal, collateral, false)) {
+        // The creating block is present and readable; the mint inside it simply
+        // does not record an amount and a single collateral output that can be
+        // read back. Every node reading that same block reaches the same answer,
+        // so this output is not a collateral vault and is left out of the totals.
+        // That is different from the node having lost the block, which is the
+        // readiness failure above: reporting this as missing data would stop
+        // every node at the Thaw Day height for ever, asking the operator to
+        // restore a block the node already has.
+        LogPrintf("DigiDollar: mint %s does not record a readable vault amount, so output %s:%u "
+                  "at height %u is not counted as collateral\n",
+                  creating->GetHash().ToString(), outpoint.hash.ToString(), outpoint.n, coin.nHeight);
+        return VaultLookupResult::NOT_VAULT;
+    }
+    // ExtractMintAccountingAmounts requires exactly one positive Taproot output,
+    // and the outpoint checked above is that output, so the two amounts agree.
+    // The check stays as a guard. If it ever fired the creating block would still
+    // be present and readable, so the answer has to be the same on every node:
+    // not a vault, rather than a halt.
+    if (collateral != coin.out.nValue) {
+        LogPrintf("DigiDollar: mint %s records collateral %d but its output %s:%u at height %u holds %d, "
+                  "so it is not counted as collateral\n",
+                  creating->GetHash().ToString(), collateral, outpoint.hash.ToString(), outpoint.n,
+                  coin.nHeight, coin.out.nValue);
+        return VaultLookupResult::NOT_VAULT;
+    }
+    vault = {outpoint, principal, collateral};
+    return VaultLookupResult::VAULT;
+}
+
+std::optional<int> CalculateChainstateHealth(const ChainstateHealth& state, CAmount price_micro_usd)
+{
+    if (!state.IsValid() || price_micro_usd <= 0) return std::nullopt;
+    return DCA::DynamicCollateralAdjustment::CalculateSystemHealth(
+        state.collateral, state.open_vault_principal, price_micro_usd / 10);
+}
+
+namespace {
+// Counts the full walks of the coin set. See ChainstateHealthRebuildCount().
+std::atomic<uint64_t> g_chainstate_health_rebuilds{0};
+} // namespace
+
+uint64_t ChainstateHealthRebuildCount() { return g_chainstate_health_rebuilds.load(std::memory_order_relaxed); }
+
+bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params& params,
+                                const CanonicalTxLookup& lookup,
+                                ChainstateHealth& health, std::string& error,
+                                const std::function<bool()>& interrupted,
+                                CAmount* circulating_supply,
+                                const std::function<void(uint64_t, uint64_t)>& progress,
+                                bool* circulating_supply_known)
+{
+    g_chainstate_health_rebuilds.fetch_add(1, std::memory_order_relaxed);
+    try {
+        ChainstateHealth rebuilt;
+        rebuilt.genesis_hash = params.hashGenesisBlock;
+        rebuilt.activation_height = params.nDDThawDayHeight;
+        rebuilt.digidollar_height = params.DigiDollarHeight;
+        rebuilt.best_block = view.GetBestBlock();
+        auto cursor = view.Cursor();
+        if (!cursor || cursor->GetBestBlock() != rebuilt.best_block || rebuilt.best_block.IsNull()) {
+            error = "DigiDollar state not ready: a consistent UTXO view is required";
+            return false;
+        }
+        CAmount supply{0};
+        bool supply_known{true};
+        uint64_t scanned{0};
+        auto last_progress = SteadyClock::now();
+        if (progress) progress(0, 0);
+        for (; cursor->Valid(); cursor->Next()) {
+            if (interrupted && interrupted()) {
+                error = "DigiDollar accounting reconstruction cancelled";
+                return false;
+            }
+            COutPoint outpoint;
+            Coin coin;
+            if (!cursor->GetKey(outpoint) || !cursor->GetValue(coin)) {
+                error = "DigiDollar state not ready: cannot read the UTXO snapshot";
+                return false;
+            }
+            CanonicalVault vault;
+            const auto result = LookupCanonicalVault(outpoint, coin, params, lookup, vault, error);
+            if (result == VaultLookupResult::NOT_READY) return false;
+            if (result == VaultLookupResult::VAULT && !rebuilt.AddVault(vault.principal, vault.collateral)) {
+                error = "DigiDollar state not ready: reconstructed vault totals exceed the supported range";
+                return false;
+            }
+            if (circulating_supply && CoinMayContainDigiDollar(coin, params) && coin.out.nValue == 0) {
+                CTransactionRef creating;
+                if (!lookup || !lookup(outpoint.hash, coin.nHeight, creating) || !creating ||
+                    creating->GetHash() != outpoint.hash || outpoint.n >= creating->vout.size() ||
+                    creating->vout[outpoint.n] != coin.out) {
+                    error = strprintf("DigiDollar supply not ready: restore the creating block at height %u", coin.nHeight);
+                    return false;
+                }
+                if (HasDigiDollarMarker(*creating)) {
+                    CAmount amount{0};
+                    if (!ExtractDDAmountFromBlockDb(outpoint, coin.nHeight, lookup, amount) || amount <= 0) {
+                        if (!circulating_supply_known) {
+                            error = "DigiDollar supply not ready: invalid creating token metadata";
+                            return false;
+                        }
+                        supply_known = false;
+                    } else if (amount > std::numeric_limits<CAmount>::max() - supply) {
+                        error = "DigiDollar supply not ready: token total exceeds the supported range";
+                        return false;
+                    } else {
+                        supply += amount;
+                    }
+                }
+            }
+            if (++scanned % 4096 == 0 && SteadyClock::now() - last_progress >= std::chrono::seconds{1}) {
+                last_progress = SteadyClock::now();
+                if (progress) progress(scanned, 0);
+                else LogPrintf("DigiDollar accounting reconstruction: %u outputs checked, %u open vaults\n", scanned, rebuilt.active_vaults);
+            }
+        }
+        cursor->CheckStatus();
+        if (view.GetBestBlock() != rebuilt.best_block || !rebuilt.IsValid()) {
+            error = "DigiDollar state not ready: UTXO state changed during reconstruction";
+            return false;
+        }
+        if (progress) progress(scanned, scanned);
+        if (interrupted && interrupted()) {
+            error = "DigiDollar accounting reconstruction cancelled";
+            return false;
+        }
+        health = rebuilt;
+        if (circulating_supply && supply_known) *circulating_supply = supply;
+        if (circulating_supply_known) *circulating_supply_known = supply_known;
+        return true;
+    } catch (const dbwrapper_error& exception) {
+        error = std::string("DigiDollar state not ready: restore unreadable chainstate data: ") + exception.what();
+        return false;
+    }
+}
+
+bool UpdateChainstateHealth(const CTransaction& tx, const std::vector<Coin>& inputs,
+                           const Consensus::Params& params, const CanonicalTxLookup& lookup,
+                           ChainstateHealth& health, bool undo, std::string& error, uint32_t creating_height)
+{
+    if (tx.IsCoinBase()) return true;
+    if (inputs.size() != tx.vin.size()) {
+        error = "DigiDollar accounting requires complete input coins";
+        return false;
+    }
+    auto next = health;
+    // Reverse output creation before input restoration, matching UTXO undo.
+    auto mint = [&]() {
+        if (params.DigiDollarHeight == std::numeric_limits<int>::max() ||
+            creating_height < static_cast<uint32_t>(params.DigiDollarHeight)) return true;
+        if (!HasDigiDollarMarker(tx) || DigiDollar::GetDigiDollarTxType(tx) != DD_TX_MINT) return true;
+        CAmount principal{0}, collateral{0};
+        if (!ExtractMintAccountingAmounts(tx, principal, collateral, false)) return false;
+        return undo ? next.RemoveVault(principal, collateral) : next.AddVault(principal, collateral);
+    };
+    if (undo && !mint()) {
+        error = "DigiDollar accounting cannot undo minted vault";
+        return false;
+    }
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        CanonicalVault vault;
+        const auto result = LookupCanonicalVault(tx.vin[i].prevout, inputs[i], params, lookup, vault, error);
+        if (result == VaultLookupResult::NOT_READY) return false;
+        if (result == VaultLookupResult::VAULT &&
+            !(undo ? next.AddVault(vault.principal, vault.collateral) : next.RemoveVault(vault.principal, vault.collateral))) {
+            error = "DigiDollar accounting cannot apply vault spend";
+            return false;
+        }
+    }
+    if (!undo && !mint()) {
+        error = "DigiDollar accounting cannot add minted vault";
+        return false;
+    }
+    health = next;
+    return true;
+}
+
+SupplyChangeResult GetCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                             uint32_t height, const Consensus::Params& params,
+                                             const CanonicalTxLookup& lookup, CAmount& change, std::string& error)
+{
+    if (tx.IsCoinBase()) { change = 0; return SupplyChangeResult::KNOWN; }
+    if (inputs.size() != tx.vin.size()) {
+        error = "DigiDollar supply requires complete input coins";
+        return SupplyChangeResult::FAILURE;
+    }
+    auto token_amount = [&](const COutPoint& outpoint, const Coin& coin, const CanonicalTxLookup& source,
+                            CAmount& amount) {
+        if (!CoinMayContainDigiDollar(coin, params) || coin.out.nValue != 0) {
+            amount = 0;
+            return SupplyChangeResult::KNOWN;
+        }
+        CTransactionRef creating;
+        if (!source || !source(outpoint.hash, coin.nHeight, creating) || !creating ||
+            creating->GetHash() != outpoint.hash || outpoint.n >= creating->vout.size() ||
+            creating->vout[outpoint.n] != coin.out) {
+            error = strprintf("DigiDollar supply not ready: restore the creating block at height %u", coin.nHeight);
+            return SupplyChangeResult::FAILURE;
+        }
+        if (!HasDigiDollarMarker(*creating)) {
+            amount = 0;
+            return SupplyChangeResult::KNOWN;
+        }
+        const CanonicalTxLookup verified_source = [&](const uint256& hash, uint32_t height, CTransactionRef& out) {
+            if (hash != outpoint.hash || height != coin.nHeight) return false;
+            out = creating;
+            return true;
+        };
+        if (!ExtractDDAmountFromBlockDb(outpoint, coin.nHeight, verified_source, amount) || amount <= 0) {
+            return SupplyChangeResult::UNKNOWN_METADATA;
+        }
+        return SupplyChangeResult::KNOWN;
+    };
+    util::int128_t delta{0};
+    bool unknown_metadata{false};
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        CAmount amount{0};
+        const auto result = token_amount(tx.vin[i].prevout, inputs[i], lookup, amount);
+        if (result == SupplyChangeResult::FAILURE) return result;
+        if (result == SupplyChangeResult::UNKNOWN_METADATA) unknown_metadata = true;
+        else delta -= amount;
+    }
+    const auto created = MakeTransactionRef(tx);
+    const CanonicalTxLookup created_lookup = [&](const uint256& txid, uint32_t coin_height, CTransactionRef& out) {
+        if (txid != tx.GetHash() || coin_height != height) return false;
+        out = created;
+        return true;
+    };
+    for (uint32_t i = 0; i < tx.vout.size(); ++i) {
+        CAmount amount{0};
+        const auto result = token_amount(COutPoint{tx.GetHash(), i}, Coin{tx.vout[i], static_cast<int>(height), false}, created_lookup, amount);
+        if (result == SupplyChangeResult::FAILURE) return result;
+        if (result == SupplyChangeResult::UNKNOWN_METADATA) unknown_metadata = true;
+        else delta += amount;
+    }
+    if (unknown_metadata) {
+        error = "DigiDollar supply unavailable: creating token metadata does not establish an unambiguous amount";
+        return SupplyChangeResult::UNKNOWN_METADATA;
+    }
+    if (delta < std::numeric_limits<CAmount>::min() || delta > std::numeric_limits<CAmount>::max()) {
+        error = "DigiDollar circulating supply change exceeds the supported range";
+        return SupplyChangeResult::FAILURE;
+    }
+    change = static_cast<CAmount>(delta);
+    return SupplyChangeResult::KNOWN;
+}
+
+bool CalculateCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                     uint32_t height, const Consensus::Params& params,
+                                     const CanonicalTxLookup& lookup, CAmount& change, std::string& error)
+{
+    return GetCirculatingSupplyChange(tx, inputs, height, params, lookup, change, error) == SupplyChangeResult::KNOWN;
+}
 
 // Static member definitions
 SystemMetrics SystemHealthMonitor::s_currentMetrics;
@@ -307,6 +597,14 @@ void SystemHealthMonitor::Shutdown()
 
 bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view, const node::BlockManager* blockman, const CTxMemPool* mempool, const CChain* chain, const Consensus::Params* consensus)
 {
+    return ScanUTXOSet(view, validation_view, blockman, mempool, chain, consensus, {}).status == HealthScanResult::Status::COMPLETE;
+}
+
+HealthScanResult SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view,
+                                                const node::BlockManager* blockman, const CTxMemPool* mempool,
+                                                const CChain* chain, const Consensus::Params* consensus,
+                                                const HealthScanCallbacks& callbacks)
+{
     // DigiDollar activation floor: a DD vault output can only be created at/after
     // activation, which cannot happen below the deployment's minimum activation height.
     // Below the floor there are no DD vaults, so we skip those coins without reading a
@@ -314,42 +612,63 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
     // blocks are gone) and a full node (pre-floor blocks are present but hold no vaults).
     const int dd_floor = consensus ? DigiDollar::EarliestActivationFloor(*consensus) : 0;
 
-    // Reset counters
-    s_currentMetrics.totalDDSupply = 0;
-    s_currentMetrics.totalCollateral = 0;
-    s_currentMetrics.totalActivePositions = 0;
-    s_currentMetrics.systemHealth = 0;
-    s_currentMetrics.hasCanonicalHealth = false;
+    // Keep a complete snapshot available until the replacement scan succeeds.
+    auto rebuilt = GetCachedMetrics();
+    rebuilt.totalDDSupply = 0;
+    rebuilt.totalCollateral = 0;
+    rebuilt.totalActivePositions = 0;
+    rebuilt.systemHealth = 0;
+    rebuilt.hasCanonicalHealth = false;
 
-    // Reset tier counters
-    for (auto& tier : s_currentMetrics.tiers) {
-        tier.ddMinted = 0;
-        tier.dgbLocked = 0;
-        tier.positions = 0;
-        tier.healthRatio = 0;
-    }
+    uint64_t outputs_checked{0};
+    auto last_progress = SteadyClock::now();
+    if (callbacks.progress) callbacks.progress(0, 0);
+    const auto cancelled = [&] { return callbacks.cancelled && callbacks.cancelled(); };
+    const auto cancellation = [] {
+        LogPrintf("DigiDollar legacy health reconstruction cancelled; cached metrics were not replaced\n");
+        return HealthScanResult{HealthScanResult::Status::CANCELLED, "DigiDollar legacy health reconstruction cancelled"};
+    };
+    const auto publish = [&]() -> HealthScanResult {
+        if (callbacks.progress) callbacks.progress(outputs_checked, outputs_checked);
+        if (cancelled()) return cancellation();
+        std::lock_guard<std::mutex> lock(s_metricsMutex);
+        s_currentMetrics.totalDDSupply = rebuilt.totalDDSupply;
+        s_currentMetrics.totalCollateral = rebuilt.totalCollateral;
+        s_currentMetrics.totalActivePositions = rebuilt.totalActivePositions;
+        s_currentMetrics.systemHealth = rebuilt.systemHealth;
+        s_currentMetrics.hasCanonicalHealth = rebuilt.hasCanonicalHealth;
+        for (auto& tier : s_currentMetrics.tiers) {
+            tier.ddMinted = 0;
+            tier.dgbLocked = 0;
+            tier.positions = 0;
+            tier.healthRatio = 0;
+        }
+        return {};
+    };
+    if (cancelled()) return cancellation();
 
     if (!view) {
         LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: No coins view provided\n");
-        return true;
+        return publish();
     }
 
     if (!blockman) {
         LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: No block manager provided - skipping UTXO scan (unit test mode?)\n");
-        return true;
+        return publish();
     }
 
     // Create cursor to iterate all UTXOs (similar to gettxoutsetinfo)
     std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
     if (!pcursor) {
         LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Unable to create UTXO cursor\n");
-        return true;
+        return publish();
     }
 
     LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Starting blockchain-wide UTXO scan with full transaction access\n");
-    LogPrintf("DigiDollar: ========== STARTING UTXO SCAN ==========\n");
+    LogPrintf("DigiDollar legacy health reconstruction: checking unspent outputs\n");
 
     bool complete = true;
+    std::string error;
     size_t vaults_found = 0;
     size_t dd_amount_extracted = 0;
     size_t dd_amount_estimated = 0;
@@ -362,6 +681,12 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
 
     // Iterate through ALL UTXOs in the blockchain
     while (pcursor->Valid()) {
+        if (cancelled()) return cancellation();
+        if (++outputs_checked % 4096 == 0 && SteadyClock::now() - last_progress >= std::chrono::seconds{1}) {
+            last_progress = SteadyClock::now();
+            LogPrintf("DigiDollar legacy health reconstruction: %u outputs checked\n", outputs_checked);
+            if (callbacks.progress) callbacks.progress(outputs_checked, 0);
+        }
         COutPoint key;
         Coin coin;
 
@@ -408,7 +733,7 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
             if (validation_view) {
                 Coin validation_coin;
                 if (!validation_view->GetCoin(key, validation_coin) || validation_coin.IsSpent()) {
-                    LogPrintf("DigiDollar: Skipping spent DD vault candidate: %s:%d\n", txid.ToString(), key.n);
+                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Skipping spent DD vault candidate: %s:%d\n", txid.ToString(), key.n);
                     processed_txids.insert(txid);
                     pcursor->Next();
                     continue;
@@ -445,10 +770,10 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
                 // DCA/ERR health, so this must fail CLOSED — report incomplete instead
                 // of silently undercounting supply/collateral.
                 if (chain && dd_floor > 0 && static_cast<int>(coin.nHeight) >= dd_floor) {
-                    LogPrintf("ERROR: ScanUTXOSet: could not read the creating transaction of "
-                              "DD vault candidate %s (coin height %u >= DigiDollar floor %d). "
-                              "Block data is incomplete; restart with -reindex.\n",
-                              txid.ToString(), coin.nHeight, dd_floor);
+                    error = strprintf("DigiDollar legacy health is unavailable: cannot read transaction %s at height %u (block %s). Restore the required retained block data and retry startup.",
+                                      txid.ToString(), coin.nHeight,
+                                      creating_block ? creating_block->GetBlockHash().ToString() : "unknown");
+                    LogPrintf("%s\n", error);
                     complete = false;
                 } else {
                     LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Could not fetch tx %s, skipping unverified DD vault candidate\n",
@@ -460,17 +785,16 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
             }
 
             // Add to totals
-            s_currentMetrics.totalCollateral += collateral;
-            s_currentMetrics.totalDDSupply += ddAmount;
-            s_currentMetrics.totalActivePositions++;
+            rebuilt.totalCollateral += collateral;
+            rebuilt.totalDDSupply += ddAmount;
+            rebuilt.totalActivePositions++;
             vaults_found++;
             processed_txids.insert(txid);
 
             LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Found DD vault - collateral=%s, DD=%s (exact)\n",
                      FormatMoney(collateral), FormatMoney(ddAmount));
 
-            // ALWAYS log vault findings (not just BCLog::DIGIDOLLAR)
-            LogPrintf("DigiDollar: UTXO Scanner found vault: %s:%d - Collateral=%s DGB, DD=%s cents\n",
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: UTXO Scanner found vault: %s:%d - Collateral=%s DGB, DD=%s cents\n",
                      txid.ToString(), key.n, FormatMoney(collateral), FormatMoney(ddAmount));
         }
 
@@ -480,19 +804,26 @@ bool SystemHealthMonitor::ScanUTXOSet(CCoinsView* view, CCoinsView* validation_v
     LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Scan complete - %d UTXOs scanned, %d vault candidates checked, %d P2TR found\n",
              utxos_scanned, vault_candidates_checked, p2tr_found);
     LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Results - Found %d vaults, %s DGB collateral, %s DD supply\n",
-             vaults_found, FormatMoney(s_currentMetrics.totalCollateral),
-             FormatMoney(s_currentMetrics.totalDDSupply));
+             vaults_found, FormatMoney(rebuilt.totalCollateral),
+             FormatMoney(rebuilt.totalDDSupply));
     LogPrint(BCLog::DIGIDOLLAR, "ScanUTXOSet: Exact amounts: %d, Estimated amounts: %d\n",
              dd_amount_extracted, dd_amount_estimated);
 
-    LogPrintf("DigiDollar: ========== UTXO SCAN COMPLETE ==========\n");
-    LogPrintf("DigiDollar: Found %zu vaults, Total Collateral: %s DGB, Total DD: %s cents\n",
-             vaults_found, FormatMoney(s_currentMetrics.totalCollateral),
-             FormatMoney(s_currentMetrics.totalDDSupply));
-    return complete;
+    if (!complete) return {HealthScanResult::Status::READ_ERROR, error};
+    const auto result = publish();
+    if (result.status == HealthScanResult::Status::COMPLETE) {
+        LogPrintf("DigiDollar legacy health reconstruction complete: %zu vaults, collateral %s DGB, legacy DD total %d cents\n",
+                  vaults_found, FormatMoney(rebuilt.totalCollateral), rebuilt.totalDDSupply);
+    }
+    return result;
 }
 
 bool SystemHealthMonitor::ReconstructFromChain(ChainstateManager& chainman)
+{
+    return ReconstructFromChain(chainman, {}).status == HealthScanResult::Status::COMPLETE;
+}
+
+HealthScanResult SystemHealthMonitor::ReconstructFromChain(ChainstateManager& chainman, const HealthScanCallbacks& callbacks)
 {
     // DD-FINAL-003 / AR-CONSENSUS-1: seed the cached system-health metrics from
     // the on-chain UTXO set at startup so consensus DCA/ERR health is identical
@@ -506,18 +837,29 @@ bool SystemHealthMonitor::ReconstructFromChain(ChainstateManager& chainman)
     if (node::fReindex) {
         LogPrint(BCLog::DIGIDOLLAR,
                  "Health: skipping startup reconstruction during reindex (block replay rebuilds metrics)\n");
-        return true;
+        return {};
     }
-    const CBlockIndex* tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+    // The tip, flushed cursor and validation view must describe the same chain.
+    LOCK(::cs_main);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
     if (tip == nullptr) {
-        return true;
+        return {};
+    }
+    if (DigiDollar::IsThawDayActive(chainman.GetConsensus(), tip->nHeight)) {
+        const auto state = chainman.ActiveChainstate().CoinsTip().GetDigiDollarState();
+        // Canonical initialization precedes import and verification. This late
+        // display initialization must never overwrite its inputs with globals.
+        if (state && state->Matches(chainman.GetConsensus().hashGenesisBlock, tip->GetBlockHash(), chainman.GetConsensus().nDDThawDayHeight, chainman.GetConsensus().DigiDollarHeight) && state->history_checked) return {};
+        return {HealthScanResult::Status::READ_ERROR,
+                strprintf("DigiDollar canonical health is unavailable at height %d (block %s). Restore the required chainstate history and retry startup.",
+                          tip->nHeight, tip->GetBlockHash().ToString())};
     }
     // Skip the (potentially expensive) full UTXO scan unless DigiDollar is active
     // at the current tip — pre-activation and non-DD chains have no DD vaults.
     if (!DigiDollar::IsDigiDollarEnabled(tip, chainman)) {
         LogPrint(BCLog::DIGIDOLLAR,
                  "Health: skipping startup reconstruction (DigiDollar not active at tip)\n");
-        return true;
+        return {};
     }
 
     // Flush the in-memory coins cache to disk so the CoinsDB cursor below sees
@@ -527,16 +869,12 @@ bool SystemHealthMonitor::ReconstructFromChain(ChainstateManager& chainman)
     // which recomputes health from the seeded supply/collateral) diverge between
     // nodes. The reindex path returned above, so by here the datadir is writable.
     Chainstate& active = chainman.ActiveChainstate();
-    active.ForceFlushStateToDisk();
-    bool complete;
-    {
-        LOCK(::cs_main);
-        complete = ScanUTXOSet(&active.CoinsDB(), &active.CoinsTip(), &active.m_blockman, /*mempool=*/nullptr, &active.m_chain, &chainman.GetConsensus());
+    if (callbacks.cancelled && callbacks.cancelled()) {
+        return {HealthScanResult::Status::CANCELLED, "DigiDollar legacy health reconstruction cancelled"};
     }
-    const SystemMetrics m = GetCachedMetrics();
-    LogPrintf("DigiDollar: startup health reconstruction complete - DD supply %s, collateral %s DGB\n",
-              FormatMoney(m.totalDDSupply), FormatMoney(m.totalCollateral));
-    return complete;
+    active.ForceFlushStateToDisk();
+    return ScanUTXOSet(&active.CoinsDB(), &active.CoinsTip(), &active.m_blockman, /*mempool=*/nullptr,
+                      &active.m_chain, &chainman.GetConsensus(), callbacks);
 }
 
 // ============================================================================

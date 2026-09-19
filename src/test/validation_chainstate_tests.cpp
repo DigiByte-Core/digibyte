@@ -4,6 +4,8 @@
 //
 #include <chainparams.h>
 #include <consensus/validation.h>
+#include <dbwrapper.h>
+#include <node/utxo_snapshot.h>
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
@@ -14,11 +16,261 @@
 #include <uint256.h>
 #include <validation.h>
 
+#include <leveldb/env.h>
+#include <leveldb/options.h>
+
+#include <fstream>
+#include <map>
+#include <set>
+#include <string>
+#include <system_error>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstate_tests, ChainTestingSetup)
+
+namespace {
+
+using TestCoins = std::map<COutPoint, Coin>;
+
+Coin StorageCoin(uint32_t number)
+{
+    CScript script;
+    script.assign(4096, OP_TRUE);
+    return Coin{CTxOut{1000 + number, script}, static_cast<int>(number + 1), false};
+}
+
+void SeedCoinsTables(const fs::path& path, const TestCoins& coins, const uint256& tip)
+{
+    {
+        CCoinsViewDB database{{.path = path, .cache_bytes = 1 << 20, .obfuscate = true}, {}};
+        CCoinsViewCache cache{&database};
+        for (const auto& [outpoint, coin] : coins) cache.AddCoin(outpoint, Coin{coin}, false);
+        cache.SetBestBlock(tip);
+        BOOST_REQUIRE(cache.Flush());
+    }
+    // Put the existing coin records in table files before testing the reader.
+    CDBWrapper compact{{.path = path, .cache_bytes = 1 << 20, .obfuscate = true,
+                        .options = {.force_compact = true}}};
+    bool table_found{false};
+    for (const auto& entry : fs::directory_iterator{path}) {
+        table_found |= entry.path().extension() == ".ldb" || entry.path().extension() == ".sst";
+    }
+    BOOST_REQUIRE(table_found);
+}
+
+#ifdef __linux__
+size_t OpenCoinTableFiles(const fs::path& path)
+{
+    size_t count{0};
+    for (const auto& entry : fs::directory_iterator{"/proc/self/fd"}) {
+        std::error_code error;
+        const auto target = fs::read_symlink(entry.path(), error);
+        if (!error && target.parent_path() == path &&
+            (target.extension() == ".ldb" || target.extension() == ".sst")) ++count;
+    }
+    return count;
+}
+
+bool MapsCoinsPath(const fs::path& path)
+{
+    std::ifstream mappings{"/proc/self/maps"};
+    BOOST_REQUIRE(mappings.good());
+    const auto prefix = fs::PathToString(path) + "/";
+    std::string line;
+    while (std::getline(mappings, line)) {
+        if (line.find(prefix) != std::string::npos) return true;
+    }
+    return false;
+}
+
+struct StoredCoinKey {
+    uint8_t prefix{'C'};
+    uint256 txid{uint256::ONE};
+    uint32_t number;
+    explicit StoredCoinKey(uint32_t index) : number(index) {}
+    SERIALIZE_METHODS(StoredCoinKey, obj) { READWRITE(obj.prefix, obj.txid, VARINT(obj.number)); }
+};
+
+void SeedManyCoinTables(const fs::path& path, const uint256& tip)
+{
+    CDBWrapper writer{{.path = path, .cache_bytes = 1 << 18, .obfuscate = true}};
+    BOOST_REQUIRE(writer.Write(uint8_t{'B'}, tip));
+    // Each batch fills a small write buffer with the next disjoint key range.
+    // Rewriting the best-block key in every batch would make the ranges overlap
+    // and compact them together, hiding descriptor growth from this test.
+    for (uint32_t group = 0; group < 96; ++group) {
+        CDBBatch batch{writer};
+        for (uint32_t offset = 0; offset < 20; ++offset) {
+            const uint32_t number = group * 20 + offset;
+            batch.Write(StoredCoinKey{number}, StorageCoin(number));
+        }
+        BOOST_REQUIRE(writer.WriteBatch(batch));
+    }
+}
+#endif
+
+void CheckStoredCoins(CCoinsViewDB& database, const TestCoins& expected, const uint256& tip)
+{
+    BOOST_CHECK(database.GetBestBlock() == tip);
+    BOOST_CHECK(database.GetHeadBlocks().empty());
+    for (const auto& [outpoint, coin] : expected) {
+        Coin actual;
+        BOOST_REQUIRE(database.GetCoin(outpoint, actual));
+        BOOST_CHECK(actual.out == coin.out);
+        BOOST_CHECK_EQUAL(actual.nHeight, coin.nHeight);
+        BOOST_CHECK_EQUAL(actual.fCoinBase, coin.fCoinBase);
+    }
+    std::set<COutPoint> seen;
+    auto cursor = database.Cursor();
+    BOOST_REQUIRE(cursor);
+    for (; cursor->Valid(); cursor->Next()) {
+        COutPoint outpoint;
+        Coin actual;
+        BOOST_REQUIRE(cursor->GetKey(outpoint));
+        BOOST_REQUIRE(cursor->GetValue(actual));
+        const auto found = expected.find(outpoint);
+        BOOST_REQUIRE(found != expected.end());
+        BOOST_CHECK(seen.insert(outpoint).second);
+        BOOST_CHECK(actual.out == found->second.out);
+        BOOST_CHECK_EQUAL(actual.nHeight, found->second.nHeight);
+        BOOST_CHECK_EQUAL(actual.fCoinBase, found->second.fCoinBase);
+    }
+    cursor->CheckStatus();
+    BOOST_CHECK_EQUAL(seen.size(), expected.size());
+#ifdef __linux__
+    BOOST_REQUIRE(database.StoragePath());
+    BOOST_CHECK(!MapsCoinsPath(*database.StoragePath()));
+#endif
+}
+
+void CheckCoinsReaderLifecycle(ChainstateManager& manager, bool snapshot)
+{
+    LOCK(cs_main);
+    const fs::path name{"coins-reader"};
+    fs::path disk_name{name};
+    if (snapshot) disk_name += node::SNAPSHOT_CHAINSTATE_SUFFIX;
+    const auto path = manager.m_options.datadir / disk_name;
+    TestCoins coins;
+    for (uint32_t number = 0; number < 128; ++number) {
+        coins.emplace(COutPoint{uint256::ONE, number}, StorageCoin(number));
+    }
+    uint256 tip{uint256S("10")};
+    SeedCoinsTables(path, coins, tip);
+    Chainstate chainstate{nullptr, nullptr, manager.m_blockman, manager,
+                         snapshot ? std::optional<uint256>{uint256S("20")} : std::nullopt};
+    chainstate.InitCoinsDB(1 << 20, false, false, name);
+    BOOST_REQUIRE(chainstate.CoinsDB().StoragePath());
+    BOOST_CHECK(*chainstate.CoinsDB().StoragePath() == path);
+    BOOST_CHECK_EQUAL(chainstate.m_coinsdb_cache_size_bytes, 1U << 20);
+    CheckStoredCoins(chainstate.CoinsDB(), coins, tip);
+
+    chainstate.CoinsDB().ResizeCache(1 << 19);
+    CheckStoredCoins(chainstate.CoinsDB(), coins, tip);
+    {
+        CCoinsViewCache cache{&chainstate.CoinsDB()};
+        const COutPoint spent{uint256::ONE, 0};
+        BOOST_REQUIRE(cache.SpendCoin(spent));
+        coins.erase(spent);
+        const COutPoint added{uint256::ONE, 128};
+        coins.emplace(added, StorageCoin(128));
+        cache.AddCoin(added, StorageCoin(128), false);
+        tip = uint256S("11");
+        cache.SetBestBlock(tip);
+        BOOST_REQUIRE(cache.Flush());
+    }
+    chainstate.CoinsDB().ResizeCache(1 << 21);
+    CheckStoredCoins(chainstate.CoinsDB(), coins, tip);
+    chainstate.ResetCoinsViews();
+    chainstate.InitCoinsDB(1 << 20, false, false, name);
+    CheckStoredCoins(chainstate.CoinsDB(), coins, tip);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(coins_database_buffered_reader_survives_reopen)
+{
+    CheckCoinsReaderLifecycle(*m_node.chainman, false);
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_coins_database_buffered_reader_survives_reopen)
+{
+    CheckCoinsReaderLifecycle(*m_node.chainman, true);
+}
+
+#ifdef __linux__
+BOOST_AUTO_TEST_CASE(coins_database_retains_bounded_table_descriptors)
+{
+    LOCK(cs_main);
+    auto& manager = *m_node.chainman;
+    const auto path = manager.m_options.datadir / "many-coin-tables";
+    const uint256 tip{uint256S("40")};
+    SeedManyCoinTables(path, tip);
+    Chainstate chainstate{nullptr, nullptr, manager.m_blockman, manager};
+    chainstate.InitCoinsDB(1 << 18, false, false, "many-coin-tables");
+    size_t tables{0};
+    for (const auto& entry : fs::directory_iterator{path}) {
+        tables += entry.path().extension() == ".ldb" || entry.path().extension() == ".sst";
+    }
+    BOOST_REQUIRE_GT(tables, 74U);
+    const auto check_reads_and_descriptors = [&] {
+        BOOST_CHECK(chainstate.CoinsDB().GetBestBlock() == tip);
+        for (uint32_t number = 0; number < 96 * 20; ++number) {
+            Coin actual;
+            BOOST_REQUIRE(chainstate.CoinsDB().GetCoin(COutPoint{uint256::ONE, number}, actual));
+            BOOST_CHECK(actual.out == StorageCoin(number).out);
+            BOOST_CHECK_EQUAL(actual.nHeight, number + 1);
+        }
+        const size_t open_tables = OpenCoinTableFiles(path);
+        BOOST_CHECK_GT(open_tables, 0U);
+        BOOST_CHECK_LE(open_tables, 64U);
+        BOOST_CHECK(!MapsCoinsPath(path));
+    };
+    check_reads_and_descriptors();
+    chainstate.CoinsDB().ResizeCache(1 << 19);
+    check_reads_and_descriptors();
+    chainstate.ResetCoinsViews();
+    BOOST_CHECK_EQUAL(OpenCoinTableFiles(path), 0U);
+    chainstate.InitCoinsDB(1 << 18, false, false, "many-coin-tables");
+    check_reads_and_descriptors();
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(coins_database_policy_preserves_memory_and_ordinary_databases)
+{
+    LOCK(cs_main);
+    auto& manager = *m_node.chainman;
+    Chainstate chainstate{nullptr, nullptr, manager.m_blockman, manager};
+    chainstate.InitCoinsDB(1 << 20, true, false, "memory-coins-reader");
+    auto& database = chainstate.CoinsDB();
+    const COutPoint outpoint{uint256::ONE, 0};
+    const uint256 tip{uint256S("30")};
+    {
+        CCoinsViewCache cache{&database};
+        cache.AddCoin(outpoint, StorageCoin(0), false);
+        cache.SetBestBlock(tip);
+        BOOST_REQUIRE(cache.Flush());
+    }
+    database.ResizeCache(1 << 19);
+    Coin actual;
+    BOOST_REQUIRE(database.GetCoin(outpoint, actual));
+    BOOST_CHECK(actual.out == StorageCoin(0).out);
+    BOOST_CHECK(database.GetBestBlock() == tip);
+    BOOST_CHECK(!database.StoragePath());
+    BOOST_CHECK(!fs::exists(manager.m_options.datadir / "memory-coins-reader"));
+
+    const auto ordinary_path = manager.m_options.datadir / "ordinary-reader";
+    SeedCoinsTables(ordinary_path, {{outpoint, StorageCoin(0)}}, tip);
+    CDBWrapper ordinary{{.path = ordinary_path, .cache_bytes = 1 << 20, .obfuscate = true}};
+    BOOST_CHECK(dbwrapper_private::GetOptions(ordinary).env == leveldb::Env::Default());
+    uint256 stored_tip;
+    BOOST_REQUIRE(ordinary.Read(uint8_t{'B'}, stored_tip));
+    BOOST_CHECK(stored_tip == tip);
+#ifdef __linux__
+    if (sizeof(void*) >= 8) BOOST_CHECK(MapsCoinsPath(ordinary_path));
+#endif
+}
 
 //! Test resizing coins-related Chainstate caches during runtime.
 //!

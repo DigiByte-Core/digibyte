@@ -545,7 +545,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             -4,
             "PAYMASTER_NO_ELIGIBLE_OFFER",
             client.senddigidollar,
-            recipient, 100, "", 0, None, high_privacy_options,
+            recipient, 100, "", 0, None, "cents", high_privacy_options,
         )
         assert_raises_rpc_error(
             -4,
@@ -561,7 +561,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             -8,
             "maximum_provider_attempts must be 1..16 and exactly 1 for high privacy",
             client.senddigidollar,
-            recipient, 100, "", 0, None, high_privacy_options,
+            recipient, 100, "", 0, None, "cents", high_privacy_options,
         )
         assert_raises_rpc_error(
             -4,
@@ -597,7 +597,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
             def resume_client_send():
                 return transfer_client.senddigidollar(
-                    transfer_recipient, amount_cents, "", 0, None, options)
+                    transfer_recipient, amount_cents, "", 0, None, "cents", options)
 
             initial_request = resume_client_send()
             assert_equal(initial_request["request_id"], request_id)
@@ -1226,7 +1226,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "",
             0,
             None,
-            {
+            "cents", {
                 "fee_mode": "paymaster",
                 "request_id": exact_gap_request_id,
                 "maximum_paymaster_fee_cents": 100,
@@ -1299,7 +1299,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "",
             0,
             None,
-            {
+            "cents", {
                 "fee_mode": "paymaster",
                 "request_id": sweep_request_id,
                 "maximum_paymaster_fee_cents": 100,
@@ -1374,7 +1374,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "",
             0,
             None,
-            boundary_options,
+            "cents", boundary_options,
         )
         assert_raises_rpc_error(
             -4,
@@ -1397,7 +1397,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "",
             0,
             None,
-            boundary_options,
+            "cents", boundary_options,
         )
         assert_raises_rpc_error(
             -4,
@@ -2009,7 +2009,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def replay_client_send():
             return client.senddigidollar(
-                recipient, restricted_amount, "", 0, None, replay_options)
+                recipient, restricted_amount, "", 0, None, "cents", replay_options)
 
         replay_request = replay_client_send()
         assert_equal(replay_request["status"], "pending")
