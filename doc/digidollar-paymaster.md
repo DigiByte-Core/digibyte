@@ -658,6 +658,23 @@ data, keep only the required generations, and securely retire obsolete copies
 according to the operator's backup policy. Never use CSV finance export as a
 substitute for this backup or as a source for recovery.
 
+A backup preserves the off-chain Paymaster records available when it was
+created. A blockchain rescan does not reconstruct later signed provider results,
+sponsorship-use records, or the complete provider budget/finance ledger. An older
+client backup with an authorized payment may therefore reject a retry with
+`PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE` when its provider inputs are already
+spent, even though the wallet rescan finds the confirmed payment. This rejection
+must not be bypassed by starting a new payment with a new request ID.
+
+After restoring an older image, verify the original payment on chain and reconcile
+missing off-chain records from the newest complete backup before resuming service.
+Start the recovery node with `-paymaster=0` before loading the restored wallet,
+then persist `setpaymasterruntimesettings {"autostart":false}` for that wallet.
+Keep provider autostart disabled during reconciliation and never operate two
+loaded copies of the same provider wallet. The older-client-backup regression
+test does not establish provider-budget or sponsorship anti-rollback guarantees
+for stale backups. See the [remaining security checks](digidollar-paymaster-release-gate.md#additional-security-boundary-checks-2026-09-19).
+
 `setpaymasterruntimesettings` accepts an object containing
 `operation_mode` (`automatic` or `manual`) and/or `autostart` (boolean).
 

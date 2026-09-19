@@ -16,7 +16,10 @@ from test_framework.messages import (
 from test_framework.p2p import P2PInterface
 from test_framework.paymaster import paymaster_node_args
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import (
+    assert_equal,
+    p2p_port,
+)
 
 
 PAYMASTER_PROTOCOL_VERSION = 5
@@ -100,6 +103,41 @@ class PaymasterP2PTest(DigiByteTestFramework):
         oversized = node.add_p2p_connection(P2PInterface())
         oversized.send_message(msg_pmsubmit(b"x" * (4 * 1024 * 1024 + 1)))
         oversized.wait_for_disconnect()
+
+        self.log.info("Malformed announcements across V2 reconnects do not stop block relay")
+        self.disconnect_nodes(0, 1)
+        self.disconnect_nodes(1, 2)
+        # Reuse real daemon V2 transport and the existing regtest injection RPC.
+        # This is bounded integration coverage, not a sustained CPU/RSS benchmark.
+        for _ in range(3):
+            for index in (1, 2):
+                self.connect_nodes(index, 0, peer_advertises_v2=True)
+                sender = self.nodes[index]
+                peer = next(peer for peer in sender.getpeerinfo()
+                            if not peer["inbound"] and
+                            peer["addr"].endswith(f":{p2p_port(0)}"))
+                assert_equal(peer["transport_protocol_type"], "v2")
+                sender.sendmsgtopeer(peer["id"], "sendpmasters", msg_sendpmasters(
+                    version=PAYMASTER_PROTOCOL_VERSION, capabilities=0).serialize().hex())
+                for _ in range(32):
+                    sender.sendmsgtopeer(peer["id"], "pmannounce", "00")
+                # A pong queued after this burst proves that the receiver
+                # consumed all preceding messages on that same TCP stream.
+                pong_bytes = next(p["bytesrecv_per_msg"].get("pong", 0)
+                                  for p in sender.getpeerinfo() if p["id"] == peer["id"])
+                sender.ping()
+                self.wait_until(lambda: any(
+                    p["id"] == peer["id"] and
+                    p["bytesrecv_per_msg"].get("pong", 0) > pong_bytes
+                    for p in sender.getpeerinfo()))
+            negotiated.sync_with_ping()
+            assert_equal(node.listpaymasters(), [])
+            self.generatetoaddress(node, 1, node.get_deterministic_priv_key().address)
+            self.sync_blocks()
+            assert_equal(self.nodes[1].getbestblockhash(), node.getbestblockhash())
+            assert_equal(self.nodes[2].getbestblockhash(), node.getbestblockhash())
+            for index in (1, 2):
+                self.disconnect_nodes(index, 0)
 
 
 if __name__ == "__main__":

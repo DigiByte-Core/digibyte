@@ -357,6 +357,9 @@ This does not change the ordinary direct-DGB path. See
 
 ## 10. Verification map and remaining work
 
+Additional security-boundary checks, dated local results and the remaining
+operator evidence are recorded in the [release gate](digidollar-paymaster-release-gate.md#additional-security-boundary-checks-2026-09-19).
+
 | Concern | Existing verification surface |
 |---|---|
 | Amounts, carriers, PSBT roles and mutation rejection | `src/test/paymaster_*_tests.cpp`, `src/wallet/test/paymaster_wallet_psbt_tests.cpp` |
@@ -367,10 +370,10 @@ This does not change the ordinary direct-DGB path. See
 | Contention, fallback boundary and single payment | [wallet_paymaster_failover.py](../test/functional/wallet_paymaster_failover.py) |
 | Confirmation, finance and pool rollback | [wallet_paymaster_reorg.py](../test/functional/wallet_paymaster_reorg.py) |
 | Activation, index and transport prerequisites | [wallet_paymaster_readiness.py](../test/functional/wallet_paymaster_readiness.py) |
-| Liquidity, runtime and restart | [wallet_paymaster_lifecycle.py](../test/functional/wallet_paymaster_lifecycle.py), [wallet_paymaster_rpc.py](../test/functional/wallet_paymaster_rpc.py) |
+| RPC authentication/whitelists, wallet isolation, abrupt termination, older authorized-backup rejection, liquidity and restart | [wallet_paymaster_lifecycle.py](../test/functional/wallet_paymaster_lifecycle.py), [wallet_paymaster_rpc.py](../test/functional/wallet_paymaster_rpc.py) |
 | P2P and old-version compatibility | [p2p_paymaster.py](../test/functional/p2p_paymaster.py), [p2p_paymaster_v9_26_5_bridge.py](../test/functional/p2p_paymaster_v9_26_5_bridge.py), [wallet_v9_26_5_compatibility.py](../test/functional/wallet_v9_26_5_compatibility.py), [wallet_v9_26_5_inplace_upgrade.py](../test/functional/wallet_v9_26_5_inplace_upgrade.py) |
 | Qt authorization and displayed state | [paymasterwidgettests.cpp](../src/qt/test/paymasterwidgettests.cpp); DD boundary cases remain in [digidollarwidgettests.cpp](../src/qt/test/digidollarwidgettests.cpp) |
-| Sanitizers and four bounded fuzz targets | [paymaster-security.yml](../.github/workflows/paymaster-security.yml) |
+| All `paymaster_*` suites under headless sanitizers and four bounded fuzz targets | [paymaster-security.yml](../.github/workflows/paymaster-security.yml) |
 
 After building the selected revision with wallet support using the repository's
 [platform instructions](README.md#building), a focused entry point is:

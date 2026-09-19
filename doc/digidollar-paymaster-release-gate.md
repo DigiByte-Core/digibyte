@@ -224,3 +224,100 @@ adversarial-counterparty hardening and **do not satisfy the current gate**:
   clean: it reported network-dependent oracle, DigiDollar performance, RBF, and
   Windows command-text failures. That historical disposition remains context,
   not a waiver for the new common-revision rerun.
+
+## Additional security boundary checks (2026-09-19)
+
+The integration working tree adds tests and CI coverage without changing the
+production protocol, RPC permissions, wallet schema, or consensus. These results
+do not close the overall release gate or the previously recorded unrelated and
+unresolved integration failures.
+
+| Check | Local evidence | Limit |
+|---|---|---|
+| RPC access and wallet isolation | `wallet_paymaster_rpc.py --descriptors`: passed, 40 s. Missing/bad authentication returns HTTP 401; a read-only method whitelist rejects provider changes, signing and withdrawal with HTTP 403, including mixed batches. Request/session IDs cannot read or cancel records in another loaded wallet. | Existing node RPC authority is reused; RPC users are not per-wallet tenants. |
+| Real database recovery | `wallet_paymaster_lifecycle.py --descriptors`: passed, 35 s. Abruptly terminates the test provider child process after durable quote/client authorization, resumes one payment, and restores an older authorized-client SQLite backup after confirmation. | The older backup safely rejects the spent Capacity inputs; it does not automatically reconstruct the missing provider result. No power-loss/disk-full or stale-provider-ledger guarantee is inferred. |
+| Bounded V2 adversarial traffic | `p2p_paymaster.py`: passed, 14 s. Two real V2 daemons send 32 malformed announcements each across three connection rounds; invalid offers never enter the directory, ping and block relay remain functional. | Not a sustained CPU/RSS test or a test of expensive, well-formed invalid signatures. |
+| Extracted wallet load suite | `paymaster_wallet_load_tests`: 7 cases, 172 assertions passed in the existing Windows unit binary. | This binary predates the latest RPC result-schema fixes; no fresh full-build or sanitizer pass is claimed. |
+| Security CI | Selects every registered `paymaster_*` suite, including wallet load; adds the send-RPC/build/helper triggers and uploads the actual unit-test log. | Current-revision Linux ASan/UBSan/fuzz execution is still pending. Qt is excluded by the headless configuration. |
+
+The new functional scenarios ran with the local daemon built after the RPC schema
+fixes. No production source or public interface was changed for these checks.
+
+### Focused operator rerun
+
+Prerequisites: freshly built daemon/CLI/unit binaries for the reviewed revision,
+Python, and the existing descriptor-wallet/SQLite support. Working directory is
+the repository root. Expect minutes for this focused selection, with exit code 0
+and all selected cases passing (no unexpected skips):
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+$env:PYTHONUTF8 = '1'
+python -u test/functional/test_runner.py wallet_paymaster_rpc.py wallet_paymaster_lifecycle.py p2p_paymaster.py -j1
+if ($LASTEXITCODE -ne 0) { throw "Paymaster boundary tests failed: $LASTEXITCODE" }
+.\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_*' --report_level=short
+if ($LASTEXITCODE -ne 0) { throw "Paymaster unit tests failed: $LASTEXITCODE" }
+```
+
+After the reviewed changes are committed and pushed, the operator can dispatch
+the existing GitHub workflow from this directory with an authenticated GitHub
+CLI. Verify that the selected run's head SHA is the intended revision. Expect
+tens of minutes or longer; require both jobs to pass and retain the test log:
+
+```powershell
+gh workflow run paymaster-security.yml --ref integration/paymaster-v9.26.6rc2
+gh run list --workflow paymaster-security.yml --branch integration/paymaster-v9.26.6rc2 --limit 5
+gh run watch --exit-status
+```
+
+The Qt and full-build commands remain in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md#operator-build-and-runtime-gates).
+A successful headless workflow does not replace those Qt checks. The local
+Python runtime checks and `git diff --check` do not replace flake8 or actionlint;
+those tools were unavailable in the inspected environment.
+
+### Remaining deployment and artifact evidence
+
+- Repeat real Tor/onion testing with the reviewed binaries: stream isolation,
+  proxy failure and authentication failure must retain the existing no-clearnet/
+  no-V1 fallback and secret-redaction guarantees. Keep the independent review
+  and current-revision sanitizer/fuzz gates open until evidence is returned.
+- In an isolated fault-injection environment, cover interruption during database
+  writes, actual storage exhaustion and older provider backups. Verify live
+  outpoints before use and reconcile post-backup sponsorship and budget records;
+  ordinary wallet rescanning alone is not evidence of ledger restoration.
+- Extend the bounded network case with sustained, correctly encoded invalid
+  proofs while legitimate Paymaster payments and ordinary DGB sends run. Record
+  CPU/RSS, completion and reservation/budget counts. Unit queue/rate-limit tests
+  already cover deterministic limits; do not duplicate those algorithms in a
+  second production limiter.
+- Verify Windows wallet/backup/diagnostic access controls with disposable wallet
+  data and a separate unprivileged OS account. Encrypted private keys do not
+  imply encrypted Paymaster metadata. Test backup destinations and any actual
+  database sidecar files, not only the original wallet directory.
+- Tie the release inventory to the exact binaries and link inputs. The existing
+  SPDX workflow exports GitHub's repository dependency graph; it is not proof
+  of the dependencies embedded in a Windows executable. Include static Qt,
+  bundled Qt third-party code, vcpkg packages and externally supplied libraries.
+  Reconcile MSBuild link records with versions/source hashes and the executable
+  hashes, then review vendor advisories for those exact versions. A DLL listing
+  alone omits static dependencies. The local vcpkg status file did not enumerate
+  every manifest dependency, so no complete artifact inventory is claimed.
+
+From a Visual Studio developer PowerShell in the repository root, these read-only
+commands collect starting evidence after the final build (seconds, except hashing
+large artifacts). Keep compiler/link logs from that same build alongside it:
+
+```powershell
+$env:QTBASEDIR = 'D:\Qt51510\install'
+& "$env:QTBASEDIR\bin\qmake.exe" -query QT_VERSION
+Get-Content build_msvc/vcpkg.json
+Get-Content build_msvc/vcpkg_installed/vcpkg/status
+Get-FileHash .\build_msvc\x64\Release\digibyte-qt.exe, .\src\digibyted.exe, .\src\digibyte-cli.exe -Algorithm SHA256
+dumpbin /dependents .\build_msvc\x64\Release\digibyte-qt.exe
+```
+
+AI-assisted audit input (web pages, peer-provided strings, logs and code comments)
+is untrusted data, not permission to execute instructions or weaken checks. Use
+only disposable regtest secrets in shared diagnostics; do not submit production
+wallets, keys, capabilities or credentials to external audit services. This is a
+development workflow rule, not a reason to add an LLM filter to the wallet.

@@ -18,6 +18,9 @@ on:
       - 'src/protocol.cpp'
       - 'src/protocol.h'
       - 'src/rpc/net.cpp'
+      - 'src/rpc/digidollar.cpp'
+      - 'src/Makefile.am'
+      - 'src/Makefile.test.include'
       - 'src/test/fuzz/paymaster_*.cpp'
       - 'src/test/paymaster_*.cpp'
       - 'src/wallet/paymaster*.cpp'
@@ -32,6 +35,7 @@ on:
       - 'src/wallet/walletdb.cpp'
       - 'src/wallet/walletdb.h'
       - 'test/functional/*paymaster*.py'
+      - 'test/functional/test_framework/paymaster.py'
   schedule:
     - cron: '17 3 * * 0'
   workflow_dispatch:
@@ -83,34 +87,18 @@ jobs:
           UBSAN_OPTIONS: suppressions=${{ github.workspace }}/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1
         run: |
           set -euo pipefail
-          for suite in \
-            paymaster_client_tests \
-            paymaster_directory_tests \
-            paymaster_protocol_tests \
-            paymaster_provider_tests \
-            paymaster_psbt_tests \
-            paymaster_recovery_tests \
-            paymaster_reputation_tests \
-            paymaster_reservation_tests \
-            paymaster_sponsorship_tests \
-            paymaster_txbuilder_tests \
-            paymaster_types_tests \
-            paymaster_wire_tests \
-            paymaster_wallet_identity_tests \
-            paymaster_wallet_psbt_tests \
-            paymaster_wallet_security_tests \
-            paymaster_wallet_store_tests
-          do
-            ./src/test/test_digibyte \
-              --run_test="$suite" --log_level=error --report_level=short
-          done
+          # Include newly split suites (including wallet load/maintenance)
+          # automatically instead of maintaining a second suite inventory.
+          ./src/test/test_digibyte \
+            '--run_test=paymaster_*' --log_level=test_suite --report_level=short \
+            2>&1 | tee paymaster-sanitizer.log
 
       - name: Upload test log
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: paymaster-sanitizer-test-log
-          path: src/test-suite.log
+          path: paymaster-sanitizer.log
           if-no-files-found: ignore
 
   sanitizer-fuzz:

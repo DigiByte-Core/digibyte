@@ -10,20 +10,26 @@ idempotency, redacted reservation output, and atomic release semantics.
 """
 
 import base64
+import hmac
+import http.client
+import json
 from decimal import Decimal
 import time
+from urllib.parse import quote, urlsplit
 
 from test_framework.paymaster import (
     PaymasterFunctionalHarness,
     assert_snapshot_equal,
     default_liquidity_policy,
     paymaster_node_args,
+    provider_safety_policy,
     value_snapshot,
 )
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
+    str_to_b64str,
     try_rpc,
 )
 
@@ -37,12 +43,69 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             paymaster_node_args(),
         ]
 
+        # These credentials authorize only read RPCs on disposable regtest wallets.
+        self.reader_password = "paymaster-reader-test-password"
+        salt = "paymaster-rpc-test-salt"
+        password_hash = hmac.new(
+            salt.encode(), self.reader_password.encode(), "sha256").hexdigest()
+        self.extra_args[0] += [
+            f"-rpcauth=paymaster_reader:{salt}${password_hash}",
+            "-rpcwhitelist=paymaster_reader:getpaymasterinfo",
+            "-rpcwhitelistdefault=0",
+        ]
+
     def add_options(self, parser):
         self.add_wallet_options(parser, legacy=False)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
+
+    def check_rpc_access(self, provider, client, recipient_wallet):
+        self.log.info("HTTP authentication and method whitelists protect Paymaster RPCs")
+        url = urlsplit(self.nodes[0].url)
+        path = "/wallet/" + quote("provider", safe="")
+
+        def request(payload, credentials):
+            headers = {"Content-Type": "application/json"}
+            if credentials is not None:
+                headers["Authorization"] = "Basic " + str_to_b64str(credentials)
+            connection = http.client.HTTPConnection(
+                url.hostname, url.port, timeout=10 * self.options.timeout_factor)
+            try:
+                connection.request("POST", path, json.dumps(payload), headers)
+                response = connection.getresponse()
+                return response.status, response.read()
+            finally:
+                connection.close()
+
+        reader = f"paymaster_reader:{self.reader_password}"
+        allowed = {"id": 1, "method": "getpaymasterinfo", "params": []}
+        status, body = request(allowed, reader)
+        assert_equal(status, 200)
+        assert_equal(json.loads(body)["result"]["provider_id"],
+                     provider.getpaymasterinfo()["provider_id"])
+        before = value_snapshot(self.nodes[0], provider, client, recipient_wallet)
+        info_before = provider.getpaymasterinfo()
+        # Test positional and named dispatch, including signing and withdrawal.
+        calls = [
+            ("startpaymaster", []),
+            ("setpaymasterenabled", {"enabled": False}),
+            ("setpaymastersafetypolicy", {
+                "policy": provider_safety_policy(["user_paid"])}),
+            ("walletprocesspaymasterpsbt", {"psbt": "not-a-psbt"}),
+            ("withdrawpaymastercarrier", {"options": {"mode": "all_excess"}}),
+        ]
+        for method, params in calls:
+            denied = {"id": 2, "method": method, "params": params}
+            for credentials, expected in (
+                    (None, 401), (reader + "-wrong", 401), (reader, 403)):
+                assert_equal(request(denied, credentials)[0], expected)
+            # A permitted sibling in a batch must not authorize the denied call.
+            assert_equal(request([allowed, denied], reader)[0], 403)
+        assert_equal(provider.getpaymasterinfo(), info_before)
+        assert_snapshot_equal(
+            before, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
 
     def run_test(self):
         harness = PaymasterFunctionalHarness(self)
@@ -91,6 +154,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             wallet_name="recipient", descriptors=True, load_on_startup=True)
         recipient_wallet = self.nodes[0].get_wallet_rpc("recipient")
         recipient = recipient_wallet.getdigidollaraddress()
+
+        self.check_rpc_access(provider, client, recipient_wallet)
 
         started = provider.startpaymaster()
         assert_equal(started["running"], True)
@@ -165,6 +230,24 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_raises_rpc_error(
             -4, "PAYMASTER_SESSION_ACTION_NOT_ALLOWED",
             client.resolvepaymastersession, first_lookup, "retry_same")
+
+        self.log.info("Session identifiers cannot address another loaded wallet's records")
+        self.nodes[1].createwallet(wallet_name="other_client", descriptors=True)
+        other_client = self.nodes[1].get_wallet_rpc("other_client")
+        session_before = client.getdigidollarsendsession(first_lookup)
+        reservations_before = client.listpaymasterreservations()
+        for lookup in (first_lookup, {"session_id": session_before["session_id"]}):
+            assert_raises_rpc_error(
+                -4, "Paymaster session not found",
+                other_client.getdigidollarsendsession, lookup)
+            assert_raises_rpc_error(
+                -4, "Paymaster session not found",
+                other_client.resolvepaymastersession, lookup, "abandon_unsigned")
+        assert_equal(other_client.listdigidollarsendsessions()["count"], 0)
+        assert_equal(other_client.listpaymasterreservations(), [])
+        assert_equal(client.getdigidollarsendsession(first_lookup), session_before)
+        assert_equal(client.listpaymasterreservations(), reservations_before)
+        self.nodes[1].unloadwallet("other_client")
 
         second_request_id = "550e8400-e29b-41d4-a716-446655441000"
         second_options = dict(first_options)
