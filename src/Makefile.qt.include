@@ -100,6 +100,7 @@ QT_MOC_CPP = \
   qt/moc_digidollarreceivewidget.cpp \
   qt/moc_digidollarredeemwidget.cpp \
   qt/moc_digidollarsendwidget.cpp \
+  qt/moc_paymastersendwidget.cpp \
   qt/moc_digidollartransactionswidget.cpp
 
 DIGIBYTE_MM = \
@@ -194,6 +195,7 @@ DIGIBYTE_QT_H = \
   qt/digidollarreceivewidget.h \
   qt/digidollarredeemwidget.h \
   qt/digidollarsendwidget.h \
+  qt/paymastersendwidget.h \
   qt/digidollartransactionswidget.h
 
 QT_RES_FONTS = \
@@ -318,6 +320,7 @@ DIGIBYTE_QT_WALLET_CPP = \
   qt/digidollarreceivewidget.cpp \
   qt/digidollarredeemwidget.cpp \
   qt/digidollarsendwidget.cpp \
+  qt/paymastersendwidget.cpp \
   qt/digidollartransactionswidget.cpp
 
 DIGIBYTE_QT_CPP = $(DIGIBYTE_QT_BASE_CPP)

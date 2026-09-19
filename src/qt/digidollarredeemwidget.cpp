@@ -595,7 +595,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                          systemHealth, requiredDDBurn);
             }
         }
-    } catch (const UniValue& objError) {
+    } catch (const UniValue&) {
         if (candidateHealth) {
             Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), resultMessageStyle(false));
             return;
@@ -1065,7 +1065,7 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
                 requiredDDBurn = CalculateRequiredDDBurnDisplayAmount(m_positionDDMinted, systemHealth);
             }
         }
-    } catch (const UniValue& objError) {
+    } catch (const UniValue&) {
         if (candidateHealth) return false;
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance (RPC error)\n");

@@ -76,6 +76,7 @@
     <ClCompile Include="..\..\src\qt\digidollarsendwidget.cpp" />
     <ClCompile Include="..\..\src\qt\digidollartransactionswidget.cpp" />
     <ClCompile Include="..\..\src\qt\paymasterwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\paymastersendwidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addressbookpage.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addresstablemodel.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_askpassphrasedialog.cpp" />
@@ -145,6 +146,7 @@
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarredeemwidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarsendwidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollartransactionswidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_paymastersendwidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\rcc\qrc_digibyte.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\rcc\qrc_digibyte_locale.cpp" />
   </ItemGroup>

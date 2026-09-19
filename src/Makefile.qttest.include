@@ -16,6 +16,7 @@ TEST_QT_MOC_CPP += \
   qt/test/moc_addressbooktests.cpp \
   qt/test/moc_wallettests.cpp \
   qt/test/moc_digidollarwidgettests.cpp \
+  qt/test/moc_paymasterwidgettests.cpp \
   qt/test/moc_digidollarwave19widgettests.cpp \
   qt/test/moc_digidollarmintrecordtests.cpp \
   qt/test/moc_ddtransactionrecordtests.cpp \
@@ -28,6 +29,8 @@ TEST_QT_H = \
   qt/test/digidollarmintrecordtests.h \
   qt/test/ddtransactiontabletests.h \
   qt/test/digidollarwidgettests.h \
+  qt/test/paymasterwidgettests.h \
+  qt/test/digidollartestutil.h \
   qt/test/digidollarwave19widgettests.h \
   qt/test/ddtransactionrecordtests.h \
   qt/test/optiontests.h \
@@ -54,6 +57,8 @@ qt_test_test_digibyte_qt_SOURCES += \
   qt/test/digidollarmintrecordtests.cpp \
   qt/test/ddtransactiontabletests.cpp \
   qt/test/digidollarwidgettests.cpp \
+  qt/test/paymasterwidgettests.cpp \
+  qt/test/digidollartestutil.cpp \
   qt/test/digidollarwave19widgettests.cpp \
   qt/test/ddtransactionrecordtests.cpp \
   qt/test/wallettests.cpp \

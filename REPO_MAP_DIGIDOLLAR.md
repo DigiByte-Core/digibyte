@@ -757,8 +757,8 @@ or chain parameters.
 ### src/rpc/digidollar.cpp
 - Full implementation of all DD RPC commands
 - Integrates with wallet, oracle, health monitoring systems
-- Adds node `listpaymasters` and the backward-compatible sixth
-  `senddigidollar` options argument (`fee_mode`, canonical `request_id`, hard
+- Adds node `listpaymasters` and the optional seventh
+  `senddigidollar` options argument, following upstream `amount_unit` (`fee_mode`, canonical `request_id`, hard
   service-fee cap, privacy profile, selection mode, explicit
   `subtract_paymaster_fee_from_amount`, and `send_all_spendable_dd`). Direct DGB
   funding keeps the full recipient amount; exact-gross inversion is used only
@@ -769,6 +769,10 @@ or chain parameters.
   validation, readiness, accounting, and exact-final helpers shared across the
   domain translation units; `paymaster.h` remains the public registration and
   wallet-lifecycle surface.
+- `paymaster_send.cpp/h` owns `senddigidollar` option decoding, durable-session
+  resumption, balance/fee-funding checks and Paymaster result presentation.
+  Ordinary amount/address validation and direct transfer stay in the original
+  RPC handler; argument positions and validation order are unchanged.
 - `paymaster_client.cpp` owns persistent session inspection/resolution,
   alternative recovery, role-limited PSBT processing, submit, and client result
   handling.
@@ -1172,6 +1176,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/wallet/walletdb.h / src/wallet/walletdb.cpp
 - ⚠️ `WalletBatch` DD persistence methods: `WriteDDBalance()`, `WriteDDTimeLock()`, `ReadDDTimeLock()`, `WriteDDTransaction()`, `WriteDDOwnerKey()`, `WriteDDAddressKey()`, `EraseDDTimeLock()` (74 references)
 - ⚠️ `WalletBatch` encrypted DD key methods (T4-03a): `WriteCryptedDDOwnerKey()`, `ReadCryptedDDOwnerKey()`, `EraseCryptedDDOwnerKey()`, `WriteCryptedDDAddressKey()`, `ReadCryptedDDAddressKey()`, `EraseCryptedDDAddressKey()`
+- Paymaster methods and record-key definitions live in `src/wallet/paymasterdb.cpp`.
+  They remain members of `WalletBatch`, sharing its original database batch,
+  write accounting and explicit transaction. No storage migration is involved.
 - ⚠️ Paymaster DB methods persist versioned provider pools, liquidity policy,
   restartable maintenance ledger, and the latest carrier-withdrawal preview so
   successor/maintenance recovery and exact plan execution survive restart.
@@ -1299,17 +1306,20 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `DigiDollarPositionsWidget` → displays DDTimeLock positions with lock status and health
 
 ### src/qt/digidollarsendwidget.cpp/h
-- `DigiDollarSendWidget` → send DD with amount validation plus asynchronous DGB,
-  Paymaster, or automatic fee funding. The novice surface defaults to direct
-  DGB, explains the cost and exact automatic fallback rule, configures the
-  wallet-local client safety policy, and keeps offer/privacy/provider controls
-  collapsed. It renders persistent unlock, signature, provider, fallback,
-  retry, and same-input recovery states in a separate active-session section.
-  On wallet attachment it can surface bounded, durable, recovery-relevant
-  sessions without automatically unlocking, signing, retrying, or recovering.
-  Automatic/Paymaster modes additionally offer an explicit fee-deduction and
-  wallet-empty action, with separate total-outflow, recipient, provider-fee,
-  and remaining-balance summaries; direct DGB retains the original layout.
+- `DigiDollarSendWidget` owns editable recipient/amount/comment fields,
+  coin-control, amount/address validation and direct DGB-funded DD sending.
+- Its concrete Paymaster child reads an immutable form snapshot and calls
+  limited presentation hooks for field locking, privacy, messages and completion.
+  The form does not retain a second copy of the Paymaster session state.
+
+### src/qt/paymastersendwidget.cpp/h
+- `PaymasterSendWidget` owns DGB/Automatic/Paymaster fee choices, offer and safety
+  controls, persistent-session presentation, polling, exact-offer confirmation,
+  retries and recovery. It reuses `WalletModel::executeRpcAsync` and the existing
+  confirmation guards; Core remains authoritative for spending and persistence.
+- Wallet-generation guards and Qt lifetime guards discard stale callbacks.
+  Existing translation context, object names and two-stage authorization remain.
+- Paymaster-specific test transports and snapshot injection belong to this child.
 
 ### src/qt/walletmodel.cpp/h
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
@@ -1541,8 +1551,13 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `digidollarwidgettests.cpp/h` | Qt widget unit tests for DD UI components |
 | `digidollarwave19widgettests.cpp/h` | Wave 19 Qt unit/signal-slot pins for the release-critical DD UX surface (mint tier dropdown, etc.) |
-| Paymaster cases in `digidollarwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
+| `paymasterwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
 | `digidollarmintrecordtests.cpp/h` | A mint started from the wallet window saves its record before the transaction is sent, and does not send at all if the wallet cannot save it |
+
+The original Qt suite retains DD behavior and boundary integration tests;
+`digidollartestutil.cpp/h` provides the single shared descriptor-wallet fixture.
+`src/wallet/test/paymaster_wallet_load_tests.cpp` owns the seven Paymaster
+maintenance/load regression cases formerly embedded in `walletload_tests.cpp`.
 
 ### Python Functional Tests (`test/functional/`)
 

@@ -9,7 +9,13 @@
 ## Paymaster architecture in this branch
 
 The v9.26.6rc2 integration keeps the provider panel in
-`src/qt/paymasterwidget.cpp`, behind a small embedding interface. See the
+`src/qt/paymasterwidget.cpp`, behind a small embedding interface. The concrete
+`PaymasterSendWidget` owns fee selection and client-session presentation while
+the original send form retains its editable inputs and ordinary transfer path.
+Paymaster record codecs remain `WalletBatch` methods in `wallet/paymasterdb.cpp`;
+`PaymasterStore` still owns atomic state transitions. Free functions in
+`wallet/rpc/paymaster_send.cpp` isolate the existing send RPC integration without
+adding RPC endpoints, persisted state, or another service layer. See the
 [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
 and pending verification.
 

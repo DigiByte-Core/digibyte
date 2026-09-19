@@ -365,6 +365,7 @@ DIGIBYTE_TESTS += \
   wallet/test/rpc_util_tests.cpp \
   wallet/test/scriptpubkeyman_tests.cpp \
   wallet/test/walletload_tests.cpp \
+  wallet/test/paymaster_wallet_load_tests.cpp \
   wallet/test/group_outputs_tests.cpp \
   wallet/test/digidollar_mint_cleanup_tests.cpp \
   wallet/test/digidollar_persistence_wallet_tests.cpp \

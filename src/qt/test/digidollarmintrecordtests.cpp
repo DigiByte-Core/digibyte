@@ -271,10 +271,20 @@ void DigiDollarMintRecordTests::mintDoesNotSendWhenTheWalletCannotSaveIt()
     mini_gui.initModelForWallet(m_node, wallet);
     mini_gui.walletModel->pollBalanceChanged();
 
-    GetMockableDatabase(*wallet).m_pass = false;
+    // Keep safety-record reads available so coin selection can reach the mint
+    // persistence boundary. A global database failure correctly blocks inputs
+    // earlier, when Paymaster reservations cannot be read.
+    bool owner_key_write_refused{false};
+    auto& database = GetMockableDatabase(*wallet);
+    database.m_refuse_write = [&](Span<const std::byte> key) {
+        if (!KeyIsRecord(key, "ddownerkey")) return false;
+        owner_key_write_refused = true;
+        return true;
+    };
     WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
-    GetMockableDatabase(*wallet).m_pass = true;
+    database.m_refuse_write = {};
 
+    QVERIFY2(owner_key_write_refused, "the mint must reach the owner-key persistence boundary");
     QVERIFY2(result.status != WalletModel::OK,
              "the mint was expected to fail because the wallet database refuses writes");
     // The window has to say the transaction was not sent, otherwise the user

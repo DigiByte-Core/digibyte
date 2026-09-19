@@ -295,12 +295,14 @@ explains why these still require separate equivalence review.
 | P2P and bounded work queues | [wire.cpp](../src/paymaster/wire.cpp), [manager.cpp](../src/paymaster/manager.cpp), [net_processing.cpp](../src/net_processing.cpp) |
 | Client order and offer selection | [client.cpp](../src/paymaster/client.cpp), [reputation.cpp](../src/paymaster/reputation.cpp), [paymaster_discovery.cpp](../src/wallet/rpc/paymaster_discovery.cpp) |
 | Wallet state and atomic commits | [paymasterstore.h](../src/wallet/paymasterstore.h), [paymasterstore_client.cpp](../src/wallet/paymasterstore_client.cpp), [paymasterstore_provider.cpp](../src/wallet/paymasterstore_provider.cpp), [paymasterstore_finalization.cpp](../src/wallet/paymasterstore_finalization.cpp) |
+| Wallet record codecs | [paymasterdb.cpp](../src/wallet/paymasterdb.cpp), existing `WalletBatch` declarations and transaction semantics |
+| Send RPC integration | [paymaster_send.cpp](../src/wallet/rpc/paymaster_send.cpp), existing amount units, options and durable-session ordering |
 | Recovery, reconciliation and pruning | [recovery.cpp](../src/paymaster/recovery.cpp), [paymasterstore_recovery.cpp](../src/wallet/paymasterstore_recovery.cpp), [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
 | Provider policies, budgets and liquidity | [provider.cpp](../src/paymaster/provider.cpp), [paymasterprovider.cpp](../src/wallet/paymasterprovider.cpp), [paymaster_provider.cpp](../src/wallet/rpc/paymaster_provider.cpp) |
 | Request/submit/result handlers and runtime | [paymaster_processing.cpp](../src/wallet/rpc/paymaster_processing.cpp), [paymaster_runtime.cpp](../src/wallet/rpc/paymaster_runtime.cpp), [paymaster_integration.cpp](../src/wallet/rpc/paymaster_integration.cpp) |
 | Wallet signing bridge | [paymasterpsbt.cpp](../src/wallet/paymasterpsbt.cpp), [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp) |
 | Existing wallet integration and protection | [digidollarwallet.cpp](../src/wallet/digidollarwallet.cpp), [spend.cpp](../src/wallet/spend.cpp), [load.cpp](../src/wallet/load.cpp) |
-| Qt | [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), embedded through [paymasterwidget.h](../src/qt/paymasterwidget.h), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
+| Qt | [paymastersendwidget.cpp](../src/qt/paymastersendwidget.cpp), embedded by [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), embedded through [paymasterwidget.h](../src/qt/paymasterwidget.h), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
 
 The high-level entry is `senddigidollar` in
 [src/rpc/digidollar.cpp](../src/rpc/digidollar.cpp); the optional seventh `options`
@@ -359,6 +361,7 @@ This does not change the ordinary direct-DGB path. See
 |---|---|
 | Amounts, carriers, PSBT roles and mutation rejection | `src/test/paymaster_*_tests.cpp`, `src/wallet/test/paymaster_wallet_psbt_tests.cpp` |
 | Atomic authority, budgets, failures and restart | `src/wallet/test/paymaster_wallet_store_tests.cpp`, `src/wallet/test/paymaster_wallet_security_tests.cpp` |
+| Wallet maintenance and load | [paymaster_wallet_load_tests.cpp](../src/wallet/test/paymaster_wallet_load_tests.cpp) |
 | DGB-less payment and sponsored variants | [wallet_paymaster_provider.py](../test/functional/wallet_paymaster_provider.py) |
 | Multiple offers and selected-provider-only effects | [wallet_paymaster_offer_selection.py](../test/functional/wallet_paymaster_offer_selection.py) |
 | Contention, fallback boundary and single payment | [wallet_paymaster_failover.py](../test/functional/wallet_paymaster_failover.py) |
@@ -366,7 +369,7 @@ This does not change the ordinary direct-DGB path. See
 | Activation, index and transport prerequisites | [wallet_paymaster_readiness.py](../test/functional/wallet_paymaster_readiness.py) |
 | Liquidity, runtime and restart | [wallet_paymaster_lifecycle.py](../test/functional/wallet_paymaster_lifecycle.py), [wallet_paymaster_rpc.py](../test/functional/wallet_paymaster_rpc.py) |
 | P2P and old-version compatibility | [p2p_paymaster.py](../test/functional/p2p_paymaster.py), [p2p_paymaster_v9_26_5_bridge.py](../test/functional/p2p_paymaster_v9_26_5_bridge.py), [wallet_v9_26_5_compatibility.py](../test/functional/wallet_v9_26_5_compatibility.py), [wallet_v9_26_5_inplace_upgrade.py](../test/functional/wallet_v9_26_5_inplace_upgrade.py) |
-| Qt authorization and displayed state | [digidollarwidgettests.cpp](../src/qt/test/digidollarwidgettests.cpp) |
+| Qt authorization and displayed state | [paymasterwidgettests.cpp](../src/qt/test/paymasterwidgettests.cpp); DD boundary cases remain in [digidollarwidgettests.cpp](../src/qt/test/digidollarwidgettests.cpp) |
 | Sanitizers and four bounded fuzz targets | [paymaster-security.yml](../.github/workflows/paymaster-security.yml) |
 
 After building the selected revision with wallet support using the repository's

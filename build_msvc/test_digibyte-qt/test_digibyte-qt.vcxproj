@@ -29,6 +29,8 @@
     <ClCompile Include="..\..\src\qt\test\digidollarmintrecordtests.cpp" />
     <ClCompile Include="..\..\src\qt\test\ddtransactiontabletests.cpp" />
     <ClCompile Include="..\..\src\qt\test\ddtransactionrecordtests.cpp" />
+    <ClCompile Include="..\..\src\qt\test\paymasterwidgettests.cpp" />
+    <ClCompile Include="..\..\src\qt\test\digidollartestutil.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addressbooktests.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_apptests.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_optiontests.cpp" />
@@ -40,6 +42,7 @@
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarmintrecordtests.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_ddtransactionrecordtests.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_ddtransactiontabletests.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_paymasterwidgettests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\libdigibyte_consensus\libdigibyte_consensus.vcxproj">
@@ -116,6 +119,7 @@
     <MocTestFiles Include="..\..\src\qt\test\digidollarmintrecordtests.h" />
     <MocTestFiles Include="..\..\src\qt\test\ddtransactionrecordtests.h" />
     <MocTestFiles Include="..\..\src\qt\test\ddtransactiontabletests.h" />
+    <MocTestFiles Include="..\..\src\qt\test\paymasterwidgettests.h" />
     <MocTestFiles Include="..\..\src\qt\test\wallettests.h" />
   </ItemGroup>
   <Target Name="moccode" Inputs="@(MocTestFiles)" Outputs="@(MocTestFiles->'$(GeneratedFilesOutDir)\moc\moc_%(Filename).cpp')">

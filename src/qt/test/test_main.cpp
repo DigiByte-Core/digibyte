@@ -23,6 +23,7 @@
 #include <qt/test/ddtransactiontabletests.h>
 #include <qt/test/wallettests.h>
 #include <qt/test/digidollarwidgettests.h>
+#include <qt/test/paymasterwidgettests.h>
 #include <qt/test/digidollarwave19widgettests.h>
 #include <qt/test/digidollarmintrecordtests.h>
 #include <qt/test/ddtransactionrecordtests.h>
@@ -144,6 +145,9 @@ int main(int argc, char* argv[])
 
     DigiDollarWidgetTests test7(app.node());
     run_test(test7);
+
+    PaymasterWidgetTests paymaster_tests(app.node());
+    run_test(paymaster_tests);
 
     // Wave 19 Agent B: separate translation unit for the Wave 19 Qt pins
     // (DD-FA-FUNC-030, DD-FA-TEST-027/028/029) — kept out of
