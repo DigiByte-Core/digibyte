@@ -303,7 +303,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "admission_dgb_slots": 4,
             "operational_dgb_slots": 5,
         })
-        assert_equal(policy_bound_preview["missing_operational_dgb_slots"], 1)
+        # Only the two 0.30 DGB slots meet the raised fee ceiling; the two
+        # older 0.20 DGB slots must not count toward the five-slot target.
+        assert_equal(policy_bound_preview["missing_operational_dgb_slots"], 3)
+        assert_equal(policy_bound_preview["total_output_satoshis"], 90000000)
         cli.setpaymasterpolicy(policy)
         assert_raises_rpc_error(
             -8,
@@ -375,12 +378,17 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(carriers["executed"], True)
         assert_equal(len(carriers["dd_txid"]), 64)
         assert "dgb_txid" not in carriers
-        assert_equal(len(carriers["pool"]), 12)
+        # Rebalancing retains the two spent undersized DGB entries as history.
+        assert_equal(len(carriers["pool"]), 14)
         self.generatetoaddress(node, 1, wallet.getnewaddress())
 
         user_paid_ready = wallet.getpaymasterpoolinfo()
         assert_equal(user_paid_ready["ready"], True)
-        assert_equal(user_paid_ready["entries"], 12)
+        assert_equal(user_paid_ready["entries"], 14)
+        assert_equal(sum(entry["state"] == "available"
+                         for entry in user_paid_ready["pool"]), 12)
+        assert_equal(sum(entry["state"] == "spent"
+                         for entry in user_paid_ready["pool"]), 2)
         provider_ready = wallet.getpaymasterinfo()
         assert_equal(provider_ready["pool"]["admission_carriers"], 4)
         assert_equal(provider_ready["pool"]["operational_carriers"], 2)
@@ -392,7 +400,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(retry["executed"], False)
         assert_equal(retry["missing_admission_carrier_slots"], 0)
         assert_equal(retry["missing_operational_carrier_slots"], 0)
-        assert_equal(len(retry["pool"]), 12)
+        assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
 
         self.log.info("Preview and execute retirement of excess pool liquidity")
         minimum_target = {

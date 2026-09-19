@@ -77,7 +77,13 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         })
         provider.setpaymasterliquiditypolicy(expanded_liquidity)
         self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
-        harness.fund_client_dd(1_500)
+        # Two simultaneous sessions must reserve disjoint confirmed DD inputs.
+        # Keep the original total balance, split into independently usable coins.
+        harness.fund_client_dd(750)
+        provider.senddigidollar(client.getdigidollaraddress(), 750)
+        self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
+        self.sync_blocks()
+        assert_equal(client.getdigidollarbalance()["total"], 1_500)
 
         # Use a third wallet as an independent recipient so every value-moving
         # assertion distinguishes client change from recipient value.
@@ -166,6 +172,14 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         second_pending = client.senddigidollar(
             recipient, 200, "", 0, None, "cents", second_options)
         assert_equal(second_pending["request_id"], second_request_id)
+        second_snapshot = client.resolvepaymastersession(
+            {"request_id": second_request_id}, "refresh")
+        first_inputs = {(entry["txid"], entry["vout"])
+                        for entry in first_snapshot["session"]["reserved_user_inputs"]}
+        second_inputs = {(entry["txid"], entry["vout"])
+                         for entry in second_snapshot["session"]["reserved_user_inputs"]}
+        assert first_inputs and second_inputs
+        assert first_inputs.isdisjoint(second_inputs)
         # The upstream amount_unit argument stays before Paymaster options.
         # Equivalent cents/dollars retries must resume the same durable request.
         dollars_retry = client.senddigidollar(

@@ -484,6 +484,46 @@ bool IsActiveClientSession(const PaymentSession& session,
     return true;
 }
 
+// Share the durable session schema between status and recovery RPCs.
+RPCResult ClientSessionResult(std::string key)
+{
+    return RPCResult{RPCResult::Type::OBJ, std::move(key), "The authoritative persistent session", {
+        {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
+        {RPCResult::Type::STR_HEX, "session_id", "Persistent session identifier"},
+        {RPCResult::Type::STR_HEX, "canonical_request_hash", "Hash of the canonical authorized request"},
+        {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original wallet-local amount; exact total outflow in subtract mode"},
+        {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", /*optional=*/true, "Whether the service fee is deducted from requested_amount_cents"},
+        {RPCResult::Type::BOOL, "send_all_spendable_dd", /*optional=*/true, "Whether the session is bound to all ordinary spendable DD"},
+        {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
+        {RPCResult::Type::STR, "fee_mode_used", "Persisted effective fee mode"},
+        {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Provider bound by the latest durable client authorization"},
+        {RPCResult::Type::STR, "privacy_profile", /*optional=*/true, "standard or high privacy profile of the latest durable attempt"},
+        {RPCResult::Type::STR_HEX, "offer_id", /*optional=*/true, "Offer bound by the latest durable client authorization"},
+        {RPCResult::Type::STR_HEX, "policy_hash", /*optional=*/true, "Provider policy bound by the latest durable client authorization"},
+        {RPCResult::Type::STR, "funding_model", /*optional=*/true, "Exact sponsored or user_paid funding model"},
+        {RPCResult::Type::NUM, "payment_cents", /*optional=*/true, "Exact recipient amount from the latest durable client authorization"},
+        {RPCResult::Type::NUM, "service_fee_cents", /*optional=*/true, "Exact rounded provider service fee"},
+        {RPCResult::Type::NUM, "user_total_cents", /*optional=*/true, "Exact recipient amount plus service fee"},
+        {RPCResult::Type::STR, "to_address", /*optional=*/true, "Canonical DigiDollar recipient from the bound persisted intent or durable authorization"},
+        {RPCResult::Type::STR, "session_state", "Authoritative session state"},
+        {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Persisted phase for PENDING_PROVIDER"},
+        {RPCResult::Type::BOOL, "final", "Whether the state is terminal"},
+        {RPCResult::Type::STR, "broadcast_state", "not_attempted, unknown, accepted_mempool, accepted_stempool, or confirmed"},
+        {RPCResult::Type::STR, "confirmation_state", "unconfirmed, payment_confirmed, recovery_confirmed, or conflicted"},
+        {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
+        {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
+        {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known final transaction id"},
+        {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known idempotent self-recovery transaction id"},
+        {RPCResult::Type::ARR, "reserved_user_inputs", "Immutable user input set", {
+            {RPCResult::Type::OBJ, "", "A reserved user input", {
+                {RPCResult::Type::STR_HEX, "txid", "Creating transaction id"},
+                {RPCResult::Type::NUM, "vout", "Output index"},
+            }},
+        }},
+        {RPCResult::Type::NUM, "provider_attempts", "Number of persistent provider attempts"},
+    }};
+}
+
 } // namespace
 
 RPCHelpMan getdigidollarsendsession()
@@ -497,41 +537,7 @@ RPCHelpMan getdigidollarsendsession()
                                                                                                                  {"session_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Persistent 256-bit session identifier"},
                                                                                                              }},
         },
-        RPCResult{RPCResult::Type::OBJ, "", "The authoritative persistent session", {
-                                                                                         {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
-                                                                                         {RPCResult::Type::STR_HEX, "session_id", "Persistent session identifier"},
-                                                                                         {RPCResult::Type::STR_HEX, "canonical_request_hash", "Hash of the canonical authorized request"},
-                                                                                         {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original wallet-local amount; exact total outflow in subtract mode"},
-                                                                                         {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", /*optional=*/true, "Whether the service fee is deducted from requested_amount_cents"},
-                                                                                         {RPCResult::Type::BOOL, "send_all_spendable_dd", /*optional=*/true, "Whether the session is bound to all ordinary spendable DD"},
-                                                                                         {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
-                                                                                         {RPCResult::Type::STR, "fee_mode_used", "Persisted effective fee mode"},
-                                                                                         {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Provider bound by the latest durable client authorization"},
-                                                                                         {RPCResult::Type::STR, "privacy_profile", /*optional=*/true, "standard or high privacy profile of the latest durable attempt"},
-                                                                                         {RPCResult::Type::STR_HEX, "offer_id", /*optional=*/true, "Offer bound by the latest durable client authorization"},
-                                                                                         {RPCResult::Type::STR_HEX, "policy_hash", /*optional=*/true, "Provider policy bound by the latest durable client authorization"},
-                                                                                         {RPCResult::Type::STR, "funding_model", /*optional=*/true, "Exact sponsored or user_paid funding model"},
-                                                                                         {RPCResult::Type::NUM, "payment_cents", /*optional=*/true, "Exact recipient amount from the latest durable client authorization"},
-                                                                                         {RPCResult::Type::NUM, "service_fee_cents", /*optional=*/true, "Exact rounded provider service fee"},
-                                                                                         {RPCResult::Type::NUM, "user_total_cents", /*optional=*/true, "Exact recipient amount plus service fee"},
-                                                                                                                                                                        {RPCResult::Type::STR, "to_address", /*optional=*/true, "Canonical DigiDollar recipient from the bound persisted intent or durable authorization"},
-                                                                                         {RPCResult::Type::STR, "session_state", "Authoritative session state"},
-                                                                                        {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Persisted phase for PENDING_PROVIDER"},
-                                                                                        {RPCResult::Type::BOOL, "final", "Whether the state is terminal"},
-                                                                                        {RPCResult::Type::STR, "broadcast_state", "not_attempted, unknown, accepted_mempool, accepted_stempool, or confirmed"},
-                                                                                        {RPCResult::Type::STR, "confirmation_state", "unconfirmed, payment_confirmed, recovery_confirmed, or conflicted"},
-                                                                                        {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
-                                                                                        {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
-                                                                                        {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known final transaction id"},
-                                                                                        {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known idempotent self-recovery transaction id"},
-                                                                                        {RPCResult::Type::ARR, "reserved_user_inputs", "Immutable user input set", {
-                                                                                                                                                                       {RPCResult::Type::OBJ, "", "A reserved user input", {
-                                                                                                                                                                                                                               {RPCResult::Type::STR_HEX, "txid", "Creating transaction id"},
-                                                                                                                                                                                                                               {RPCResult::Type::NUM, "vout", "Output index"},
-                                                                                                                                                                                                                           }},
-                                                                                                                                                                   }},
-                                                                                        {RPCResult::Type::NUM, "provider_attempts", "Number of persistent provider attempts"},
-                                                                                    }},
+        ClientSessionResult(""),
         RPCExamples{HelpExampleCli("getdigidollarsendsession", "'{\"request_id\":\"550e8400-e29b-41d4-a716-446655440000\"}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
@@ -1593,6 +1599,10 @@ UniValue ResolveAlternativePaymasterRecovery(
 
 RPCHelpMan resolvepaymastersession()
 {
+    // RPCResult cannot express nullable fields. Use the existing per-field
+    // escape hatch (as getwalletinfo does for scanning) only for the four
+    // object/string/number-or-null fields; retain their documented schemas.
+    // Functional tests check both absent and persisted session artifacts.
     return RPCHelpMan{
         "resolvepaymastersession",
         "Inspect or recover an existing Paymaster session.\n"
@@ -1618,33 +1628,7 @@ RPCHelpMan resolvepaymastersession()
         },
         RPCResult{RPCResult::Type::OBJ, "", "Authoritative local recovery state", {
                                                                                       {RPCResult::Type::STR, "action", "Performed local action"},
-                                                                                      {RPCResult::Type::OBJ, "session", /*optional=*/false, "Persistent session", {
-                                                                                                                                                                      {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
-                                                                                                                                                                      {RPCResult::Type::STR_HEX, "session_id", "Persistent session identifier"},
-                                                                                                                                                                       {RPCResult::Type::STR_HEX, "canonical_request_hash", "Canonical request hash"},
-                                                                                                                                                                       {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
-                                                                                                                                                                       {RPCResult::Type::STR, "fee_mode_used", "Effective fee mode"},
-                                                                                                                                                                       {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original recipient amount or exact total DD outflow"},
-                                                                                                                                                                       {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", /*optional=*/true, "Whether the Paymaster fee is deducted from the requested amount"},
-                                                                                                                                                                       {RPCResult::Type::BOOL, "send_all_spendable_dd", /*optional=*/true, "Whether the requested amount was bound to all spendable confirmed DD"},
-                                                                                                                                                                       {RPCResult::Type::STR, "to_address", /*optional=*/true, "Canonical DigiDollar recipient from the durable authorization"},
-                                                                                                                                                                       {RPCResult::Type::STR, "session_state", "Authoritative session state"},
-                                                                                                                                                                      {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Pending provider phase"},
-                                                                                                                                                                      {RPCResult::Type::BOOL, "final", "Whether the session is terminal"},
-                                                                                                                                                                      {RPCResult::Type::STR, "broadcast_state", "Authoritative broadcast state"},
-                                                                                                                                                                      {RPCResult::Type::STR, "confirmation_state", "Authoritative confirmation state"},
-                                                                                                                                                                      {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
-                                                                                                                                                                      {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
-                                                                                                                                                                      {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known payment transaction"},
-                                                                                                                                                                      {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known self-recovery transaction"},
-                                                                                                                                                                      {RPCResult::Type::ARR, "reserved_user_inputs", "Immutable user input set", {
-                                                                                                                                                                                                                                                     {RPCResult::Type::OBJ, "", "A reserved user input", {
-                                                                                                                                                                                                                                                                                                             {RPCResult::Type::STR_HEX, "txid", "Creating transaction id"},
-                                                                                                                                                                                                                                                                                                             {RPCResult::Type::NUM, "vout", "Output index"},
-                                                                                                                                                                                                                                                                                                         }},
-                                                                                                                                                                                                                                                 }},
-                                                                                                                                                                      {RPCResult::Type::NUM, "provider_attempts", "Persistent provider attempt count"},
-                                                                                                                                                                  }},
+                                                                                      ClientSessionResult("session"),
                                                                                        {RPCResult::Type::OBJ, "attempt", /*optional=*/false, "Selected persistent attempt, or null when none exists", {
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "attempt_id", "Persistent attempt identifier"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "provider_id", "Provider identifier"},
@@ -1660,7 +1644,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "authorization_commitment", /*optional=*/true, "Wallet-local exact client authorization"},
                                                                                                                                                                               {RPCResult::Type::BOOL, "authorization_accepted", /*optional=*/true, "Whether that exact commitment was accepted"},
                                                                                                                                                                               {RPCResult::Type::NUM_TIME, "authorization_accepted_at", /*optional=*/true, "Durable acceptance time"},
-                                                                                                                                                                          }},
+                                                                                                                                                                          }, /*skip_type_check=*/true},
                                                                                        {RPCResult::Type::STR, "artifact", "none, user_psbt, final_transaction, or alternative_recovery"},
                                                                                        {RPCResult::Type::BOOL, "requires_attention", "Whether durable state requires explicit user attention"},
                                                                                        {RPCResult::Type::ARR, "allowed_actions", "Core-derived actions returned for every resolve action; Qt may only remove entries", {{RPCResult::Type::STR, "", "Action name"}}},
@@ -1695,7 +1679,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "raw_transaction", /*optional=*/true, "Exact final recovery transaction"},
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Final recovery txid"},
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "wtxid", /*optional=*/true, "Final recovery wtxid"},
-                                                                                                                                                                                                   }},
+                                                                                                                                                                                                   }, /*skip_type_check=*/true},
                                                                                       {RPCResult::Type::STR, "psbt", /*optional=*/true, "Exact persisted user-signed PSBT"},
                                                                                       {RPCResult::Type::STR_HEX, "raw_transaction", /*optional=*/true, "Exact durably committed transaction"},
                                                                                       {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Committed transaction id"},
@@ -1705,8 +1689,8 @@ RPCHelpMan resolvepaymastersession()
                                                                                       {RPCResult::Type::BOOL, "queued", /*optional=*/true, "Whether the exact persisted submit is queued"},
                                                                                       {RPCResult::Type::BOOL, "connection_pending", /*optional=*/true, "Whether a dedicated provider reconnection was requested"},
                                                                                       {RPCResult::Type::BOOL, "route_available", /*optional=*/true, "Whether the persisted provider route is available"},
-                                                                                       {RPCResult::Type::STR, "result_status", /*optional=*/false, "Latest signed provider result, or null when none exists"},
-                                                                                       {RPCResult::Type::NUM, "result_sequence", /*optional=*/false, "Latest monotonic result sequence, or null when none exists"},
+                                                                                       {RPCResult::Type::STR, "result_status", /*optional=*/false, "Latest signed provider result, or null when none exists", {}, /*skip_type_check=*/true},
+                                                                                       {RPCResult::Type::NUM, "result_sequence", /*optional=*/false, "Latest monotonic result sequence, or null when none exists", {}, /*skip_type_check=*/true},
                                                                                   }},
         RPCExamples{HelpExampleCli("resolvepaymastersession", "'{\"request_id\":\"550e8400-e29b-41d4-a716-446655440000\"}' retry_same")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {

@@ -2315,6 +2315,7 @@ RPCHelpMan senddigidollar()
                         {RPCResult::Type::STR_HEX, "canonical_request_hash", /*optional=*/true, "Canonical idempotent request binding"},
                         {RPCResult::Type::STR, "requested_fee_mode", /*optional=*/true, "Requested fee mode"},
                         {RPCResult::Type::STR, "fee_mode_used", /*optional=*/true, "Authoritative funding mode"},
+                        {RPCResult::Type::STR, "privacy_profile", /*optional=*/true, "Persisted standard or high Paymaster privacy profile"},
                         {RPCResult::Type::STR, "session_state", /*optional=*/true, "Authoritative Paymaster session state"},
                         {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Outstanding Paymaster phase"},
                         {RPCResult::Type::BOOL, "final", /*optional=*/true, "Whether the Paymaster session is terminal"},

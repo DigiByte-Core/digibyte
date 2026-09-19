@@ -67,6 +67,14 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
                     completed.get("session_state") == "MEMPOOL")
 
         self.wait_until(automatic_submit_completed)
+        # The session RPC keeps nullable fields present. Once a signed result
+        # exists, its status and sequence must have their documented types.
+        resolved = client.resolvepaymastersession(
+            {"request_id": request_id}, "refresh")
+        assert isinstance(resolved["attempt"], dict)
+        assert resolved["recovery"] is None
+        assert isinstance(resolved["result_status"], str)
+        assert type(resolved["result_sequence"]) is int
         payment_txid = completed["txid"]
         assert payment_txid in self.nodes[0].getrawmempool()
         assert_equal(

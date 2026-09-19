@@ -335,9 +335,17 @@ class PaymasterFailoverTest(DigiByteTestFramework):
             standby, fallback_options, fallback_send)
         assert_equal(
             authorized["provider_id"], standby_identity["provider_id"])
+        signed_snapshot = fallback_client.resolvepaymastersession(
+            lookup, "refresh")
+        assert_equal(signed_snapshot["artifact"], "user_psbt")
+        assert "fallback" not in signed_snapshot["allowed_actions"]
+        # The RPC rejects actions outside the authoritative action set before
+        # the store's independent no-fallback-after-signing guard is reached.
         assert_raises_rpc_error(
-            -4, "PAYMASTER_FALLBACK_AUTHORIZATION_MAY_EXIST",
+            -4, "PAYMASTER_SESSION_ACTION_NOT_ALLOWED",
             fallback_client.resolvepaymastersession, lookup, "fallback")
+        assert_equal(fallback_client.resolvepaymastersession(
+            lookup, "refresh"), signed_snapshot)
 
         commit = {}
 
