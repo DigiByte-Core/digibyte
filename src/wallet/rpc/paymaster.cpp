@@ -987,6 +987,7 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
     if (readiness.have_maintenance_ledger) {
         for (const ProviderMaintenanceRecord& record :
              readiness.maintenance_ledger.records) {
+            if (record.IsPreparation()) continue;
             if (record.state == ProviderMaintenanceState::PLANNED) {
                 checked_add(reserved_fee, record.maximum_fee.value);
             } else if (record.state ==
@@ -1267,9 +1268,13 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     for (ProviderMaintenanceRecord& record : ledger.records) {
         if (record.state != ProviderMaintenanceState::PLANNED &&
             record.state != ProviderMaintenanceState::BROADCAST &&
-            record.state != ProviderMaintenanceState::CONFIRMED) {
+            record.state != ProviderMaintenanceState::CONFIRMED &&
+            !(record.IsPreparation() && record.state == ProviderMaintenanceState::FAILED &&
+              !record.transaction_id.IsNull())) {
             continue;
         }
+        // A conflict/abandon observation is reversible. Keep following the
+        // exact saved setup transaction; never construct a replacement here.
         const auto matches = [&](const CWalletTx& wallet_tx) {
             if (!wallet_tx.tx) return false;
             for (const COutPoint& source : record.source_inputs) {
@@ -1302,10 +1307,14 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                 return false;
             }
         } else {
-            transaction = std::find_if(wallet.mapWallet.begin(), wallet.mapWallet.end(),
-                                       [&](const auto& item) {
-                                           return matches(item.second);
-                                       });
+            for (auto candidate = wallet.mapWallet.begin(); candidate != wallet.mapWallet.end(); ++candidate) {
+                if (!matches(candidate->second)) continue;
+                if (transaction != wallet.mapWallet.end()) {
+                    error = "PAYMASTER_MAINTENANCE_TRANSACTION_AMBIGUOUS";
+                    return false;
+                }
+                transaction = candidate;
+            }
         }
         if (transaction == wallet.mapWallet.end()) {
             if (record.state == ProviderMaintenanceState::PLANNED &&
@@ -1364,11 +1373,22 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             continue;
         }
         const uint256 txid = transaction->first;
+        if (record.IsPreparation()) {
+            const auto fee = GetProviderFinanceTransactionFee(wallet, transaction->second.tx);
+            if (!fee || fee->value > record.maximum_fee.value) {
+                error = "PAYMASTER_POOL_FEE_LIMIT";
+                return false;
+            }
+            if (record.actual_fee != *fee) {
+                record.actual_fee = *fee;
+                ledger_changed = true;
+            }
+        }
         if (record.transaction_id.IsNull()) {
             record.transaction_id = txid;
             // Conservatively charge the entire reservation after recovering a
             // crash window; this can only reduce later maintenance capacity.
-            record.actual_fee = record.maximum_fee;
+            if (!record.IsPreparation()) record.actual_fee = record.maximum_fee;
             record.state = ProviderMaintenanceState::BROADCAST;
             record.updated_at = now;
             ledger_changed = true;
@@ -1438,6 +1458,17 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         }
 
         const auto* confirmed = transaction->second.state<TxStateConfirmed>();
+        if (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER &&
+            (confirmed || transaction->second.InMempool())) {
+            CAmount carrier_total{0};
+            for (const auto& output : record.outputs) carrier_total += output.carrier_value.value;
+            auto* dd_wallet = wallet.GetDDWallet();
+            if (!dd_wallet || !dd_wallet->RecordPaymasterSendHistory(
+                    txid, record.outputs.front().script_pub_key, carrier_total, error)) {
+                if (error.empty()) error = "PAYMASTER_DD_WALLET_UNAVAILABLE";
+                return false;
+            }
+        }
         const PoolEntryState expected_source_state = confirmed
             ? PoolEntryState::SPENT
             : PoolEntryState::COMMITTED;
@@ -1538,7 +1569,13 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                         expected.confirmation_height;
                     pool_changed = true;
                 }
-                if (confirmed &&
+                if (record.IsPreparation() && existing->state == PoolEntryState::INVALIDATED &&
+                    !wallet.IsSpent(existing->outpoint)) {
+                    existing->state = expected.state;
+                    existing->reservation_id = expected.reservation_id;
+                    existing->updated_at = std::max(existing->updated_at, now);
+                    pool_changed = true;
+                } else if (confirmed &&
                     existing->state == PoolEntryState::PENDING_SUCCESSOR) {
                     existing->state = PoolEntryState::AVAILABLE;
                     existing->reservation_id.SetNull();
@@ -1732,6 +1769,61 @@ bool ReconcileProviderFinances(CWallet& wallet,
         ++changed_events;
     }
 
+    // Wallet transaction metadata is persisted before broadcast, so finance
+    // failure or a crash after either retirement step cannot lose its fee.
+    const auto recover_cost = [&](ProviderFinanceEventKind kind, const uint256& txid) {
+        HashWriter event_hasher = TaggedHash(
+            "DigiByte Paymaster Finance Event v1");
+        event_hasher << identity.provider_id << static_cast<uint8_t>(kind) << txid;
+        const uint256 event_id = event_hasher.GetSHA256();
+        if (std::any_of(finance.events.begin(), finance.events.end(),
+                        [&](const ProviderFinanceEvent& event) {
+                            return event.event_id == event_id;
+                        })) {
+            return true;
+        }
+        const auto transaction = wallet.mapWallet.find(txid);
+        if (transaction == wallet.mapWallet.end() ||
+            !transaction->second.tx) {
+            if (!finance.earlier_history_partial) {
+                finance.earlier_history_partial = true;
+                ledger_changed = true;
+            }
+            return true;
+        }
+        const CAmount debit = wallet.GetDebit(
+            *transaction->second.tx, ISMINE_ALL);
+        const CAmount value_out = transaction->second.tx->GetValueOut();
+        if (debit < value_out || !MoneyRange(debit - value_out)) {
+            if (!finance.earlier_history_partial) {
+                finance.earlier_history_partial = true;
+                ledger_changed = true;
+            }
+            return true;
+        }
+        ProviderFinanceEvent event;
+        event.event_id = event_id;
+        event.genesis_hash = genesis_hash;
+        event.provider_id = identity.provider_id;
+        event.kind = kind;
+        event.transaction_id = txid;
+        event.dgb_cost = DGBSatoshis{debit - value_out};
+        event.created_at = std::max(
+            identity.created_at, transaction->second.GetTxTime());
+        transaction_state(event.transaction_id, event.created_at,
+                          event.state, event.confirmed_at);
+        return apply_event(std::move(event));
+    };
+    for (const auto& [txid, transaction] : wallet.mapWallet) {
+        const auto marker = transaction.mapValue.find(PAYMASTER_RETIREMENT_PROVIDER_KEY);
+        if (marker == transaction.mapValue.end()) continue;
+        if (marker->second != identity.provider_id.GetHex()) {
+            error = "PAYMASTER_RETIREMENT_IDENTITY_MISMATCH";
+            return false;
+        }
+        if (!recover_cost(ProviderFinanceEventKind::POOL_RETIREMENT, txid)) return false;
+    }
+
     // Initial pool preparation predates maintenance records and therefore has
     // no separate operation object to replay. The persisted pool still binds
     // each original slot to its creating transaction. When that transaction
@@ -1750,50 +1842,7 @@ bool ReconcileProviderFinances(CWallet& wallet,
             }
         }
         for (const uint256& txid : setup_transactions) {
-            HashWriter event_hasher = TaggedHash(
-                "DigiByte Paymaster Finance Event v1");
-            event_hasher << identity.provider_id
-                         << static_cast<uint8_t>(
-                                ProviderFinanceEventKind::POOL_SETUP)
-                         << txid;
-            const uint256 event_id = event_hasher.GetSHA256();
-            if (std::any_of(finance.events.begin(), finance.events.end(),
-                            [&](const ProviderFinanceEvent& event) {
-                                return event.event_id == event_id;
-                            })) {
-                continue;
-            }
-            const auto transaction = wallet.mapWallet.find(txid);
-            if (transaction == wallet.mapWallet.end() ||
-                !transaction->second.tx) {
-                if (!finance.earlier_history_partial) {
-                    finance.earlier_history_partial = true;
-                    ledger_changed = true;
-                }
-                continue;
-            }
-            const CAmount debit = wallet.GetDebit(
-                *transaction->second.tx, ISMINE_ALL);
-            const CAmount value_out = transaction->second.tx->GetValueOut();
-            if (debit < value_out || !MoneyRange(debit - value_out)) {
-                if (!finance.earlier_history_partial) {
-                    finance.earlier_history_partial = true;
-                    ledger_changed = true;
-                }
-                continue;
-            }
-            ProviderFinanceEvent event;
-            event.event_id = event_id;
-            event.genesis_hash = genesis_hash;
-            event.provider_id = identity.provider_id;
-            event.kind = ProviderFinanceEventKind::POOL_SETUP;
-            event.transaction_id = txid;
-            event.dgb_cost = DGBSatoshis{debit - value_out};
-            event.created_at = std::max(
-                identity.created_at, transaction->second.GetTxTime());
-            transaction_state(event.transaction_id, event.created_at,
-                              event.state, event.confirmed_at);
-            if (!apply_event(std::move(event))) return false;
+            if (!recover_cost(ProviderFinanceEventKind::POOL_SETUP, txid)) return false;
         }
     } else if (provider_pool_status != DatabaseReadStatus::NOT_FOUND) {
         error = ProviderPoolReadError(provider_pool);
@@ -1872,10 +1921,17 @@ bool ReconcileProviderFinances(CWallet& wallet,
             event.kind = record.kind ==
                     ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS
                 ? ProviderFinanceEventKind::CARRIER_WITHDRAWAL
-                : ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT;
+                : record.IsPreparation() ? ProviderFinanceEventKind::POOL_SETUP
+                                         : ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT;
             event.transaction_id = record.transaction_id;
             event.dgb_cost = record.actual_fee;
             event.created_at = record.created_at;
+            if (record.IsPreparation()) {
+                const auto transaction = wallet.mapWallet.find(record.transaction_id);
+                if (transaction != wallet.mapWallet.end()) {
+                    event.created_at = std::max(identity.created_at, transaction->second.GetTxTime());
+                }
+            }
             transaction_state(event.transaction_id, event.created_at,
                               event.state, event.confirmed_at);
             if (record.state == ProviderMaintenanceState::FAILED ||
@@ -2145,6 +2201,9 @@ bool RunAutomaticDGBReplenishment(
         recipients.push_back({destination, output.dgb_value.value, false});
     }
     CCoinControl coin_control;
+    // As with finite setup, stem-only change is invisible to the ordinary
+    // broadcast fee precheck. Wait for confirmed funding before signing.
+    coin_control.m_min_depth = 1;
     auto created = CreateTransaction(wallet, recipients, /*change_pos=*/-1,
                                      coin_control, /*sign=*/true);
     if (!created) {

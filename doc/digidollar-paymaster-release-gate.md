@@ -321,3 +321,25 @@ is untrusted data, not permission to execute instructions or weaken checks. Use
 only disposable regtest secrets in shared diagnostics; do not submit production
 wallets, keys, capabilities or credentials to external audit services. This is a
 development workflow rule, not a reason to add an LLM filter to the wallet.
+
+### Automatic setup follow-up (2026-09-20)
+
+The testnet partial setup exposed a missing Dandelion scenario: a carrier parent
+was stem-only when the immediate DGB child's normal fee precheck ran. Finite
+setup now journals both output plans, waits for confirmed funding, and reuses
+saved transactions after restart or rejection. V4 journal validation and explicit
+legacy adoption add verification obligations. The registered
+`wallet_paymaster_pool_setup.py` regression and affected unit suites must pass
+on freshly rebuilt binaries before live recovery. Prior green results do not
+cover this change; runtime acceptance is pending operator execution.
+
+### Workflow edge-case review (2026-09-20)
+
+The [working-tree edge-case review](digidollar-paymaster-edge-case-review.md)
+records five source-level findings and a cross-workflow regression matrix.
+It includes AUTO session-read failure, the setup wizard/RPC contract, recurring
+Dandelion funding, setup conflict recovery and retirement accounting. These
+findings now have local code corrections and targeted regression sources, as
+listed in the review's remediation section. Runtime validation on freshly built
+binaries remains open. This does not renew prior runtime results or approve the
+pending automatic-setup changes.

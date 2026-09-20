@@ -78,6 +78,11 @@ public:
         bool send_all_spendable_dd,
         std::string& error);
 
+    /** Only NOT_FOUND permits starting another payment. Read failures must
+     * remain distinguishable when deciding whether an AUTO request is new. */
+    DatabaseReadStatus GetSessionByRequestIdWithStatus(
+        const std::string& request_id,
+        DigiDollar::Paymaster::PaymentSession& session) const;
     bool GetSessionByRequestId(const std::string& request_id,
                                DigiDollar::Paymaster::PaymentSession& session) const;
     bool GetSessionBySessionId(const uint256& session_id,

@@ -936,3 +936,15 @@ running state. Loading it again restores its durable identity, policy, pools,
 recovery records, and runtime preferences. It remains stopped by default;
 runtime restart after load occurs only when the operator previously enabled
 `autostart` and the wallet satisfies readiness (or waits for a later unlock).
+
+## Automatic completion of a finite setup command
+
+An executed `preparepaymasterpool` command persists a finite authorization and
+can now complete later through the existing wallet scheduler, including while
+provider service is stopped. This exception applies only to an explicitly
+approved setup, not recurring paid maintenance. Inspect `accepted` separately
+from `executed`, and monitor `getpaymasterpoolinfo.preparation`. The default fee
+ceiling is 0.2 DGB per setup transaction, at most two transactions per command.
+See [automatic pool setup](digidollar-paymaster-pool-setup.md) for waiting states,
+unsigned cancellation, fee changes, and recovery of a previously saved but
+unregistered DGB transaction.

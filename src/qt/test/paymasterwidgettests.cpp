@@ -1662,6 +1662,7 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflow
     DigiDollarTab tab(platform_style.get());
     tab.setPaymasterMutationSnapshotsAvailableForTesting(true, true, true);
     QStringList commands;
+    std::string omitted_preparation_field;
     std::vector<UniValue> parameters;
 
     tab.setPaymasterRpcExecutorForTesting(
@@ -1673,6 +1674,11 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflow
             }
             UniValue result{UniValue::VOBJ};
             if (command == "preparepaymasterpool") {
+                if (omitted_preparation_field != "accepted") result.pushKV("accepted", params[0].find_value("execute").isTrue());
+                result.pushKV("cancelled", false);
+                result.pushKV("preparation", UniValue{UniValue::VARR});
+                if (omitted_preparation_field != "maximum_fee_satoshis") result.pushKV("maximum_fee_satoshis", 20000000);
+                if (omitted_preparation_field != "maximum_total_fee_satoshis") result.pushKV("maximum_total_fee_satoshis", 20000000);
                 result.pushKV("executed", false);
                 result.pushKV(
                     "plan_id",
@@ -1770,6 +1776,15 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflow
     QCOMPARE(parameters.at(1)[0].find_value("execute").get_bool(), false);
     QVERIFY(execute_retirement->isEnabled());
     QVERIFY(!execute_preparation->isEnabled());
+
+    // An older/incomplete backend response must not authorize pool funding.
+    for (const auto* missing : {"accepted", "maximum_fee_satoshis", "maximum_total_fee_satoshis"}) {
+        omitted_preparation_field = missing;
+        preview->setEnabled(true);
+        preview->click();
+        QVERIFY(!execute_preparation->isEnabled());
+    }
+    omitted_preparation_field.clear();
 
     commands.clear();
     parameters.clear();
@@ -4091,8 +4106,19 @@ void PaymasterWidgetTests::paymasterGuidedSetupRendersConsistentTheme()
                             .arg(light.dark_pixels)));
 }
 
+void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_data()
+{
+    QTest::addColumn<bool>("deferred_funding");
+    QTest::newRow("already-funded") << false;
+    QTest::newRow("disabled-provider-accepted-pending") << true;
+}
+
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep()
 {
+    QFETCH(bool, deferred_funding);
+    bool missing_funding = deferred_funding;
+    int pool_approvals{0};
+    bool funding_approved_while_disabled{false};
     TestChain100Setup test;
     for (int i = 0; i < 5; ++i) {
         test.CreateAndProcessBlock({},
@@ -4308,6 +4334,11 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
             }
             if (command == "preparepaymasterpool") {
                 UniValue result{UniValue::VOBJ};
+                result.pushKV("accepted", params[0].find_value("execute").isTrue());
+                result.pushKV("cancelled", false);
+                result.pushKV("preparation", UniValue{UniValue::VARR});
+                result.pushKV("maximum_fee_satoshis", 20000000);
+                result.pushKV("maximum_total_fee_satoshis", 20000000);
                 result.pushKV("executed", false);
                 result.pushKV(
                     "plan_id",
@@ -4324,7 +4355,11 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 result.pushKV("operational_carrier_slots",
                               params[0].find_value(
                                   "operational_carrier_slots").getInt<int>());
-                result.pushKV("missing_admission_dgb_slots", 0);
+                if (params[0].find_value("execute").isTrue()) {
+                    ++pool_approvals;
+                    funding_approved_while_disabled = !rpc_enabled && !rpc_running;
+                }
+                result.pushKV("missing_admission_dgb_slots", missing_funding ? 1 : 0);
                 result.pushKV("missing_operational_dgb_slots", 0);
                 result.pushKV("missing_admission_carrier_slots", 0);
                 result.pushKV("missing_operational_carrier_slots", 0);
@@ -4674,8 +4709,19 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         retry->click();
         retry_feedback_visible = !retry->isEnabled() &&
             result->text().contains(QStringLiteral("Retrying"));
+        if (missing_funding) {
+            QTimer::singleShot(0, [] {
+                if (auto* message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    message->done(QMessageBox::Yes);
+                }
+            });
+        }
         QCoreApplication::processEvents();
         retry_completed = progress_page->isComplete() && !retry->isVisible();
+        if (missing_funding) {
+            retry_completed = retry_completed && result->text().contains(
+                QStringLiteral("waiting for execution or blockchain confirmations"));
+        }
         wizard->reject();
     });
     guided_setup->click();
@@ -4697,6 +4743,9 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QCOMPARE(operating_policy_attempts, 1);
     QCOMPARE(safety_attempts, 2);
     QCOMPARE(enabled_requests, QList<bool>{true});
+    QCOMPARE(pool_approvals, deferred_funding ? 1 : 0);
+    if (deferred_funding) QVERIFY(funding_approved_while_disabled);
+    missing_funding = false;
 
     // A complete status may enable provider and funding actions. Any later
     // malformed provider snapshot must revoke all of them immediately and a

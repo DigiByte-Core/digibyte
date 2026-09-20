@@ -1706,3 +1706,9 @@ test/functional/digidollar_basic.py
 ---
 
 *Document last validated 2026-06-25 against the source on `feature/digidollar-v1`. RPC commands: 35 registered total (18 registered in `RegisterDigiDollarRPCCommands` at `src/rpc/digidollar.cpp`, 17 in `GetWalletRPCCommands` at `src/wallet/rpc/wallet.cpp`, including `sendmanydigidollar`, `listdigidollarunspent`, `listdigidollarutxos`, `exportoracleprivkey`, and `importoracleprivkey`). DD price/position/transaction/oracle-operation RPCs are activation-gated; `getdigidollardeploymentinfo` and wallet-local oracle key-management RPCs (`createoraclekey`, `exportoracleprivkey`, `importoracleprivkey`) remain usable before activation. Oracle aggregation: 6 active exchange fetchers via libcurl (Binance, KuCoin, Gate.io, HTX, Crypto.com, CoinGecko). `MockOracleManager` is a regtest helper only. DigiDollar transfers/redeems are confirmed-only (commit `0b4959f563`). `sendoracleprice` RPC was removed as a fake-price-injection vulnerability and `submitoracleprice` does not exist anywhere in the source tree. Pre-V1 oracle bundle versions are rejected at block validation once DigiDollar is active (commit `f2bb0a19a4`).*
+
+Finite Paymaster pool setup now uses the existing wallet maintenance journal and
+30-second scheduler independently of provider startup. Exact output plans are
+saved before transaction creation; confirmed-input funding avoids stempool-only
+change dependencies. See [automatic pool setup](doc/digidollar-paymaster-pool-setup.md)
+for fee authorization, V3/V4 persistence compatibility, and legacy adoption.

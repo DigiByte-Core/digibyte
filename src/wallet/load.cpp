@@ -200,9 +200,9 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
 
 void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
 {
-    // Periodic maintenance repairs durable observations only. It never treats
-    // elapsed time as authority to discard a signature, release an ambiguous
-    // reservation, or exceed a provider budget.
+    // Reconcile durable observations and continue explicitly authorized finite
+    // setup. Elapsed time never authorizes discarding a signature, releasing an
+    // ambiguous reservation, or exceeding an approved fee limit.
     bool all_equivocation_scans_succeeded{true};
     for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
         std::string error;
@@ -224,6 +224,8 @@ void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
             wallet->WalletLogPrintf(
                 "Paymaster liquidity maintenance reconciliation failed: %s\n",
                 error);
+        } else {
+            RunPaymasterPoolPreparation(context, *wallet);
         }
     }
     // The manager is shared by all wallets. Expired signed artifacts can be

@@ -191,9 +191,14 @@ std::optional<UniValue> PrepareDigiDollarFeeFunding(
             send_options.find_value("request_id").get_str();
         DigiDollar::Paymaster::PaymentSession persisted_session;
         wallet::PaymasterStore store{wallet};
-        if (store.GetSessionByRequestId(request_id,
-                                        persisted_session) &&
-            !persisted_session.provider_side) {
+        const auto status = store.GetSessionByRequestIdWithStatus(request_id, persisted_session);
+        if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                    ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION"
+                    : "PAYMASTER_SESSION_READ_FAILED");
+        }
+        if (status == DatabaseReadStatus::FOUND && !persisted_session.provider_side) {
             return finalize_paymaster_result(
                 wallet::RequestAutomaticPaymasterQuote(
                     request, addressStr, amount, send_options,

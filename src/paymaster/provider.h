@@ -509,6 +509,8 @@ enum class ProviderMaintenanceKind : uint8_t {
     REPLENISH_DGB,
     REPLENISH_CARRIER,
     WITHDRAW_CARRIER_EXCESS,
+    PREPARE_DGB,
+    PREPARE_CARRIER,
 };
 
 enum class ProviderMaintenanceState : uint8_t {
@@ -548,7 +550,7 @@ struct ProviderMaintenanceOutput {
  * committed. Persisting the exact output scripts makes a broadcast recoverable
  * even if shutdown occurs before its txid is attached to this record. */
 struct ProviderMaintenanceRecord {
-    static constexpr uint16_t CURRENT_VERSION{3};
+    static constexpr uint16_t CURRENT_VERSION{4};
 
     uint16_t version{CURRENT_VERSION};
     uint256 operation_id;
@@ -571,16 +573,31 @@ struct ProviderMaintenanceRecord {
     int64_t created_at{0};
     int64_t updated_at{0};
 
+    // A finite setup approval is independent of recurring maintenance budgets.
+    // Older V3 records remain readable and never authorize setup implicitly.
+    uint256 preparation_authorization;
+    uint256 preparation_request;
+    std::string preparation_error;
+
+    bool IsPreparation() const
+    {
+        return kind == ProviderMaintenanceKind::PREPARE_DGB ||
+               kind == ProviderMaintenanceKind::PREPARE_CARRIER;
+    }
+
     SERIALIZE_METHODS(ProviderMaintenanceRecord, obj)
     {
         READWRITE(obj.version, obj.operation_id, obj.plan_id,
-            Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS)>>(obj.kind),
+            Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceKind::PREPARE_CARRIER)>>(obj.kind),
             Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceState::FAILED)>>(obj.state),
             obj.outputs, obj.source_inputs,
             obj.withdrawal_excess_script_pub_key,
             obj.withdrawal_excess_amount, obj.transaction_id,
             obj.maximum_fee, obj.actual_fee, obj.created_at,
             obj.updated_at);
+        if (obj.version >= 4) {
+            READWRITE(obj.preparation_authorization, obj.preparation_request, obj.preparation_error);
+        }
     }
 };
 

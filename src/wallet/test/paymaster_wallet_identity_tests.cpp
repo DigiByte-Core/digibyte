@@ -17,6 +17,7 @@
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/rpc/paymaster_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -1123,6 +1124,185 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
                                        entry.reservation_id ==
                                            rebound_request.client_nonce;
                             }));
+}
+
+BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_records)
+{
+    LOCK(m_wallet.cs_wallet);
+    CKey key;
+    key.MakeNewKey(true);
+    ProviderMaintenanceOutput output;
+    output.asset = PoolAsset::DGB;
+    output.purpose = PoolPurpose::ADMISSION;
+    output.script_pub_key = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    ProviderMaintenanceRecord record;
+    record.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    record.operation_id = uint256S("a1");
+    record.plan_id = uint256S("a2");
+    record.preparation_authorization = uint256S("a3");
+    record.preparation_request = uint256S("a4");
+    record.maximum_fee = DGBSatoshis{20000000};
+    record.created_at = record.updated_at = 1000;
+    record.outputs = {output};
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    ProviderMaintenanceLedger loaded;
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(loaded));
+    BOOST_REQUIRE_EQUAL(loaded.records.size(), 1U);
+    BOOST_CHECK(loaded.records.front().preparation_request == record.preparation_request);
+    const auto original = GetMockableDatabase(m_wallet).m_records;
+
+    ledger.records.front().preparation_error = "PAYMASTER_POOL_WAITING_DGB";
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE(batch.TxnAbort());
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == original);
+    GetMockableDatabase(m_wallet).FailWriteAt(0);
+    BOOST_CHECK(!batch.WritePaymasterMaintenanceLedger(ledger));
+    GetMockableDatabase(m_wallet).ClearFailureInjection();
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == original);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(loaded));
+    BOOST_CHECK(loaded.records.front().preparation_error.empty());
+
+    // Bypass the writer only to emulate an unsupported/corrupt disk record.
+    ledger.records.front().version = ProviderMaintenanceRecord::CURRENT_VERSION + 1;
+    auto raw = m_wallet.GetDatabase().MakeBatch();
+    BOOST_REQUIRE(raw->Write(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger));
+    BOOST_CHECK(batch.ReadPaymasterMaintenanceLedgerWithStatus(loaded) == DatabaseReadStatus::READ_ERROR);
+}
+
+
+BOOST_AUTO_TEST_CASE(pool_setup_reconciles_conflict_reversal_atomically)
+{
+    ScopedPaymasterMockTime clock{2000};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "setup recovery test");
+    BOOST_REQUIRE(destination);
+    const CScript script = GetScriptForDestination(*destination);
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{uint256S("b1"), 0});
+    funding.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS + 1000, script);
+    const auto parent = MakeTransactionRef(funding);
+    BOOST_REQUIRE(m_wallet.AddToWallet(parent, TxStateInactive{}));
+    CMutableTransaction setup;
+    setup.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+    setup.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, script);
+    const auto tx = MakeTransactionRef(setup);
+    auto* wtx = m_wallet.AddToWallet(tx, TxStateInactive{});
+    BOOST_REQUIRE(wtx);
+    const TxStateConfirmed confirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    wtx->m_state = confirmed;
+    ProviderMaintenanceRecord record;
+    record.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    record.operation_id = uint256S("b2");
+    record.plan_id = uint256S("b3");
+    record.preparation_authorization = uint256S("b4");
+    record.preparation_request = uint256S("b5");
+    record.maximum_fee = DGBSatoshis{2000};
+    record.created_at = record.updated_at = 1000;
+    ProviderMaintenanceOutput output;
+    output.asset = PoolAsset::DGB;
+    output.purpose = PoolPurpose::ADMISSION;
+    output.script_pub_key = script;
+    output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    record.outputs = {output};
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    size_t recovered{0};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(m_wallet, recovered, error), error);
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
+
+    for (const TxState& failure : {TxState{TxStateConflicted{uint256S("b6"), 1}}, TxState{TxStateInactive{true}}}) {
+        wtx->m_state = failure;
+        BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(m_wallet, recovered, error), error);
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::FAILED);
+        BOOST_CHECK(paymaster_rpc::internal::HasPendingPoolPreparation(m_wallet));
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+        BOOST_CHECK(pool.front().state == PoolEntryState::INVALIDATED);
+        // Reconfirmation must update both the journal and the invalidated
+        // outputs atomically; failure at commit may expose neither change.
+        wtx->m_state = confirmed;
+        auto& database = GetMockableDatabase(m_wallet);
+        const auto before = database.m_records;
+        database.m_fail_commit = true;
+        BOOST_CHECK(!ReconcilePaymasterProviderMaintenance(m_wallet, recovered, error));
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before);
+        BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(m_wallet, recovered, error), error);
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::CONFIRMED);
+        BOOST_CHECK(ledger.records.front().transaction_id == tx->GetHash());
+        BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, 1000);
+        BOOST_CHECK(!paymaster_rpc::internal::HasPendingPoolPreparation(m_wallet));
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
+        BOOST_CHECK(pool.front().reservation_id.IsNull());
+    }
+    BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 2U);
+    BOOST_CHECK(*wtx->tx == *tx);
+}
+
+BOOST_AUTO_TEST_CASE(retirement_finance_recovers_wallet_commit_after_write_failure_and_restart)
+{
+    ScopedPaymasterMockTime clock{2000};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    m_wallet.SetBroadcastTransactions(false);
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "retirement test", 1000, identity, error));
+    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "retirement test");
+    BOOST_REQUIRE(destination);
+    const CScript script = GetScriptForDestination(*destination);
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{uint256S("c1"), 0});
+    funding.vout.emplace_back(100000, script);
+    const auto parent = MakeTransactionRef(funding);
+    BOOST_REQUIRE(m_wallet.AddToWallet(parent, TxStateInactive{}));
+    CMutableTransaction retirement;
+    retirement.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+    retirement.vout.emplace_back(98000, script);
+    const auto tx = MakeTransactionRef(retirement);
+    BOOST_REQUIRE(m_wallet.CommitTransaction(tx,
+        {{paymaster_rpc::internal::PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}}, {}, &error));
+    auto& database = GetMockableDatabase(m_wallet);
+    // Model the real post-commit gap: the wallet has signed bytes but the
+    // subsequent finance write fails. Reopening must discover its own marker.
+    const auto before = database.m_records;
+    database.FailWriteAt(0);
+    size_t changed{0};
+    BOOST_CHECK(!ReconcilePaymasterProviderFinances(m_wallet, changed, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before);
+    CWallet reopened{m_node.chain.get(), "retirement-restart", DuplicateMockDatabase(database)};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderFinances(reopened, changed, error), error);
+    WalletBatch batch{reopened.GetDatabase()};
+    ProviderFinanceLedger finance;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(finance));
+    BOOST_REQUIRE_EQUAL(finance.events.size(), 1U);
+    BOOST_CHECK(finance.events.front().kind == ProviderFinanceEventKind::POOL_RETIREMENT);
+    BOOST_CHECK(finance.events.front().transaction_id == tx->GetHash());
+    BOOST_CHECK_EQUAL(finance.events.front().dgb_cost.value, 2000);
+    BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderFinances(reopened, changed, error), error);
+    BOOST_CHECK_EQUAL(changed, 0U);
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(finance));
+    BOOST_CHECK_EQUAL(finance.events.size(), 1U);
+    BOOST_CHECK_EQUAL(reopened.mapWallet.size(), 2U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

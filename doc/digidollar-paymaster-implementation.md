@@ -394,3 +394,48 @@ Remaining acceptance work is to bind results to an exact release revision and
 binaries, rerun affected surfaces after later code changes, complete real-Tor
 deployment testing, and obtain or explicitly disposition independent review.
 The [release gate](digidollar-paymaster-release-gate.md) is the status record.
+
+## Finite automatic pool setup (integration branch update)
+
+The original direct `preparepaymasterpool` commit sequence is replaced by a
+finite command in the existing maintenance ledger. Both planned output sets
+are persisted before signing/broadcast, and reconciliation reuses wallet-saved
+transactions instead of constructing duplicates. Setup funding uses confirmed
+parents and does not alter the DigiByte fee precheck or Dandelion implementation.
+The existing wallet tick continues approved work even with provider autostart
+disabled. Recurring maintenance consent remains separate. See the
+[operator and persistence reference](digidollar-paymaster-pool-setup.md) for the
+new optional fields, explicit legacy adoption and verification commands.
+Executable regression results remain pending a fresh operator build.
+
+### Workflow edge-case corrections (2026-09-20)
+
+AUTO dispatch preserves the database read status of live sessions and retained
+idempotency tombstones. Only `NOT_FOUND` permits the ordinary-funding fallback;
+an unreadable or unsupported existing record fails before coin selection.
+
+Finite setup accepts durable approval while provider operation is disabled,
+then waits for enablement before execution. Qt treats accepted/deferred work as
+pending and requires the new acceptance and fee-limit fields. Recurring DGB
+replenishment, like initial setup, requires confirmed funding. Failed signed
+setup transactions remain observable after conflicts and can rejoin their exact
+pool outputs after reconfirmation, without signing a replacement.
+
+Pool retirement stores `paymaster_retirement_provider` with each signed wallet
+transaction in `CommitTransaction`, before broadcast. Finance reconciliation
+reuses the existing transaction-cost reconstruction for these provider-bound
+markers and idempotent event IDs. A crash, a later asset-step failure or a failed
+finance write cannot erase this reconstruction source. No separate retirement
+database or binary record layout is introduced. DD retirement uses the existing
+plan/build API and checks the exact fee before commit; rejected saved bytes are
+retained. Old unmarked retirements with missing events cannot be inferred safely
+from arbitrary wallet sends and are not claimed as repaired history.
+The marker remains internal: the common wallet transaction JSON formatter omits
+it from `gettransaction`, `listtransactions` and `listsinceblock`, preserving
+the existing public response schemas. Before retirement execution, reconcile
+the maintenance journal so already-confirmed setup steps do not incorrectly
+block retirement as pending; genuinely pending setup still blocks it.
+
+
+Regression details and runtime acceptance are tracked in
+[the edge-case review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).

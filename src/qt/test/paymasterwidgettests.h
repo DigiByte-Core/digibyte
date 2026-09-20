@@ -46,6 +46,7 @@ private Q_SLOTS:
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();
     void paymasterGuidedSetupRendersConsistentTheme();
+    void paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_data();
     void paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep();
 
 private:

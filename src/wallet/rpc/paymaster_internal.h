@@ -38,6 +38,10 @@ inline constexpr const char* INTERNAL_PAYMASTER_AUTOSTART_METHOD{
 inline constexpr const char* INTERNAL_PAYMASTER_MAINTENANCE_METHOD{
     "__paymaster_automatic_maintenance"};
 
+// Written with the signed wallet transaction, before broadcast. This marker
+// allows finance reconciliation to recover a missing pool-retirement event.
+inline constexpr const char* PAYMASTER_RETIREMENT_PROVIDER_KEY{"paymaster_retirement_provider"};
+
 class ProviderWorkGuard final
 {
 public:
@@ -201,6 +205,9 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet,
                                        WalletContext& context,
                                        bool wait_for_sync = true);
 UniValue ReadinessErrorsToJSON(const std::vector<std::string>& errors);
+bool HasPendingPoolPreparation(CWallet& wallet);
+RPCResult PoolPreparationResult();
+UniValue PoolPreparationToJSON(CWallet& wallet);
 UniValue PoolEntryToJSON(
     const DigiDollar::Paymaster::ProviderPoolEntry& entry);
 bool PublishCurrentProviderAnnouncement(

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 
 from test_framework.paymaster import (
+    confirm_pool_preparation,
     default_liquidity_policy,
     paymaster_node_args,
     provider_safety_policy,
@@ -224,7 +225,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         pool_targets["plan_id"] = pool_preview["plan_id"]
         prepared = provider_cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
-        self.generatetoaddress(provider_node, 1, provider.getnewaddress())
+        confirm_pool_preparation(self, provider_node, provider_cli, pool_targets, prepared)
         provider.setpaymasterliquiditypolicy(
             default_liquidity_policy(carriers=True))
         client.setpaymasterclientsafetypolicy({

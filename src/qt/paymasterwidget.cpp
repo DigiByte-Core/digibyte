@@ -849,10 +849,14 @@ bool IsExactLiquidityPolicyAcknowledgement(const UniValue& requested,
 bool IsCompletePoolPreparationResult(const UniValue& result)
 {
     return result.isObject() && result.find_value("executed").isBool() &&
+        result.find_value("accepted").isBool() &&
+        result.find_value("cancelled").isBool() &&
+        result.find_value("preparation").isArray() &&
         IsHex256Field(result, "plan_id") &&
         HasInt64Fields(
             result,
-            {"admission_dgb_slots", "operational_dgb_slots",
+            {"maximum_fee_satoshis", "maximum_total_fee_satoshis",
+             "admission_dgb_slots", "operational_dgb_slots",
              "admission_carrier_slots", "operational_carrier_slots",
              "missing_admission_dgb_slots",
              "missing_operational_dgb_slots",
@@ -3937,10 +3941,10 @@ public:
                     m_setup_waiting_for_confirmations = false;
                     m_setup_status_timer->stop();
                 } else if (errors.contains(QStringLiteral("PAYMASTER_POOLS_NOT_PREPARED"))) {
-                    m_next_step->setText(tr("Waiting for liquidity confirmations"));
+                    m_next_step->setText(tr("Waiting for pool funding or confirmations"));
                     m_readiness_summary->setText(tr(
                         "All settings have been saved and no further Save buttons are required. "
-                        "The newly prepared pool outputs must confirm before the provider can start. "
+                        "The approved pool plan must finish and its outputs must confirm before the provider can start. "
                         "This status refreshes automatically."));
                 }
             }
@@ -8537,11 +8541,18 @@ private:
     {
         const bool executed = result.find_value("executed").isBool() &&
                               result.find_value("executed").get_bool();
+        const bool accepted = result.find_value("accepted").isTrue();
         QStringList lines;
         if (std::string{command} == "preparepaymasterpool") {
-            lines.push_back(executed
-                ? tr("Preparation executed: the required pool transaction(s) were created. Wait for confirmation before expecting provider readiness.")
-                : tr("Preparation preview only: no wallet funds were moved."));
+            lines.push_back(accepted
+                ? tr("Pool preparation accepted. Remaining steps continue automatically when the provider configuration is enabled, funding is confirmed and the wallet is unlocked. This does not start the provider.")
+                : executed
+                    ? tr("Preparation executed: the required pool transaction(s) were created. Wait for confirmation before expecting provider readiness.")
+                    : tr("Preparation preview only: no wallet funds were moved."));
+            if (result.find_value("maximum_total_fee_satoshis").isNum()) {
+                lines.push_back(tr("Maximum approved setup fees: %1 DGB. Execution authorizes later automatic completion within this limit.")
+                    .arg(QString::number(poolNumber(result, "maximum_total_fee_satoshis") / 100000000.0, 'f', 8)));
+            }
             lines.push_back(tr(
                 "Missing outputs to create — admission DGB: %1; operational DGB: %2; admission carriers: %3; operational carriers: %4.")
                 .arg(poolNumber(result, "missing_admission_dgb_slots"))
@@ -8578,7 +8589,7 @@ private:
         const UniValue& dd_txid = result.find_value("dd_txid");
         if (dgb_txid.isStr()) lines.push_back(tr("DGB transaction: %1").arg(QString::fromStdString(dgb_txid.get_str())));
         if (dd_txid.isStr()) lines.push_back(tr("DD transaction: %1").arg(QString::fromStdString(dd_txid.get_str())));
-        if (!executed) {
+        if (!executed && !accepted) {
             lines.push_back(tr(
                 "Review these values. If they are acceptable, use the matching Execute reviewed action without changing the targets."));
         }
@@ -8646,9 +8657,11 @@ private:
                      ? QString::fromStdString(
                            result.find_value("plan_id").get_str())
                      : QString{};
-                 if (!complete || (!execute && result_executed) ||
-                     (execute &&
-                      (!result_executed || returned_plan != reviewed_plan))) {
+                 const bool result_accepted = preparation
+                     ? result.find_value("accepted").isTrue() && !result.find_value("cancelled").isTrue()
+                     : result_executed;
+                 if (!complete || (!execute && (result_executed || result_accepted)) ||
+                     (execute && (!result_accepted || returned_plan != reviewed_plan))) {
                      if (preparation) {
                          m_prepare_preview_target.clear();
                          m_prepare_plan_id.clear();
@@ -10440,7 +10453,7 @@ private:
                         ? tr("The provider configuration is disabled. Its saved autostart preference cannot bring it online until the configuration is enabled again.")
                         : tr("Autostart is disabled, so the provider remains stopped until you start it explicitly.");
                 progress_result->setText(m_setup_waiting_for_confirmations
-                    ? tr("All settings were saved successfully in wallet \"%1\". You do not need to click any additional Save buttons. New pool outputs are waiting for blockchain confirmations; continue to Overview. %2")
+                    ? tr("All settings were saved successfully in wallet \"%1\". You do not need to click any additional Save buttons. The pool funding plan was accepted and is waiting for execution or blockchain confirmations; continue to Overview. %2")
                           .arg(setup_wallet_name,
                                may_autostart
                                    ? tr("Autostart is enabled, so Core may start the provider automatically once those confirmations and every other readiness gate are complete.")
@@ -10752,7 +10765,9 @@ private:
                      [this, &wizard, liquidity_params, succeed,
                       fail_setup](const UniValue& preview) {
                          if (!IsCompletePoolPreparationResult(preview) ||
-                             preview.find_value("executed").get_bool()) {
+                             preview.find_value("executed").get_bool() ||
+                             preview.find_value("accepted").get_bool() ||
+                             preview.find_value("cancelled").get_bool()) {
                              fail_setup(tr(
                                  "Core returned an incomplete or mutating pool preview. No pool execution was started."));
                              return;
@@ -10772,7 +10787,7 @@ private:
                              formatPoolResult("preparepaymasterpool", preview);
                          if (askPlainTextQuestion(
                                  &wizard, tr("Confirm exact pool funding"),
-                                  tr("Core has rechecked the current wallet and policies. Create exactly the following missing liquidity?\n\n%1\n\nThe wallet will create only these still-missing outputs. The assistant saves the selected runtime, autostart and enabled settings only after this funding step.")
+                                  tr("Core has rechecked the current wallet and policies. Authorize exactly the following missing liquidity within the displayed fee limits?\n\n%1\n\nThis approval persists across restart. Funding waits for provider enablement, an unlocked wallet and eligible confirmed funds. The assistant saves the selected runtime, autostart and enabled settings after acceptance.")
                                      .arg(exact_preview)) != QMessageBox::Yes) {
                              fail_setup(tr(
                                  "Pool funding was not approved. The operating, safety and automatic-liquidity policies are already saved, but no new liquidity was created. Runtime, autostart and enabled state remain unchanged from the safe offline transition until this step is retried successfully."));
@@ -10790,12 +10805,13 @@ private:
                               [this, preview_plan, succeed,
                                fail_setup](const UniValue& result) {
                                   if (!IsCompletePoolPreparationResult(result) ||
-                                      !result.find_value("executed").get_bool() ||
+                                      !result.find_value("accepted").get_bool() ||
+                                      result.find_value("cancelled").get_bool() ||
                                       QString::fromStdString(
                                           result.find_value("plan_id").get_str()) !=
                                           preview_plan) {
                                       fail_setup(tr(
-                                          "Core did not confirm the pool funding execution. Inspect the wallet pool status before retrying."));
+                                          "Core did not confirm acceptance of the pool funding plan. Inspect the wallet pool status before retrying."));
                                       return;
                                   }
                                   m_liquidity_output->setPlainText(

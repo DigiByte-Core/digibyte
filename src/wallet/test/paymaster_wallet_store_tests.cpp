@@ -7,6 +7,10 @@
 #include <boost/test/unit_test.hpp>
 
 #include <hash.h>
+#include <rpc/protocol.h>
+#include <rpc/request.h>
+#include <wallet/digidollarwallet.h>
+#include <wallet/rpc/paymaster_send.h>
 #include <key.h>
 #include <key_io.h>
 #include <paymaster/protocol.h>
@@ -535,6 +539,63 @@ BOOST_AUTO_TEST_CASE(outdated_session_records_fail_without_mutation)
                 CreatePaymasterSessionResult::DATABASE_ERROR);
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_PERSISTED_SESSION");
     BOOST_CHECK(database.m_records == corrupt_before);
+}
+
+
+BOOST_AUTO_TEST_CASE(auto_dispatch_rejects_unreadable_session_before_funding_or_signing)
+{
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-44665544f003";
+    m_wallet.EnsureDDWallet();
+    auto& dd_wallet = *m_wallet.GetDDWallet();
+    dd_wallet.AddDDUTXO(COutPoint{uint256S("f004"), 0}, 10000);
+    PaymasterSendOptions options;
+    options.fee_mode = FeeMode::AUTO;
+    options.send_options.pushKV("request_id", request_id);
+    options.send_options.pushKV("maximum_paymaster_fee_cents", 100);
+    JSONRPCRequest request;
+    std::vector<COutPoint> inputs;
+    const std::vector<COutPoint>* preset{nullptr};
+    auto& database = GetMockableDatabase(m_wallet);
+    PaymasterStore store{m_wallet};
+    const auto tx_count = m_wallet.mapWallet.size();
+    const auto dispatch = [&] {
+        return PrepareDigiDollarFeeFunding(request, m_wallet, dd_wallet, {},
+            CDigiDollarAddress{}, 1, options, inputs, preset);
+    };
+    const auto expect_error = [&](const char* message) {
+        const auto before = database.m_records;
+        BOOST_CHECK_EXCEPTION(dispatch(), UniValue, [&](const UniValue& error) {
+            return error.find_value("code").getInt<int>() == RPC_WALLET_ERROR &&
+                   error.find_value("message").get_str() == message;
+        });
+        BOOST_CHECK(database.m_records == before);
+        BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), tx_count);
+        BOOST_CHECK(inputs.empty());
+        BOOST_CHECK(preset == nullptr);
+    };
+    PaymentSession session;
+    BOOST_CHECK(store.GetSessionByRequestIdWithStatus(request_id, session) == DatabaseReadStatus::NOT_FOUND);
+    for (const bool tombstone : {false, true}) {
+        DataStream key_stream;
+        key_stream << std::make_pair(tombstone ? DBKeys::PAYMASTER_TOMBSTONE : DBKeys::PAYMASTER_SESSION,
+                                    std::string{request_id});
+        const SerializeData key{key_stream.begin(), key_stream.end()};
+        for (const bool unknown_version : {false, true}) {
+            CDataStream value{SER_DISK, CLIENT_VERSION};
+            const uint16_t version = tombstone ? IdempotencyTombstone::CURRENT_VERSION : PaymentSession::CURRENT_VERSION;
+            // A readable future version and a truncated current record must
+            // both stop AUTO before it can choose the ordinary payment path.
+            value << static_cast<uint16_t>(version + (unknown_version ? 1 : 0));
+            database.m_records[key] = SerializeData{value.begin(), value.end()};
+            expect_error(unknown_version ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_SESSION_READ_FAILED");
+        }
+        database.m_records.erase(key);
+    }
+    database.m_pass = false;
+    expect_error("PAYMASTER_SESSION_READ_FAILED");
+    database.m_pass = true;
+    BOOST_CHECK(store.GetSessionByRequestIdWithStatus(request_id, session) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK_EQUAL(dd_wallet.GetTotalDDBalance(), 10000);
 }
 
 BOOST_AUTO_TEST_CASE(prune_rejects_unreadable_attempt_without_mutation)

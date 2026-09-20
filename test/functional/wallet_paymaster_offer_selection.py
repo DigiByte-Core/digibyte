@@ -11,6 +11,7 @@ the private payment protocol, and the resulting transfer is accounted once.
 """
 
 from test_framework.paymaster import (
+    confirm_pool_preparation,
     default_liquidity_policy,
     paymaster_node_args,
     provider_safety_policy,
@@ -74,6 +75,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         pool_targets["plan_id"] = pool_preview["plan_id"]
         prepared = cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
+        prepared = confirm_pool_preparation(self, self.nodes[0], cli, pool_targets, prepared)
         assert_equal(len(prepared["dgb_txid"]), 64)
         assert_equal(len(prepared["dd_txid"]), 64)
 

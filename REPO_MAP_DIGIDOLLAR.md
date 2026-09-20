@@ -1749,3 +1749,19 @@ Current oracle/MuSig2 fuzz source inventory:
 | `digidollar_amount.cpp` | RPC amount parser: never throws, never guesses a unit, and reports every refusal through `DDAmountParseResult` |
 | `digidollar_chainstate.cpp` | `ChainstateHealth` vault arithmetic and the mint volatility reference price |
 | `digidollar_prune_blockdb.cpp` | Pruning surface: reading a DD amount from the block database, the activation floor, and coin gating below it |
+
+### Finite pool setup and recovery
+
+- `src/wallet/rpc/paymaster_provider.cpp`: `preparepaymasterpool` persists bounded
+  setup approvals and explicit legacy mappings; `RunPaymasterPoolPreparation`
+  continues exact steps independently of service startup; disabled providers
+  can accept explicit approval while execution waits for enablement.
+- `src/paymaster/provider.{h,cpp}`: V4 maintenance records add setup request and
+  authorization bindings while retaining V3 readability and recurring budgets.
+- `src/wallet/rpc/paymaster.cpp`: shared maintenance reconciliation recovers
+  unique wallet transactions and exact setup fees into the provider pool,
+  including reconfirmation after a conflict. Finance recovery also reads the
+  provider-bound retirement marker stored with signed wallet transactions.
+- `test/functional/wallet_paymaster_pool_setup.py`: Dandelion, restart, funding,
+  fee, cancellation, legacy adoption, recurring refill and conflicting-reorg
+  regressions; registered once in the runner.

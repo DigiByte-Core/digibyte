@@ -1944,6 +1944,7 @@ RPCHelpMan getpaymasterpoolinfo()
         "Return the persisted admission and operational Paymaster pool without modifying it.\n",
         {},
         RPCResult{RPCResult::Type::OBJ, "", "Provider pool information", {
+            PoolPreparationResult(),
                                                                              {RPCResult::Type::BOOL, "prepared", "Whether a valid pool record exists"},
                                                                              {RPCResult::Type::BOOL, "ready", "Whether admission proof and an operational slot are ready"},
                                                                              {RPCResult::Type::NUM, "entries", "Number of pool entries"},
@@ -1994,6 +1995,7 @@ RPCHelpMan getpaymasterpoolinfo()
                 pool.push_back(PoolEntryToJSON(entry));
             UniValue result{UniValue::VOBJ};
             result.pushKV("prepared", prepared);
+            result.pushKV("preparation", PoolPreparationToJSON(*wallet));
             result.pushKV("ready", prepared && have_policy && readiness.ready);
             result.pushKV("entries", static_cast<uint64_t>(entries.size()));
             result.pushKV("complete_operational_slots", static_cast<uint64_t>(readiness.complete_operational_slots));

@@ -1681,3 +1681,9 @@ This document is consistent with:
 *Document Version: 2.2*
 *Generated from DigiByte Core v9.26.5 codebase analysis (`feature/digidollar-paymaster-v1`)*
 *Updated: 2026-07-28*
+
+Finite Paymaster pool setup now uses the existing wallet maintenance journal and
+30-second scheduler independently of provider startup. Exact output plans are
+saved before transaction creation; confirmed-input funding avoids stempool-only
+change dependencies. See [automatic pool setup](doc/digidollar-paymaster-pool-setup.md)
+for fee authorization, V3/V4 persistence compatibility, and legacy adoption.

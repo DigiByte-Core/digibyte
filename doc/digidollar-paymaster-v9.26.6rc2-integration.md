@@ -371,3 +371,8 @@ The local integration commit records source reconciliation; the runtime gates
 above remain incomplete and are required before release approval.
 Follow CONTRIBUTING.md for upstream review and the signed merge workflow. The
 two pre-existing untracked operator documents are not part of this integration.
+
+The subsequent finite automatic setup change is documented separately in
+[automatic pool setup](digidollar-paymaster-pool-setup.md). It requires a fresh
+build and the new Dandelion regression; the earlier integration test results
+do not establish runtime acceptance for that change.

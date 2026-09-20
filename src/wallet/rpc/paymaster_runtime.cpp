@@ -438,88 +438,104 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
             // scheduler tick.
             return;
         }
-        ProviderReadiness liquidity = GetProviderReadiness(
-            wallet, context, /*wait_for_sync=*/false);
-        const ProviderLiquidityPolicy liquidity_policy =
-            liquidity.have_liquidity_policy
-                ? liquidity.liquidity_policy
-                : SuggestedLiquidityPolicy(liquidity, GetTime());
-        const bool targets_satisfy_provider_policy =
-            !liquidity.have_policy ||
-            ProviderLiquidityTargetsSatisfyPolicy(
-                liquidity_policy, liquidity.policy);
-        const auto admission_dgb = CountLiquiditySlots(
-            liquidity.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB,
-            liquidity_policy.target_admission_dgb);
-        const int64_t operational_dgb_minimum = liquidity.have_policy
-            ? liquidity.policy.maximum_network_fee.value
-            : std::numeric_limits<int64_t>::max();
-        const auto operational_dgb = CountLiquiditySlots(
-            liquidity.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DGB,
-            liquidity_policy.target_operational_dgb,
-            operational_dgb_minimum);
-        const auto admission_carriers = CountLiquiditySlots(
-            liquidity.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER,
-            liquidity_policy.target_admission_carriers);
-        const auto operational_carriers = CountLiquiditySlots(
-            liquidity.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER,
-            liquidity_policy.target_operational_carriers);
-        const size_t missing_dgb = admission_dgb.missing + operational_dgb.missing;
-        const size_t missing_carriers = admission_carriers.missing +
-                                        operational_carriers.missing;
-        const bool targets_confirmed =
-            admission_dgb.ready >= liquidity_policy.target_admission_dgb &&
-            operational_dgb.ready >= liquidity_policy.target_operational_dgb &&
-            admission_carriers.ready >= liquidity_policy.target_admission_carriers &&
-            operational_carriers.ready >= liquidity_policy.target_operational_carriers;
-        if (!targets_satisfy_provider_policy) {
-            // A zero operational carrier target can be a deliberate result of
-            // release_slot. It is valid to persist, but automatic maintenance
-            // must not claim success or silently recreate capital the operator
-            // explicitly released. Require an explicit target change first.
+        bool setup_pending{false};
+        try {
+            setup_pending = HasPendingPoolPreparation(wallet);
+        } catch (const UniValue&) {
+            manager->SetProviderServiceStatus(wallet.GetName(), ProviderServiceState::WAITING_FOR_READINESS,
+                                              "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            return;
+        }
+        // Do not replenish the same outputs twice. Existing signed payment
+        // submissions below can still finish while setup waits for funding.
+        if (setup_pending) {
             accept_new_requests = false;
             state = ProviderServiceState::WAITING_FOR_READINESS;
-            first_error = "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE";
-        } else if (missing_dgb + missing_carriers > 0) {
-            accept_new_requests = false;
-            if (!liquidity.have_liquidity_policy ||
-                !liquidity_policy.paid_maintenance_approved) {
-                state = ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL;
-                first_error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
-            } else if (!liquidity_policy.automatic_replenishment) {
+            first_error = "PAYMASTER_POOL_PREPARATION_PENDING";
+        } else {
+            ProviderReadiness liquidity = GetProviderReadiness(
+                wallet, context, /*wait_for_sync=*/false);
+            const ProviderLiquidityPolicy liquidity_policy =
+                liquidity.have_liquidity_policy
+                    ? liquidity.liquidity_policy
+                    : SuggestedLiquidityPolicy(liquidity, GetTime());
+            const bool targets_satisfy_provider_policy =
+                !liquidity.have_policy ||
+                ProviderLiquidityTargetsSatisfyPolicy(
+                    liquidity_policy, liquidity.policy);
+            const auto admission_dgb = CountLiquiditySlots(
+                liquidity.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB,
+                liquidity_policy.target_admission_dgb);
+            const int64_t operational_dgb_minimum = liquidity.have_policy
+                ? liquidity.policy.maximum_network_fee.value
+                : std::numeric_limits<int64_t>::max();
+            const auto operational_dgb = CountLiquiditySlots(
+                liquidity.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DGB,
+                liquidity_policy.target_operational_dgb,
+                operational_dgb_minimum);
+            const auto admission_carriers = CountLiquiditySlots(
+                liquidity.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER,
+                liquidity_policy.target_admission_carriers);
+            const auto operational_carriers = CountLiquiditySlots(
+                liquidity.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER,
+                liquidity_policy.target_operational_carriers);
+            const size_t missing_dgb = admission_dgb.missing + operational_dgb.missing;
+            const size_t missing_carriers = admission_carriers.missing +
+                                            operational_carriers.missing;
+            const bool targets_confirmed =
+                admission_dgb.ready >= liquidity_policy.target_admission_dgb &&
+                operational_dgb.ready >= liquidity_policy.target_operational_dgb &&
+                admission_carriers.ready >= liquidity_policy.target_admission_carriers &&
+                operational_carriers.ready >= liquidity_policy.target_operational_carriers;
+            if (!targets_satisfy_provider_policy) {
+                // A zero operational carrier target can be a deliberate result of
+                // release_slot. It is valid to persist, but automatic maintenance
+                // must not claim success or silently recreate capital the operator
+                // explicitly released. Require an explicit target change first.
+                accept_new_requests = false;
                 state = ProviderServiceState::WAITING_FOR_READINESS;
-                first_error = "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED";
-            } else {
-                std::string maintenance_error;
-                const bool replenished = missing_carriers > 0
-                    ? RunAutomaticCarrierReplenishment(
-                          wallet, liquidity_policy,
-                          admission_carriers.missing,
-                          operational_carriers.missing,
-                          maintenance_error)
-                    : RunAutomaticDGBReplenishment(
-                          wallet, liquidity_policy,
-                          admission_dgb.missing,
-                          operational_dgb.missing,
-                          maintenance_error);
-                if (!replenished) {
-                    first_error = StableProviderServiceError(
-                        maintenance_error.empty()
-                            ? "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED"
-                            : maintenance_error);
-                    state = first_error == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
-                                    first_error == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"
-                        ? ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL
-                        : ProviderServiceState::REPLENISHING_LIQUIDITY;
+                first_error = "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE";
+            } else if (missing_dgb + missing_carriers > 0) {
+                accept_new_requests = false;
+                if (!liquidity.have_liquidity_policy ||
+                    !liquidity_policy.paid_maintenance_approved) {
+                    state = ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL;
+                    first_error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+                } else if (!liquidity_policy.automatic_replenishment) {
+                    state = ProviderServiceState::WAITING_FOR_READINESS;
+                    first_error = "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED";
                 } else {
-                    state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
-                    first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+                    std::string maintenance_error;
+                    const bool replenished = missing_carriers > 0
+                        ? RunAutomaticCarrierReplenishment(
+                              wallet, liquidity_policy,
+                              admission_carriers.missing,
+                              operational_carriers.missing,
+                              maintenance_error)
+                        : RunAutomaticDGBReplenishment(
+                              wallet, liquidity_policy,
+                              admission_dgb.missing,
+                              operational_dgb.missing,
+                              maintenance_error);
+                    if (!replenished) {
+                        first_error = StableProviderServiceError(
+                            maintenance_error.empty()
+                                ? "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED"
+                                : maintenance_error);
+                        state = first_error == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
+                                        first_error == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"
+                            ? ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL
+                            : ProviderServiceState::REPLENISHING_LIQUIDITY;
+                    } else {
+                        state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
+                        first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+                    }
                 }
+            } else if (!targets_confirmed) {
+                accept_new_requests = false;
+                state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
+                first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
             }
-        } else if (!targets_confirmed) {
-            accept_new_requests = false;
-            state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
-            first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
         }
     }
 

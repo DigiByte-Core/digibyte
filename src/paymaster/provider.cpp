@@ -1693,7 +1693,8 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
         const bool valid_kind =
             record.kind == ProviderMaintenanceKind::REPLENISH_DGB ||
             record.kind == ProviderMaintenanceKind::REPLENISH_CARRIER ||
-            record.kind == ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+            record.kind == ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ||
+            record.IsPreparation();
         const bool valid_state =
             record.state == ProviderMaintenanceState::PLANNED ||
             record.state == ProviderMaintenanceState::BROADCAST ||
@@ -1701,7 +1702,7 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
             record.state == ProviderMaintenanceState::RELEASED ||
             record.state == ProviderMaintenanceState::FAILED;
         const bool current_record =
-            record.version == ProviderMaintenanceRecord::CURRENT_VERSION;
+            (record.version == 3 || record.version == ProviderMaintenanceRecord::CURRENT_VERSION);
         if (!current_record ||
             !valid_kind || !valid_state ||
             record.operation_id.IsNull() || record.plan_id.IsNull() ||
@@ -1719,6 +1720,14 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
               record.state == ProviderMaintenanceState::RELEASED) &&
              !record.transaction_id.IsNull())) {
             error = "PAYMASTER_INVALID_MAINTENANCE_RECORD";
+            return false;
+        }
+        if ((record.IsPreparation() &&
+             (record.version < 4 || record.preparation_authorization.IsNull() || record.preparation_request.IsNull())) ||
+            (!record.IsPreparation() &&
+             (!record.preparation_authorization.IsNull() || !record.preparation_request.IsNull() || !record.preparation_error.empty())) ||
+            record.preparation_error.size() > 256) {
+            error = "PAYMASTER_INVALID_PREPARATION_AUTHORIZATION";
             return false;
         }
         std::set<COutPoint> source_inputs;
@@ -1764,10 +1773,14 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                 ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS) {
             scripts.insert(record.withdrawal_excess_script_pub_key);
         }
+        int64_t total_dgb{0};
         for (const ProviderMaintenanceOutput& output : record.outputs) {
             int witness_version{-1};
             std::vector<unsigned char> witness_program;
-            if ((output.purpose != PoolPurpose::ADMISSION &&
+            if (!AddAmount(total_dgb, output.dgb_value.value) || !MoneyRange(total_dgb) ||
+                (record.kind == ProviderMaintenanceKind::PREPARE_DGB && output.asset != PoolAsset::DGB) ||
+                (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER && output.asset != PoolAsset::DD_CARRIER) ||
+                (output.purpose != PoolPurpose::ADMISSION &&
                  output.purpose != PoolPurpose::OPERATIONAL) ||
                 (output.asset != PoolAsset::DGB &&
                  output.asset != PoolAsset::DD_CARRIER) ||
@@ -1802,7 +1815,7 @@ bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
         !ValidateProviderMaintenanceLedger(ledger, error)) {
         return false;
     }
-    if (!policy.paid_maintenance_approved ||
+    if (record.IsPreparation() || !policy.paid_maintenance_approved ||
         record.version != ProviderMaintenanceRecord::CURRENT_VERSION ||
         record.maximum_fee.value <= 0 ||
         record.maximum_fee.value >
@@ -1848,6 +1861,7 @@ bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
     int64_t hour_total{record.maximum_fee.value};
     int64_t day_total{record.maximum_fee.value};
     for (const ProviderMaintenanceRecord& candidate : ledger.records) {
+        if (candidate.IsPreparation()) continue;
         if (candidate.state == ProviderMaintenanceState::RELEASED ||
             candidate.state == ProviderMaintenanceState::FAILED) continue;
         const bool outstanding =

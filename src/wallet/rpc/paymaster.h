@@ -58,6 +58,9 @@ bool ReconcilePaymasterProviderFinances(CWallet& wallet,
  * session, transaction, reservation, and accounting records are untouched. */
 bool ReconcilePaymasterClientHistory(CWallet& wallet, std::string& error);
 
+/** Continue explicitly authorized setup even while service is stopped. */
+void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet);
+
 /** Run one bounded provider-service cycle. This is the single scheduler entry
  * point for optional autostart plus automatic request/submit processing. */
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);

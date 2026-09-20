@@ -815,23 +815,30 @@ BOOST_AUTO_TEST_CASE(provider_maintenance_withdrawal_sources_are_versioned_and_b
         replenishment_with_source, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_SOURCE_INPUTS");
 
-    ProviderMaintenanceLedger outdated{ledger};
-    --outdated.records.front().version;
-    const uint256 outdated_hash{SerializedPaymasterHash(outdated)};
-    BOOST_CHECK(!ValidateProviderMaintenanceLedger(outdated, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_RECORD");
-    BOOST_CHECK_EQUAL(SerializedPaymasterHash(outdated), outdated_hash);
+    // Version 3 remains supported for withdrawals; version 4 adds setup authorization.
+    // Bind compatibility to explicit versions, not CURRENT_VERSION minus one.
+    for (const uint16_t version : {0, 1, 2, 3, 4, 5}) {
+        BOOST_TEST_CONTEXT("maintenance record version " << version) {
+            ProviderMaintenanceLedger versioned{ledger};
+            versioned.records.front().version = version;
+            const bool supported = version == 3 || version == 4;
+            const uint256 original_hash{SerializedPaymasterHash(versioned)};
+            BOOST_CHECK_EQUAL(ValidateProviderMaintenanceLedger(versioned, error), supported);
+            BOOST_CHECK_EQUAL(error, supported ? "" : "PAYMASTER_INVALID_MAINTENANCE_RECORD");
+            BOOST_CHECK_EQUAL(SerializedPaymasterHash(versioned), original_hash);
 
-    CDataStream encoded{SER_DISK, ::PROTOCOL_VERSION};
-    encoded << outdated;
-    ProviderMaintenanceLedger decoded;
-    encoded >> decoded;
-    BOOST_REQUIRE_EQUAL(decoded.records.size(), 1U);
-    BOOST_CHECK_EQUAL(decoded.records.front().version,
-                      ProviderMaintenanceRecord::CURRENT_VERSION - 1);
-    BOOST_CHECK_EQUAL(decoded.records.front().source_inputs.size(), 2U);
-    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_RECORD");
+            CDataStream encoded{SER_DISK, ::PROTOCOL_VERSION};
+            encoded << versioned;
+            ProviderMaintenanceLedger decoded;
+            encoded >> decoded;
+            BOOST_REQUIRE_EQUAL(decoded.records.size(), 1U);
+            BOOST_CHECK_EQUAL(decoded.records.front().version, version);
+            BOOST_CHECK_EQUAL(decoded.records.front().source_inputs.size(), 2U);
+            BOOST_CHECK_EQUAL(SerializedPaymasterHash(decoded), original_hash);
+            BOOST_CHECK_EQUAL(ValidateProviderMaintenanceLedger(decoded, error), supported);
+            BOOST_CHECK_EQUAL(error, supported ? "" : "PAYMASTER_INVALID_MAINTENANCE_RECORD");
+        }
+    }
 
     ProviderMaintenanceLedger reservations;
     ProviderMaintenanceRecord first{withdrawal};
@@ -2091,6 +2098,81 @@ BOOST_AUTO_TEST_CASE(provider_backup_status_requires_a_fresh_acknowledgement)
     ProviderBackupStatus wrong_chain{status};
     wrong_chain.genesis_hash.SetNull();
     BOOST_CHECK(!ValidateProviderBackupStatus(wrong_chain, error));
+}
+
+BOOST_AUTO_TEST_CASE(pool_preparation_authorization_and_legacy_encoding)
+{
+    std::string error;
+    ProviderMaintenanceLedger ledger;
+    auto record = MaintenanceRecord(uint256S("91"), uint256S("92"), 91, 100);
+    record.created_at = record.updated_at = 1000;
+    record.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    ledger.records = {record};
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(ledger, error));
+    record.preparation_authorization = uint256S("93");
+    record.preparation_request = uint256S("99");
+    ledger.records = {record};
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(ledger, error));
+    CDataStream encoded{SER_NETWORK, ::PROTOCOL_VERSION};
+    encoded << ledger;
+    ProviderMaintenanceLedger decoded;
+    encoded >> decoded;
+    BOOST_REQUIRE(encoded.empty());
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(decoded, error));
+    BOOST_CHECK(decoded.records.front().IsPreparation());
+    BOOST_CHECK(decoded.records.front().preparation_authorization == record.preparation_authorization);
+
+    // Authentic V3 bytes omit the new fields and cannot gain setup authority.
+    record.kind = ProviderMaintenanceKind::REPLENISH_DGB;
+    record.version = 3;
+    record.preparation_authorization.SetNull();
+    record.preparation_request.SetNull();
+    ledger.records = {record};
+    encoded << ledger;
+    encoded >> decoded;
+    BOOST_REQUIRE(encoded.empty());
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(decoded, error));
+    BOOST_CHECK(!decoded.records.front().IsPreparation());
+    BOOST_CHECK(decoded.records.front().preparation_authorization.IsNull());
+    decoded.records.front().kind = ProviderMaintenanceKind::PREPARE_DGB;
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
+    decoded.records.front().version = ProviderMaintenanceRecord::CURRENT_VERSION + 1;
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
+}
+
+BOOST_AUTO_TEST_CASE(pool_preparation_preserves_finite_fee_and_asset_boundaries)
+{
+    std::string error;
+    auto record = MaintenanceRecord(uint256S("94"), uint256S("95"), 94, 100);
+    record.created_at = record.updated_at = 1000;
+    record.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    record.preparation_authorization = uint256S("96");
+    record.preparation_request = uint256S("99");
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(ledger, error));
+    ledger.records.front().actual_fee = DGBSatoshis{101};
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(ledger, error));
+    ledger.records = {record};
+    ledger.records.front().outputs.front() = MaintenanceOutput(94, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER);
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(ledger, error));
+    ledger.records = {record};
+    ledger.records.front().outputs.front().dgb_value = DGBSatoshis{MAX_MONEY};
+    ledger.records.front().outputs.push_back(MaintenanceOutput(95));
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(ledger, error));
+    ledger.records = {record};
+    ledger.records.front().preparation_error.assign(257, 'x');
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(ledger, error));
+
+    // Explicit one-shot setup fees do not consume or authorize recurring fees.
+    ledger.records = {record};
+    const auto policy = LiquidityPolicy();
+    auto recurring = MaintenanceRecord(uint256S("97"), uint256S("98"), 97, 100);
+    BOOST_REQUIRE(ReserveProviderMaintenanceBudget(ledger, policy, recurring, 1000, error));
+    BOOST_CHECK_EQUAL(ledger.records.size(), 2U);
+    ProviderMaintenanceLedger empty;
+    BOOST_CHECK(!ReserveProviderMaintenanceBudget(empty, policy, record, 1000, error));
+    BOOST_CHECK(empty.records.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

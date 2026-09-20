@@ -13,6 +13,7 @@ PSBT exists and proves that only one payment is committed and accounted.
 """
 
 from test_framework.paymaster import (
+    confirm_pool_preparation,
     default_liquidity_policy,
     paymaster_node_args,
     provider_safety_policy,
@@ -75,6 +76,7 @@ class PaymasterFailoverTest(DigiByteTestFramework):
         pool_targets["plan_id"] = pool_preview["plan_id"]
         prepared = cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
+        confirm_pool_preparation(self, self.nodes[0], cli, pool_targets, prepared)
         wallet.setpaymasterliquiditypolicy(
             default_liquidity_policy(carriers=True))
         return identity

@@ -38,6 +38,28 @@ def paymaster_node_args(provider_node=None):
     return args
 
 
+def confirm_pool_preparation(test, node, wallet, options, prepared):
+    """Confirm a funded finite setup, allowing the DGB step to follow its parent.
+
+    Fixtures using this helper disable Dandelion. The dedicated setup regression
+    separately checks stem-only parents and continuation without another RPC.
+    """
+    assert_equal(prepared["accepted"], True)
+    for _ in range(2):
+        test.sync_mempools()
+        test.generatetoaddress(node, 1, wallet.getnewaddress())
+        # The execute retry synchronizes and reconciles the journal after mining.
+        # Inspect that response, not a stale snapshot taken before reconciliation.
+        prepared = wallet.preparepaymasterpool(options)
+        assert_equal(prepared["accepted"], True)
+        steps = [step for step in prepared["preparation"]
+                 if step["plan_id"] == options["plan_id"]]
+        assert steps, prepared
+        if all(step["state"] == "complete" for step in steps):
+            return prepared
+    raise AssertionError(f"Pool setup did not complete within two confirmations: {prepared}")
+
+
 def provider_safety_policy(funding_models, sponsorship_scope="public"):
     """Return explicit finite budgets for every enabled funding class."""
     disabled = {
@@ -213,8 +235,7 @@ class PaymasterFunctionalHarness:
         targets["plan_id"] = preview["plan_id"]
         prepared = self.provider_cli.preparepaymasterpool(targets)
         assert_equal(prepared["executed"], True)
-        self.test.generatetoaddress(
-            self.provider_node, 1, self.provider.getnewaddress())
+        confirm_pool_preparation(self.test, self.provider_node, self.provider_cli, targets, prepared)
         self.provider_cli.setpaymasterliquiditypolicy(
             default_liquidity_policy(carriers))
         self.client.setpaymasterclientsafetypolicy({

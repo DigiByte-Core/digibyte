@@ -233,10 +233,10 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
             "admission_carriers", "operational_carriers"))
         assert_equal(self.nodes[0].getrawmempool(), [])
 
-        provider.walletpassphrase("paymaster lifecycle passphrase", 60)
+        provider.walletpassphrase("paymaster lifecycle passphrase", 3600)
         self.wait_until(lambda: (
             provider.getpaymasterinfo()["running"] and
-            provider.getpaymasterinfo()["service_state"] == "active"))
+            provider.getpaymasterinfo()["service_state"] == "waiting_for_liquidity_confirmation"))
         self.wait_until(lambda: len(self.nodes[0].getrawmempool()) == 1)
         maintenance_txid = self.nodes[0].getrawmempool()[0]
         unlocked_status = provider.getpaymasterliquiditystatus()
@@ -256,6 +256,7 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
             provider.getpaymasterliquiditystatus()[key]["target"]
             for key in ("admission_dgb", "operational_dgb",
                         "admission_carriers", "operational_carriers")))
+        self.wait_until(lambda: provider.getpaymasterinfo()["service_state"] == "active")
         assert not any(entry["state"] in (
             "reserved", "committed", "pending_successor")
             for entry in provider.listpaymasterreservations())

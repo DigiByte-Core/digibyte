@@ -1589,6 +1589,235 @@ RPCHelpMan withdrawpaymastercarrier()
     };
 }
 
+namespace {
+
+uint256 PoolPreparationAuthorization(CWallet& wallet)
+{
+    ProviderIdentityRecord identity;
+    ProviderPolicy policy;
+    if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderPolicy(wallet, policy)) return {};
+    HashWriter hash = TaggedHash("DigiByte Paymaster Pool Authorization v1");
+    hash << Params().GenesisBlock().GetHash() << identity.provider_id << GetProviderPolicyHash(policy);
+    return hash.GetSHA256();
+}
+
+ProviderMaintenanceLedger ReadPreparationLedger(CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    ProviderMaintenanceLedger ledger;
+    const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterMaintenanceLedgerWithStatus(ledger);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+    }
+    return ledger;
+}
+
+void WritePreparationLedger(CWallet& wallet, const ProviderMaintenanceLedger& ledger)
+{
+    LOCK(wallet.cs_wallet);
+    if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DATABASE_WRITE");
+    }
+}
+
+bool PreparationInputsConfirmed(CWallet& wallet, const CTransaction& tx)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    return std::all_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& input) {
+        const auto parent = wallet.mapWallet.find(input.prevout.hash);
+        return parent != wallet.mapWallet.end() && wallet.GetTxDepthInMainChain(parent->second) > 0;
+    });
+}
+
+std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record)
+{
+    LOCK(wallet.cs_wallet);
+    ProviderSettings settings;
+    if (!GetPaymasterProviderSettings(wallet, settings) || !settings.enabled) return "PAYMASTER_PROVIDER_DISABLED";
+    if (record.preparation_authorization != PoolPreparationAuthorization(wallet)) return "PAYMASTER_POOL_POLICY_CHANGED";
+    if (!wallet.GetBroadcastTransactions()) return "PAYMASTER_WALLET_BROADCAST_DISABLED";
+    if (!record.transaction_id.IsNull()) {
+        const auto found = wallet.mapWallet.find(record.transaction_id);
+        if (found == wallet.mapWallet.end()) return "PAYMASTER_POOL_TRANSACTION_NOT_IN_WALLET";
+        const auto& wtx = found->second;
+        if (wtx.isAbandoned() || wtx.isConflicted()) return "PAYMASTER_POOL_TRANSACTION_CONFLICT";
+        if (wallet.GetTxDepthInMainChain(wtx) > 0) return {};
+        if (wtx.InMempool() || !PreparationInputsConfirmed(wallet, *wtx.tx)) return "PAYMASTER_POOL_WAITING_CONFIRMATION";
+        const auto fee = GetProviderFinanceTransactionFee(wallet, wtx.tx);
+        if (!fee || fee->value > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        std::string error;
+        // Retry only the exact transaction already saved by CommitTransaction.
+        if (!wallet.chain().broadcastTransaction(wtx.tx, std::min(record.maximum_fee.value, wallet.m_default_max_tx_fee), true, error)) {
+            return "PAYMASTER_POOL_TRANSACTION_REJECTED: " + error;
+        }
+        return "PAYMASTER_POOL_WAITING_CONFIRMATION";
+    }
+    if (wallet.IsLocked()) return "PAYMASTER_WALLET_LOCKED";
+    if (record.kind == ProviderMaintenanceKind::PREPARE_DGB) {
+        std::vector<CRecipient> recipients;
+        for (const auto& output : record.outputs) {
+            CTxDestination destination;
+            if (!ExtractDestination(output.script_pub_key, destination)) return "PAYMASTER_INVALID_MAINTENANCE_OUTPUT";
+            recipients.push_back({destination, output.dgb_value.value, false});
+        }
+        // A stempool-only parent is invisible to the normal fee precheck.
+        // Constrain setup funding without changing ordinary wallet selection.
+        CCoinControl control;
+        control.m_min_depth = 1;
+        auto created = CreateTransaction(wallet, recipients, -1, control, true);
+        if (!created) return "PAYMASTER_POOL_WAITING_DGB: " + util::ErrorString(created).original;
+        if (created->fee > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        std::string error;
+        if (!wallet.CommitTransaction(created->tx, {}, {}, &error)) return "PAYMASTER_POOL_TRANSACTION_REJECTED: " + error;
+    } else {
+        auto* dd_wallet = wallet.GetDDWallet();
+        if (!dd_wallet) return "PAYMASTER_DD_WALLET_UNAVAILABLE";
+        std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
+        for (const auto& output : record.outputs) {
+            CTxDestination destination;
+            if (!ExtractDestination(output.script_pub_key, destination)) return "PAYMASTER_INVALID_MAINTENANCE_OUTPUT";
+            recipients.emplace_back(CDigiDollarAddress{EncodeDigiDollarAddress(destination)}, output.carrier_value.value);
+        }
+        DDTransferPlan plan;
+        std::string error;
+        if (!dd_wallet->PlanDigiDollarTransfer(recipients, plan, error)) return "PAYMASTER_POOL_WAITING_FUNDS: " + error;
+        if (plan.estimated_fee <= 0 || plan.estimated_fee > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        CMutableTransaction inputs;
+        for (const auto& input : plan.dd_utxos) inputs.vin.emplace_back(input);
+        for (const auto& input : plan.fee_utxos) inputs.vin.emplace_back(input);
+        if (!PreparationInputsConfirmed(wallet, CTransaction{inputs})) return "PAYMASTER_POOL_WAITING_CONFIRMATION";
+        CMutableTransaction transaction;
+        if (!dd_wallet->BuildDigiDollarTransfer(plan, transaction, error)) {
+            return "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + error;
+        }
+        const CTransactionRef tx = MakeTransactionRef(std::move(transaction));
+        const auto fee = GetProviderFinanceTransactionFee(wallet, tx);
+        if (!fee || fee->value <= 0 || fee->value > record.maximum_fee.value || fee->value > plan.estimated_fee) {
+            return "PAYMASTER_POOL_FEE_LIMIT";
+        }
+        // Check the exact signed fee before commit. Use the wallet primitive
+        // directly: a rejected pool transaction must remain recoverable, not
+        // enter the ordinary DD send helper's automatic-abandon path.
+        if (!wallet.CommitTransaction(tx, {{"comment", "Paymaster carrier pool"}}, {}, &error)) {
+            return "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + error;
+        }
+    }
+    return {};
+}
+
+// Caller owns the work guard shared with recurring maintenance. Recover wallet
+// bytes before every construction, including a commit that failed to broadcast.
+void ContinuePoolPreparation(CWallet& wallet)
+{
+    // Readiness queries also reconcile this journal. Keep their updates out of
+    // the read-modify-write interval even though they do not take the work guard.
+    LOCK(wallet.cs_wallet);
+    size_t recovered{0};
+    std::string error;
+    if (!ReconcileProviderMaintenance(wallet, recovered, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+    const auto snapshot = ReadPreparationLedger(wallet);
+    for (const auto& record : snapshot.records) {
+        if (!record.IsPreparation() || record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
+        const bool conflict = std::any_of(snapshot.records.begin(), snapshot.records.end(), [&](const auto& other) {
+            return other.IsPreparation() && other.plan_id == record.plan_id && other.state == ProviderMaintenanceState::FAILED;
+        });
+        error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record);
+        size_t reconciled{0};
+        std::string reconcile_error;
+        if (!ReconcileProviderMaintenance(wallet, reconciled, reconcile_error)) throw JSONRPCError(RPC_WALLET_ERROR, reconcile_error);
+        auto ledger = ReadPreparationLedger(wallet);
+        for (auto& current : ledger.records) {
+            if (current.operation_id == record.operation_id && current.preparation_error != error.substr(0, 256)) {
+                current.preparation_error = error.substr(0, 256);
+                current.updated_at = std::max(current.updated_at, GetTime());
+                WritePreparationLedger(wallet, ledger);
+                break;
+            }
+        }
+    }
+}
+
+} // namespace
+
+bool paymaster_rpc::internal::HasPendingPoolPreparation(CWallet& wallet)
+{
+    const auto ledger = ReadPreparationLedger(wallet);
+    return std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
+        return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
+               record.state != ProviderMaintenanceState::RELEASED;
+    });
+}
+
+RPCResult paymaster_rpc::internal::PoolPreparationResult()
+{
+    return {RPCResult::Type::ARR, "preparation", "Durable finite setup steps; no provider start is implied", {
+        {RPCResult::Type::OBJ, "", "Setup step", {
+            {RPCResult::Type::STR_HEX, "plan_id", "Approved plan"},
+            {RPCResult::Type::STR_HEX, "operation_id", "Durable step identity"},
+            {RPCResult::Type::STR, "asset", "dgb or dd_carrier"},
+            {RPCResult::Type::STR, "state", "pending_creation, pending_confirmation, complete, conflict or cancelled"},
+            {RPCResult::Type::STR, "error", "Last execution diagnostic; empty when complete"},
+            {RPCResult::Type::NUM, "maximum_fee_satoshis", "Approved maximum transaction fee"},
+            {RPCResult::Type::NUM, "actual_fee_satoshis", "Saved transaction fee, zero before construction"},
+            {RPCResult::Type::STR_HEX, "txid", true, "Existing transaction; never replaced by a retry"},
+            {RPCResult::Type::NUM, "required_output_satoshis", true, "Uncreated DGB pool principal"},
+            {RPCResult::Type::NUM, "confirmed_available_satoshis", true, "Eligible confirmed DGB funding"},
+            {RPCResult::Type::NUM, "available_including_unconfirmed_satoshis", true, "Eligible funding including safe unconfirmed change"},
+            {RPCResult::Type::NUM, "funding_shortfall_upper_bound_satoshis", true, "Shortfall including the full fee ceiling, after unconfirmed change is counted; actual fee may be lower"},
+        }},
+    }};
+}
+
+UniValue paymaster_rpc::internal::PoolPreparationToJSON(CWallet& wallet)
+{
+    UniValue result{UniValue::VARR};
+    for (const auto& record : ReadPreparationLedger(wallet).records) {
+        if (!record.IsPreparation()) continue;
+        UniValue item{UniValue::VOBJ};
+        item.pushKV("plan_id", record.plan_id.GetHex());
+        item.pushKV("operation_id", record.operation_id.GetHex());
+        item.pushKV("asset", record.kind == ProviderMaintenanceKind::PREPARE_DGB ? "dgb" : "dd_carrier");
+        item.pushKV("state", record.state == ProviderMaintenanceState::CONFIRMED ? "complete" : record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.state == ProviderMaintenanceState::RELEASED ? "cancelled" : record.transaction_id.IsNull() ? "pending_creation" : "pending_confirmation");
+        item.pushKV("error", record.state == ProviderMaintenanceState::CONFIRMED ? "" : record.preparation_error);
+        item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
+        item.pushKV("actual_fee_satoshis", record.actual_fee.value);
+        if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
+        if (record.kind == ProviderMaintenanceKind::PREPARE_DGB && record.transaction_id.IsNull()) {
+            LOCK(wallet.cs_wallet);
+            CAmount required{0};
+            for (const auto& output : record.outputs) required += output.dgb_value.value;
+            CCoinControl control;
+            control.m_min_depth = 1;
+            const CAmount confirmed = AvailableCoins(wallet, &control).GetTotalAmount();
+            control.m_min_depth = 0;
+            const CAmount available = AvailableCoins(wallet, &control).GetTotalAmount();
+            item.pushKV("required_output_satoshis", required);
+            item.pushKV("confirmed_available_satoshis", confirmed);
+            item.pushKV("available_including_unconfirmed_satoshis", available);
+            item.pushKV("funding_shortfall_upper_bound_satoshis", std::max<CAmount>(0, required + record.maximum_fee.value - available));
+        }
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
+void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet)
+{
+    if (!context.paymaster || !context.paymaster->Enabled()) return;
+    ProviderIdentityRecord identity;
+    ProviderSettings settings;
+    if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderSettings(wallet, settings) || !settings.enabled || !AutomaticProviderStateIsSynchronized(wallet)) return;
+    ProviderWorkGuard guard{*context.paymaster, wallet.GetName(), identity.provider_id, false};
+    if (!guard.Acquired()) return;
+    try {
+        ContinuePoolPreparation(wallet);
+    } catch (const UniValue& error) {
+        wallet.WalletLogPrintf("Paymaster pool preparation paused: %s\n", error.write());
+    } catch (const std::exception& error) {
+        wallet.WalletLogPrintf("Paymaster pool preparation paused: %s\n", error.what());
+    }
+}
+
 RPCHelpMan preparepaymasterpool()
 {
     return RPCHelpMan{
@@ -1603,13 +1832,27 @@ RPCHelpMan preparepaymasterpool()
                                                                                                                     {"operational_dgb_slots", RPCArg::Type::NUM, RPCArg::Optional::NO, "One to sixteen operational DGB slots"},
                                                                                                                     {"admission_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "Three to sixteen admission carriers for USER_PAID"},
                                                                                                                     {"operational_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "One to sixteen operational carriers for USER_PAID"},
-                                                                                                                    {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Create and broadcast the reviewed pool transaction"},
+                                                                                                                    {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Persist the reviewed finite setup and automatically continue it when funding is confirmed"},
                                                                                                                     {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
+                {"cancel", RPCArg::Type::BOOL, RPCArg::Default{false}, "With execute and the original plan_id, cancel only steps with no saved transaction; signed transactions remain tracked"},
+                {"maximum_fee_satoshis", RPCArg::Type::NUM, RPCArg::Default{20000000}, "Maximum fee per setup transaction; at most one DGB and one DD transaction are authorized"},
+                {"recover_dgb_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Explicitly adopt an existing wallet DGB transaction; never discover it from labels"},
+                {"recover_dgb_outputs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Exact outputs of the recovery transaction", {
+                    {"output", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Pool output", {
+                        {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Output index"},
+                        {"purpose", RPCArg::Type::STR, RPCArg::Optional::NO, "admission or operational"},
+                    }},
+                }},
                                                                                                                 }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Pool preparation preview or transaction", {
-                                                                                           {RPCResult::Type::BOOL, "executed", "Whether wallet funds were committed"},
-                                                                                           {RPCResult::Type::STR_HEX, "plan_id", "Plan bound to the policy, targets, current deficits, and output values"},
+                PoolPreparationResult(),
+                                                                                           {RPCResult::Type::BOOL, "executed", "Whether this call committed a wallet transaction"},
+                                                                                           {RPCResult::Type::BOOL, "cancelled", "Whether unsigned steps were cancelled"},
+                {RPCResult::Type::BOOL, "accepted", "Whether a finite automatic setup was authorized"},
+                {RPCResult::Type::NUM, "maximum_fee_satoshis", "Maximum approved fee per transaction"},
+                {RPCResult::Type::NUM, "maximum_total_fee_satoshis", "Maximum approved fees for the new setup steps"},
+                {RPCResult::Type::STR_HEX, "plan_id", "Plan bound to the policy, targets, current deficits, and output values"},
                                                                                            {RPCResult::Type::NUM, "admission_dgb_slots", "Admission DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "operational_dgb_slots", "Operational DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "admission_carrier_slots", "Admission DD carriers"},
@@ -1671,7 +1914,11 @@ RPCHelpMan preparepaymasterpool()
                              {"admission_carrier_slots", UniValueType(UniValue::VNUM)},
                              {"operational_carrier_slots", UniValueType(UniValue::VNUM)},
                              {"execute", UniValueType(UniValue::VBOOL)},
-                             {"plan_id", UniValueType(UniValue::VSTR)}},
+                             {"plan_id", UniValueType(UniValue::VSTR)},
+                             {"cancel", UniValueType(UniValue::VBOOL)},
+                             {"maximum_fee_satoshis", UniValueType(UniValue::VNUM)},
+                             {"recover_dgb_txid", UniValueType(UniValue::VSTR)},
+                             {"recover_dgb_outputs", UniValueType(UniValue::VARR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const int admission = options.find_value("admission_dgb_slots").getInt<int>();
             const int operational = options.find_value("operational_dgb_slots").getInt<int>();
@@ -1683,6 +1930,11 @@ RPCHelpMan preparepaymasterpool()
                 operational < 1 || operational > 16 || admission_carriers < 0 ||
                 admission_carriers > 16 || operational_carriers < 0 || operational_carriers > 16) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_INVALID_POOL_TARGET");
+            }
+            const int64_t fee_limit = options.find_value("maximum_fee_satoshis").isNull()
+                ? 20000000 : options.find_value("maximum_fee_satoshis").getInt<int64_t>();
+            if (fee_limit <= 0 || !MoneyRange(fee_limit) || fee_limit > MAX_MONEY / 2) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_INVALID_FEE_LIMIT");
             }
             ProviderPolicy policy;
             if (!GetPaymasterProviderPolicy(*wallet, policy)) {
@@ -1697,9 +1949,15 @@ RPCHelpMan preparepaymasterpool()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
             }
             std::vector<ProviderPoolEntry> existing;
-            const bool have_existing = GetPaymasterProviderPoolEntries(*wallet, existing);
             std::string refresh_error;
-            if (have_existing &&
+            {
+                LOCK(wallet->cs_wallet);
+                WalletBatch batch{wallet->GetDatabase()};
+                if (!ReadOptionalProviderPool(batch, existing, refresh_error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, refresh_error);
+                }
+            }
+            if (!existing.empty() &&
                 !RefreshPoolConfirmationHeights(*wallet, existing, refresh_error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, refresh_error);
             }
@@ -1752,6 +2010,85 @@ RPCHelpMan preparepaymasterpool()
                     RPC_INVALID_PARAMETER,
                     "PAYMASTER_POOL_VALUE_OUT_OF_RANGE");
             }
+            // Index synchronization may drain wallet validation callbacks.
+            // Never wait for that queue while holding cs_wallet.
+            const bool txindex_ready = !execute || ProviderTxIndexIsReady(*wallet, /*wait_for_sync=*/true);
+            LOCK(wallet->cs_wallet);
+            auto ledger = ReadPreparationLedger(*wallet);
+            const uint256 authorization = PoolPreparationAuthorization(*wallet);
+            if (authorization.IsNull()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_IDENTITY_NOT_FOUND");
+            const bool pending = std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
+                return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
+                       record.state != ProviderMaintenanceState::RELEASED;
+            });
+            HashWriter request_hasher = TaggedHash("DigiByte Paymaster Pool Request v1");
+            request_hasher << admission << operational << admission_carriers << operational_carriers << fee_limit
+                           << options.find_value("recover_dgb_txid").write()
+                           << options.find_value("recover_dgb_outputs").write();
+            const uint256 request_hash = request_hasher.GetSHA256();
+            const uint256 requested_plan = options.find_value("plan_id").isNull()
+                ? uint256{} : ParseHashV(options.find_value("plan_id"), "plan_id");
+            const bool replay = execute && std::any_of(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
+                return record.IsPreparation() && record.plan_id == requested_plan && record.preparation_request == request_hash &&
+                       record.preparation_authorization == authorization;
+            });
+            CTransactionRef recovery_tx;
+            std::vector<ProviderMaintenanceOutput> recovery_outputs;
+            const auto& recovery_id = options.find_value("recover_dgb_txid");
+            const auto& recovery_mapping = options.find_value("recover_dgb_outputs");
+            if (recovery_id.isNull() != recovery_mapping.isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_MAPPING_REQUIRED");
+            }
+            if (!recovery_id.isNull() && !replay) {
+                LOCK(wallet->cs_wallet);
+                const auto found = wallet->mapWallet.find(ParseHashV(recovery_id, "recover_dgb_txid"));
+                if (found == wallet->mapWallet.end() || !found->second.tx ||
+                    found->second.isAbandoned() || found->second.isConflicted() ||
+                    IsDigiDollarTransaction(*found->second.tx)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_TRANSACTION_INVALID");
+                }
+                recovery_tx = found->second.tx;
+                // Adoption authorizes only a wallet-owned self-transfer. It must
+                // not turn a foreign, client, or provider payment into setup.
+                for (const auto& input : recovery_tx->vin) {
+                    if (!(wallet->IsMine(input.prevout) & ISMINE_SPENDABLE) || IsPaymasterInputReserved(*wallet, input.prevout) ||
+                        std::any_of(existing.begin(), existing.end(), [&](const auto& entry) { return entry.outpoint == input.prevout; })) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_INPUT_INVALID");
+                    }
+                }
+                for (const auto& output : recovery_tx->vout) {
+                    if (!(wallet->IsMine(output) & ISMINE_SPENDABLE)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_OUTPUT_INVALID");
+                }
+                int recovered_admission{0}, recovered_operational{0};
+                std::set<uint32_t> indices;
+                for (const auto& item : recovery_mapping.getValues()) {
+                    RPCTypeCheckObj(item, {{"vout", UniValueType(UniValue::VNUM)}, {"purpose", UniValueType(UniValue::VSTR)}}, false, true);
+                    const auto index = item.find_value("vout").getInt<uint32_t>();
+                    const auto purpose = item.find_value("purpose").get_str();
+                    if (index >= recovery_tx->vout.size() || !indices.insert(index).second ||
+                        (purpose != "admission" && purpose != "operational") ||
+                        wallet->IsSpent(COutPoint{recovery_tx->GetHash(), index})) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_OUTPUT_INVALID");
+                    }
+                    const auto& output = recovery_tx->vout[index];
+                    const bool admission_output = purpose == "admission";
+                    if (output.nValue != (admission_output ? admission_value : operational_value)) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_VALUE_MISMATCH");
+                    }
+                    ProviderMaintenanceOutput mapped;
+                    mapped.purpose = admission_output ? PoolPurpose::ADMISSION : PoolPurpose::OPERATIONAL;
+                    mapped.asset = PoolAsset::DGB;
+                    mapped.script_pub_key = output.scriptPubKey;
+                    mapped.dgb_value = DGBSatoshis{output.nValue};
+                    recovery_outputs.push_back(std::move(mapped));
+                    admission_output ? ++recovered_admission : ++recovered_operational;
+                }
+                if (recovered_admission != missing_admission || recovered_operational != missing_operational || recovery_outputs.empty()) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_RECOVERY_TARGET_MISMATCH");
+                }
+                const auto fee = GetProviderFinanceTransactionFee(*wallet, recovery_tx);
+                if (!fee || fee->value > fee_limit) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_FEE_LIMIT");
+            }
             const int64_t total_carriers = carrier_value *
                                            (missing_admission_carriers + missing_operational_carriers);
             HashWriter plan_hasher = TaggedHash(
@@ -1765,7 +2102,29 @@ RPCHelpMan preparepaymasterpool()
                         << missing_operational_carriers
                         << admission_value << operational_value
                         << carrier_value << *total << total_carriers;
-            const uint256 plan_id = plan_hasher.GetSHA256();
+            // Bind the existing inventory as well as deficit counts. After
+            // slots are spent, a new explicit setup must not alias an old,
+            // completed command with the same targets and numeric deficits.
+            for (const auto& entry : existing) {
+                plan_hasher << entry.outpoint << static_cast<uint8_t>(entry.state)
+                            << static_cast<uint8_t>(entry.purpose) << static_cast<uint8_t>(entry.asset)
+                            << entry.dgb_value.value << entry.carrier_value.value;
+            }
+            for (const auto& record : ledger.records) {
+                if (record.IsPreparation()) plan_hasher << record.operation_id << static_cast<uint8_t>(record.state);
+            }
+            plan_hasher << fee_limit << authorization << recovery_outputs;
+            if (recovery_tx) plan_hasher << recovery_tx->GetWitnessHash();
+            // A lost execute response must be recoverable by another preview.
+            // Reuse only an outstanding plan with the same request and current
+            // authorization; changed targets/policy never inherit its approval.
+            const auto pending_match = std::find_if(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
+                return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
+                       record.state != ProviderMaintenanceState::RELEASED &&
+                       record.preparation_request == request_hash && record.preparation_authorization == authorization;
+            });
+            const bool resume_preview = !execute && pending_match != ledger.records.end();
+            const uint256 plan_id = resume_preview ? pending_match->plan_id : plan_hasher.GetSHA256();
             UniValue result{UniValue::VOBJ};
             result.pushKV("plan_id", plan_id.GetHex());
             result.pushKV("admission_dgb_slots", admission);
@@ -1781,6 +2140,25 @@ RPCHelpMan preparepaymasterpool()
             result.pushKV("carrier_cents_each", carrier_value);
             result.pushKV("total_output_satoshis", *total);
             result.pushKV("total_carrier_cents", total_carriers);
+            result.pushKV("maximum_fee_satoshis", fee_limit);
+            int64_t total_fee_limit = fee_limit *
+                ((missing_admission + missing_operational > 0) +
+                 (missing_admission_carriers + missing_operational_carriers > 0));
+            if (replay || resume_preview) {
+                // Report the original authorization, even after one or both
+                // asset steps no longer appear in the current deficit counts.
+                total_fee_limit = 0;
+                for (const auto& record : ledger.records) {
+                    if (!record.IsPreparation() || record.plan_id != (replay ? requested_plan : plan_id)) continue;
+                    const auto combined = CheckedAdd(total_fee_limit, record.maximum_fee.value);
+                    if (!combined || !MoneyRange(*combined)) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+                    total_fee_limit = *combined;
+                }
+            }
+            result.pushKV("maximum_total_fee_satoshis", total_fee_limit);
+            result.pushKV("accepted", false);
+            result.pushKV("cancelled", false);
+            result.pushKV("preparation", PoolPreparationToJSON(*wallet));
             if (!execute) {
                 result.pushKV("executed", false);
                 return result;
@@ -1791,184 +2169,119 @@ RPCHelpMan preparepaymasterpool()
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                                    "PAYMASTER_POOL_PLAN_REQUIRED");
             }
-            if (ParseHashV(supplied_plan, "plan_id") != plan_id) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER,
-                                   "PAYMASTER_POOL_PLAN_CHANGED");
-            }
-
-            EnsureWalletIsUnlocked(*wallet);
-            bool executed{false};
-            std::string dd_txid;
-            CTransactionRef dd_tx;
-            if (missing_admission_carriers + missing_operational_carriers > 0) {
-                DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
-                if (!dd_wallet) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DD_WALLET_UNAVAILABLE");
-                struct CarrierOutput {
-                    CScript script;
-                    PoolPurpose purpose;
-                };
-                std::vector<CarrierOutput> carrier_outputs;
-                std::vector<std::pair<CDigiDollarAddress, CAmount>> carrier_recipients;
-                const auto append_carriers = [&](PoolPurpose purpose, int count) {
-                    for (int i = 0; i < count; ++i) {
-                        auto destination = wallet->GetNewDestination(OutputType::BECH32M,
-                                                                     purpose == PoolPurpose::ADMISSION ? "Paymaster admission carrier" : "Paymaster operational carrier");
-                        if (!destination) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
-                        const std::string encoded = EncodeDigiDollarAddress(*destination);
-                        CDigiDollarAddress address{encoded};
-                        if (encoded.empty() || !address.IsValid()) {
-                            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_ADDRESS_UNAVAILABLE");
-                        }
-                        carrier_outputs.push_back({GetScriptForDestination(*destination), purpose});
-                        carrier_recipients.emplace_back(std::move(address), carrier_value);
-                    }
-                };
-                append_carriers(PoolPurpose::ADMISSION, missing_admission_carriers);
-                append_carriers(PoolPurpose::OPERATIONAL, missing_operational_carriers);
-                std::string transfer_error;
-                if (!dd_wallet->TransferDigiDollarMany(carrier_recipients, dd_txid, transfer_error,
-                                                       nullptr, nullptr, "Paymaster carrier pool")) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + transfer_error);
-                }
-                const uint256 carrier_hash = uint256S(dd_txid);
-                CTransactionRef carrier_tx;
-                {
-                    LOCK(wallet->cs_wallet);
-                    const auto it = wallet->mapWallet.find(carrier_hash);
-                    if (it != wallet->mapWallet.end()) carrier_tx = it->second.tx;
-                }
-                if (!carrier_tx) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_TRANSACTION_NOT_IN_WALLET");
-                }
-                dd_tx = carrier_tx;
-                const int64_t now = GetTime();
-                for (const CarrierOutput& output : carrier_outputs) {
-                    const auto match = std::find_if(carrier_tx->vout.begin(), carrier_tx->vout.end(),
-                                                    [&](const CTxOut& txout) {
-                                                        return txout.nValue == 0 && txout.scriptPubKey == output.script;
-                                                    });
-                    if (match == carrier_tx->vout.end()) {
-                        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_OUTPUT_NOT_FOUND_AFTER_COMMIT");
-                    }
-                    ProviderPoolEntry entry;
-                    entry.outpoint = COutPoint{carrier_hash,
-                                               static_cast<uint32_t>(std::distance(carrier_tx->vout.begin(), match))};
-                    entry.purpose = output.purpose;
-                    entry.asset = PoolAsset::DD_CARRIER;
-                    entry.script_pub_key = output.script;
-                    entry.carrier_value = DDCents{carrier_value};
-                    entry.updated_at = now;
-                    existing.push_back(std::move(entry));
-                }
-                std::string persist_error;
-                if (!SetPaymasterProviderPoolEntries(*wallet, existing, persist_error)) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       persist_error + "; carrier outputs remain controlled by this wallet");
-                }
-                executed = true;
-            }
-
-            struct PlannedOutput {
-                CTxDestination destination;
-                PoolPurpose purpose;
-                int64_t value;
-            };
-            std::vector<PlannedOutput> planned;
-            std::vector<CRecipient> recipients;
-            const auto append = [&](PoolPurpose purpose, int count, int64_t value) {
-                for (int i = 0; i < count; ++i) {
-                    auto destination = wallet->GetNewDestination(OutputType::BECH32M,
-                                                                 purpose == PoolPurpose::ADMISSION ? "Paymaster admission" : "Paymaster operational");
-                    if (!destination) {
-                        throw JSONRPCError(RPC_WALLET_ERROR,
-                                           "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
-                    }
-                    planned.push_back({*destination, purpose, value});
-                    recipients.push_back({*destination, value, false});
-                }
-            };
-            append(PoolPurpose::ADMISSION, missing_admission, admission_value);
-            append(PoolPurpose::OPERATIONAL, missing_operational, operational_value);
-            CTransactionRef dgb_tx;
-            CAmount dgb_fee{0};
-            if (!recipients.empty()) {
-                CCoinControl coin_control;
-                auto created = CreateTransaction(*wallet, recipients, /*change_pos=*/-1,
-                                                 coin_control, /*sign=*/true);
-                if (!created) {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-                                       util::ErrorString(created).original);
-                }
-                std::string commit_error;
-                if (!wallet->CommitTransaction(created->tx, {}, {}, &commit_error)) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       "PAYMASTER_POOL_TRANSACTION_REJECTED: " + commit_error);
-                }
-                const int64_t now = GetTime();
-                for (const auto& output : planned) {
-                    const CScript script = GetScriptForDestination(output.destination);
-                    const auto match = std::find_if(created->tx->vout.begin(), created->tx->vout.end(),
-                                                    [&](const CTxOut& txout) {
-                                                        return txout.nValue == output.value && txout.scriptPubKey == script;
-                                                    });
-                    if (match == created->tx->vout.end()) {
-                        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOL_OUTPUT_NOT_FOUND_AFTER_COMMIT");
-                    }
-                    ProviderPoolEntry entry;
-                    entry.outpoint = COutPoint{created->tx->GetHash(),
-                                               static_cast<uint32_t>(std::distance(created->tx->vout.begin(), match))};
-                    entry.purpose = output.purpose;
-                    entry.asset = PoolAsset::DGB;
-                    entry.script_pub_key = script;
-                    entry.dgb_value = DGBSatoshis{output.value};
-                    entry.updated_at = now;
-                    existing.push_back(std::move(entry));
-                }
+            const uint256 supplied_id = ParseHashV(supplied_plan, "plan_id");
+            if (options.find_value("cancel").isTrue()) {
+                size_t recovered{0};
                 std::string error;
-                if (!SetPaymasterProviderPoolEntries(*wallet, existing, error)) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       error + "; pool outputs remain controlled by this wallet");
+                if (!ReconcileProviderMaintenance(*wallet, recovered, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+                ledger = ReadPreparationLedger(*wallet);
+                bool found{false}, cancelled{false};
+                for (auto& record : ledger.records) {
+                    if (!record.IsPreparation() || record.plan_id != supplied_id) continue;
+                    found = true;
+                    // A wallet-saved signature is never cancelled or replaced,
+                    // even if its transaction is absent from both pools.
+                    if (record.state == ProviderMaintenanceState::PLANNED && record.transaction_id.IsNull()) {
+                        record.state = ProviderMaintenanceState::RELEASED;
+                        record.updated_at = std::max(record.updated_at, GetTime());
+                        record.preparation_error.clear();
+                        cancelled = true;
+                    }
                 }
-                dgb_tx = created->tx;
-                dgb_fee = created->fee;
-                executed = true;
+                if (!found) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_PLAN_NOT_FOUND");
+                if (cancelled) WritePreparationLedger(*wallet, ledger);
+                result.pushKV("cancelled", cancelled);
+                result.pushKV("executed", false);
+                result.pushKV("plan_id", supplied_id.GetHex());
+                result.pushKV("preparation", PoolPreparationToJSON(*wallet));
+                return result;
             }
-            const int64_t finance_time = GetTime();
-            std::string finance_error;
-            if (dd_tx) {
-                const auto fee = GetProviderFinanceTransactionFee(
-                    *wallet, dd_tx);
-                if (!fee || !RecordProviderFinanceTransaction(
-                                *wallet,
-                                ProviderFinanceEventKind::POOL_SETUP,
-                                dd_tx, *fee, finance_time,
-                                finance_error)) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        finance_error.empty()
-                            ? "PAYMASTER_POOL_FINANCE_FEE_UNAVAILABLE"
-                            : finance_error);
+            const bool already_authorized = replay;
+            if (already_authorized && std::any_of(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
+                    return record.IsPreparation() && record.plan_id == supplied_id && record.state == ProviderMaintenanceState::RELEASED;
+                })) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_PLAN_CANCELLED");
+            if (!already_authorized && supplied_id != plan_id) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_PLAN_CHANGED");
+            if (pending && !already_authorized) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOL_PREPARATION_PENDING");
+            if (!context.paymaster || !context.paymaster->Enabled() || !pool_guard || !pool_guard->Acquired()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DISABLED");
+            }
+            ProviderSettings settings;
+            if (!GetPaymasterProviderSettings(*wallet, settings)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_SETTINGS_UNAVAILABLE");
+            }
+            // Approval is durable while disabled; execution still checks the
+            // enabled flag. The setup wizard saves this approval before it
+            // applies the operator's final runtime and enabled settings.
+            if (!already_authorized) {
+                const size_t new_steps = (missing_admission + missing_operational > 0) +
+                                         (missing_admission_carriers + missing_operational_carriers > 0);
+                if (ledger.records.size() + new_steps > 256) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_MAINTENANCE_RECORD_LIMIT");
+                EnsureWalletIsUnlocked(*wallet);
+                const auto append = [&](PoolAsset asset, int admission_count, int operational_count) {
+                    if (admission_count + operational_count == 0) return;
+                    ProviderMaintenanceRecord record;
+                    do { record.operation_id = GetRandHash(); } while (record.operation_id.IsNull());
+                    record.plan_id = plan_id;
+                    record.kind = asset == PoolAsset::DGB ? ProviderMaintenanceKind::PREPARE_DGB : ProviderMaintenanceKind::PREPARE_CARRIER;
+                    record.maximum_fee = DGBSatoshis{fee_limit};
+                    record.preparation_authorization = authorization;
+                    record.preparation_request = request_hash;
+                    if (!settings.enabled) record.preparation_error = "PAYMASTER_PROVIDER_DISABLED";
+                    record.created_at = record.updated_at = GetTime();
+                    if (asset == PoolAsset::DGB && recovery_tx) {
+                        record.outputs = recovery_outputs;
+                        record.transaction_id = recovery_tx->GetHash();
+                        record.actual_fee = *GetProviderFinanceTransactionFee(*wallet, recovery_tx);
+                        record.state = ProviderMaintenanceState::BROADCAST;
+                    } else {
+                        for (int i = 0; i < admission_count + operational_count; ++i) {
+                            const bool admission_output = i < admission_count;
+                            auto destination = wallet->GetNewDestination(OutputType::BECH32M,
+                                asset == PoolAsset::DGB ? "Paymaster pool setup" : "Paymaster carrier pool setup");
+                            if (!destination) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
+                            ProviderMaintenanceOutput output;
+                            output.asset = asset;
+                            output.purpose = admission_output ? PoolPurpose::ADMISSION : PoolPurpose::OPERATIONAL;
+                            output.script_pub_key = GetScriptForDestination(*destination);
+                            if (asset == PoolAsset::DGB) output.dgb_value = DGBSatoshis{admission_output ? admission_value : operational_value};
+                            else output.carrier_value = DDCents{carrier_value};
+                            record.outputs.push_back(std::move(output));
+                        }
+                    }
+                    ledger.records.push_back(std::move(record));
+                };
+                // Save both exact output plans before either transaction can be
+                // committed. Only the existing wallet stores signed bytes.
+                append(PoolAsset::DD_CARRIER, missing_admission_carriers, missing_operational_carriers);
+                append(PoolAsset::DGB, missing_admission, missing_operational);
+                WritePreparationLedger(*wallet, ledger);
+            }
+            std::set<uint256> prior_transactions;
+            for (const auto& record : ledger.records) {
+                if (!record.transaction_id.IsNull()) prior_transactions.insert(record.transaction_id);
+            }
+            if (settings.enabled && txindex_ready && AutomaticProviderStateIsSynchronized(*wallet)) ContinuePoolPreparation(*wallet);
+            bool executed{false};
+            for (const auto& record : ReadPreparationLedger(*wallet).records) {
+                if (!record.IsPreparation() || record.plan_id != supplied_id || record.transaction_id.IsNull()) continue;
+                executed |= prior_transactions.count(record.transaction_id) == 0;
+                if (record.kind == ProviderMaintenanceKind::PREPARE_DGB) {
+                    result.pushKV("dgb_txid", record.transaction_id.GetHex());
+                    result.pushKV("txid", record.transaction_id.GetHex());
+                    result.pushKV("network_fee_satoshis", record.actual_fee.value);
+                } else {
+                    result.pushKV("dd_txid", record.transaction_id.GetHex());
                 }
             }
-            if (dgb_tx && !RecordProviderFinanceTransaction(
-                              *wallet,
-                              ProviderFinanceEventKind::POOL_SETUP,
-                              dgb_tx, DGBSatoshis{dgb_fee}, finance_time,
-                              finance_error)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
-            }
-            UniValue pool{UniValue::VARR};
-            for (const auto& entry : existing)
-                pool.push_back(PoolEntryToJSON(entry));
+            if (!result.exists("txid") && result.exists("dd_txid")) result.pushKV("txid", result.find_value("dd_txid"));
+            result.pushKV("accepted", true);
+            result.pushKV("preparation", PoolPreparationToJSON(*wallet));
             result.pushKV("executed", executed);
-            if (!dd_txid.empty()) result.pushKV("dd_txid", dd_txid);
-            if (dgb_tx) {
-                result.pushKV("txid", dgb_tx->GetHash().GetHex());
-                result.pushKV("dgb_txid", dgb_tx->GetHash().GetHex());
-                result.pushKV("network_fee_satoshis", dgb_fee);
-            } else if (!dd_txid.empty()) {
-                result.pushKV("txid", dd_txid);
-            }
+            result.pushKV("plan_id", supplied_id.GetHex());
+            existing.clear();
+            GetPaymasterProviderPoolEntries(*wallet, existing);
+            UniValue pool{UniValue::VARR};
+            for (const auto& entry : existing) pool.push_back(PoolEntryToJSON(entry));
             result.pushKV("pool", std::move(pool));
             return result;
         },
@@ -2211,6 +2524,21 @@ RPCHelpMan rebalancepaymasterpool()
                                    "PAYMASTER_POOL_PLAN_CHANGED");
             }
 
+            if (!GetPaymasterIdentity(*wallet, identity)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_IDENTITY_NOT_FOUND");
+            }
+            // Reconcile confirmed setup transactions before checking the pending
+            // journal; pool confirmation refresh alone does not advance it.
+            size_t recovered{0};
+            std::string reconcile_error;
+            if (!ReconcileProviderMaintenance(*wallet, recovered, reconcile_error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, reconcile_error);
+            }
+            // A later refill from an older approved plan must not undo this
+            // explicit pool reduction. Cancel unsigned setup work first.
+            if (HasPendingPoolPreparation(*wallet)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOL_PREPARATION_PENDING");
+            }
             EnsureWalletIsUnlocked(*wallet);
             bool executed{false};
             std::string dd_txid;
@@ -2229,23 +2557,32 @@ RPCHelpMan rebalancepaymasterpool()
                     recipients.emplace_back(std::move(address), entry->carrier_value.value);
                 }
                 std::string transfer_error;
-                if (!dd_wallet->TransferDigiDollarMany(recipients, dd_txid, transfer_error,
-                                                       nullptr, &inputs, "Paymaster carrier retirement",
-                                                       /*allow_paymaster_pool_inputs=*/true)) {
+                DDTransferPlan transfer_plan;
+                CMutableTransaction transaction;
+                if (!dd_wallet->PlanDigiDollarTransfer(recipients, transfer_plan, transfer_error,
+                                                       &inputs, /*allow_paymaster_pool_inputs=*/true) ||
+                    !dd_wallet->BuildDigiDollarTransfer(transfer_plan, transaction, transfer_error)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
                 }
-                {
-                    LOCK(wallet->cs_wallet);
-                    const auto transaction = wallet->mapWallet.find(
-                        uint256S(dd_txid));
-                    if (transaction != wallet->mapWallet.end()) {
-                        dd_tx = transaction->second.tx;
-                    }
+                dd_tx = MakeTransactionRef(std::move(transaction));
+                const auto fee = GetProviderFinanceTransactionFee(*wallet, dd_tx);
+                if (!fee || fee->value <= 0 || fee->value > transfer_plan.estimated_fee ||
+                    fee->value > wallet->m_default_max_tx_fee) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_LIMIT");
                 }
-                if (!dd_tx) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        "PAYMASTER_CARRIER_RETIREMENT_TRANSACTION_NOT_IN_WALLET");
+                // The marker and signed bytes share the existing wallet write.
+                // Rejection must not abandon an already saved transaction.
+                if (!wallet->CommitTransaction(dd_tx,
+                        {{"comment", "Paymaster carrier retirement"},
+                         {PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
+                        {}, &transfer_error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
+                }
+                dd_txid = dd_tx->GetHash().GetHex();
+                if (!dd_wallet->RecordPaymasterSendHistory(dd_tx->GetHash(),
+                        GetScriptForDestination(recipients.front().first.GetDigiDollarDestination()),
+                        *retired_dd_value, transfer_error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, transfer_error);
                 }
                 const int64_t now = GetTime();
                 for (const COutPoint& input : inputs) {
@@ -2283,7 +2620,9 @@ RPCHelpMan rebalancepaymasterpool()
                                        "PAYMASTER_DGB_REBALANCE_FAILED: " + util::ErrorString(created).original);
                 }
                 std::string commit_error;
-                if (!wallet->CommitTransaction(created->tx, {}, {}, &commit_error)) {
+                if (!wallet->CommitTransaction(created->tx,
+                        {{PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
+                        {}, &commit_error)) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        "PAYMASTER_DGB_REBALANCE_REJECTED: " + commit_error);
                 }
@@ -2306,28 +2645,9 @@ RPCHelpMan rebalancepaymasterpool()
                 executed = true;
             }
 
-            const int64_t finance_time = GetTime();
+            size_t changed_events{0};
             std::string finance_error;
-            if (dd_tx) {
-                const auto fee = GetProviderFinanceTransactionFee(
-                    *wallet, dd_tx);
-                if (!fee || !RecordProviderFinanceTransaction(
-                                *wallet,
-                                ProviderFinanceEventKind::POOL_RETIREMENT,
-                                dd_tx, *fee, finance_time,
-                                finance_error)) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        finance_error.empty()
-                            ? "PAYMASTER_RETIREMENT_FINANCE_FEE_UNAVAILABLE"
-                            : finance_error);
-                }
-            }
-            if (dgb_tx && !RecordProviderFinanceTransaction(
-                              *wallet,
-                              ProviderFinanceEventKind::POOL_RETIREMENT,
-                              dgb_tx, DGBSatoshis{dgb_fee}, finance_time,
-                              finance_error)) {
+            if (!ReconcilePaymasterProviderFinances(*wallet, changed_events, finance_error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
             }
 

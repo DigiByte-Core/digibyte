@@ -20,7 +20,7 @@ import time
 from test_framework.address import base58_to_byte
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import ser_string, ser_uint256
-from test_framework.paymaster import paymaster_node_args, provider_safety_policy
+from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, provider_safety_policy
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
@@ -363,6 +363,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "operational_dgb_slots": 2,
             "admission_carrier_slots": 4,
             "operational_carrier_slots": 2,
+            # Six DD outputs need a larger explicitly reviewed setup fee cap.
+            "maximum_fee_satoshis": 30_000_000,
         }
         carrier_preview = cli.preparepaymasterpool(carrier_target)
         assert_equal(carrier_preview["executed"], False)
@@ -382,6 +384,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(len(carriers["pool"]), 14)
         self.generatetoaddress(node, 1, wallet.getnewaddress())
 
+        # Readiness reconciles confirmed maintenance; poolinfo is a read-only
+        # persisted snapshot. Capture the baseline after that reconciliation.
+        provider_ready = wallet.getpaymasterinfo()
         user_paid_ready = wallet.getpaymasterpoolinfo()
         assert_equal(user_paid_ready["ready"], True)
         assert_equal(user_paid_ready["entries"], 14)
@@ -389,7 +394,6 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                          for entry in user_paid_ready["pool"]), 12)
         assert_equal(sum(entry["state"] == "spent"
                          for entry in user_paid_ready["pool"]), 2)
-        provider_ready = wallet.getpaymasterinfo()
         assert_equal(provider_ready["pool"]["admission_carriers"], 4)
         assert_equal(provider_ready["pool"]["operational_carriers"], 2)
         assert_equal(provider_ready["pool"]["complete_operational_slots"], 2)
@@ -426,6 +430,27 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(len(rebalanced["dgb_txid"]), 64)
         assert_equal(rebalanced["network_fee_satoshis"] > 0, True)
         self.generatetoaddress(node, 1, wallet.getnewaddress())
+
+        # Both asset steps keep their finance-recovery marker in the wallet
+        # transaction. Reconciliation must report each exact fee once.
+        for _ in range(2):
+            retirement_finance = wallet.getpaymasterfinancestatus({
+                "period": "all", "include_events": True, "limit": 10000,
+            })
+            for txid in (rebalanced["dd_txid"], rebalanced["dgb_txid"]):
+                events = [event for event in retirement_finance["events"]
+                          if event.get("transaction_id") == txid]
+                assert_equal(len(events), 1)
+                assert_equal(events[0]["kind"], "retirement")
+                assert_equal(events[0]["state"], "confirmed")
+                transaction = wallet.gettransaction(txid)
+                assert "paymaster_retirement_provider" not in transaction
+                assert_equal(events[0]["dgb_cost_satoshis"],
+                             int(-transaction["fee"] * 100_000_000))
+        for transaction in wallet.listtransactions("*", 1000):
+            assert "paymaster_retirement_provider" not in transaction
+        for transaction in wallet.listsinceblock()["transactions"]:
+            assert "paymaster_retirement_provider" not in transaction
 
         minimum_ready = wallet.getpaymasterinfo()
         assert_equal(minimum_ready["ready"], True)
@@ -1606,6 +1631,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(len(shadow_dd_funding["txid"]), 64)
         self.generatetoaddress(node, 1, wallet.getnewaddress())
         recovery_pool_target = {
+            # Five DD outputs require more than the default conservative fee cap.
+            "maximum_fee_satoshis": 30_000_000,
             "admission_dgb_slots": 3,
             "operational_dgb_slots": 2,
             "admission_carrier_slots": 3,
@@ -1622,9 +1649,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             recovery_pool_target["plan_id"] = recovery_pool_preview["plan_id"]
             recovery_pool = shadow_cli.preparepaymasterpool(
                 recovery_pool_target)
-            assert_equal(recovery_pool["executed"], True)
+            assert recovery_pool["executed"], recovery_pool
             assert_equal(len(recovery_pool["dd_txid"]), 64)
-            self.generatetoaddress(node, 1, wallet.getnewaddress())
+            confirm_pool_preparation(self, node, shadow_cli, recovery_pool_target, recovery_pool)
         shadow_recovery_started = shadow.startpaymaster()
         assert_equal(shadow_recovery_started["running"], True)
         assert_equal(shadow_recovery_started["ready"], True)

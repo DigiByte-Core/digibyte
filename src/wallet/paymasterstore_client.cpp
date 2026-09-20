@@ -190,17 +190,20 @@ bool PaymasterStore::BindClientPaymentOrder(
 
 bool PaymasterStore::GetSessionByRequestId(const std::string& request_id, PaymentSession& session) const
 {
+    return GetSessionByRequestIdWithStatus(request_id, session) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetSessionByRequestIdWithStatus(
+    const std::string& request_id, PaymentSession& session) const
+{
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     const DatabaseReadStatus session_status =
         batch.ReadPaymasterSessionWithStatus(request_id, session);
-    if (session_status == DatabaseReadStatus::FOUND) return true;
-    if (session_status != DatabaseReadStatus::NOT_FOUND) return false;
+    if (session_status != DatabaseReadStatus::NOT_FOUND) return session_status;
     IdempotencyTombstone tombstone;
-    if (batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone) !=
-        DatabaseReadStatus::FOUND) {
-        return false;
-    }
+    const auto tombstone_status = batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone);
+    if (tombstone_status != DatabaseReadStatus::FOUND) return tombstone_status;
     session = {};
     session.request_id = tombstone.request_id;
     session.session_id = tombstone.session_id;
@@ -217,7 +220,7 @@ bool PaymasterStore::GetSessionByRequestId(const std::string& request_id, Paymen
     } else {
         session.final_txid = tombstone.final_txid;
     }
-    return true;
+    return DatabaseReadStatus::FOUND;
 }
 
 bool PaymasterStore::GetSessionBySessionId(const uint256& session_id, PaymentSession& session) const
