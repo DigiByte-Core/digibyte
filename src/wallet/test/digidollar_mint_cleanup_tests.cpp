@@ -795,6 +795,91 @@ BOOST_AUTO_TEST_CASE(records_of_a_mint_that_could_be_sent_again_are_not_swept)
     BOOST_CHECK(reopened.GetOwnerKey(position_id, owner_key));
 }
 
+BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_records)
+{
+    m_wallet.EnsureDDWallet();
+    auto& dd_wallet = *m_wallet.GetDDWallet();
+    CKey owner_key;
+    owner_key.MakeNewKey(true);
+    CMutableTransaction tx(*MakeMintShapedTx(owner_key));
+    tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+        << CScriptNum(1) << CScriptNum(10000) << CScriptNum(1000) << CScriptNum(0));
+    const auto mint = MakeTransactionRef(tx);
+    const auto id = mint->GetHash();
+    const COutPoint token(id, 1);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(mint, TxStateInactive{}));
+        m_wallet.SetLastBlockProcessed(759, uint256::ONE);
+        BOOST_REQUIRE(m_wallet.LockCoin(token));
+    }
+    dd_wallet.AddDDUTXO(token, 10000);
+    BOOST_REQUIRE(dd_wallet.GetDDTimeLocks(false).empty());
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetTotalDDBalance(), 0);
+
+    // The next block would leave less than the tier's full lock period.
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(760, uint256::ONE);
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 0);
+    BOOST_CHECK(dd_wallet.HasDDUTXO(token));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.mapWallet.at(id).isAbandoned());
+        BOOST_CHECK(m_wallet.IsLockedCoin(token));
+        m_wallet.SetLastBlockProcessed(759, uint256::ONE);
+    }
+    // A shorter chain makes the same attempt valid again. No records were removed.
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(760, uint256::ONE);
+        m_wallet.mapWallet.at(id).m_state = TxStateInMempool{};
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.mapWallet.at(id).m_state = TxStateInactive{};
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 0);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(-1, uint256{});
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+
+    // Missing metadata is not proof of expiry. Keep that separate attempt pending.
+    const auto unknown = MakeMintShapedTx(owner_key);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(760, uint256::ONE);
+        BOOST_REQUIRE(m_wallet.AddToWallet(unknown, TxStateInactive{}));
+    }
+    dd_wallet.AddDDUTXO(COutPoint(unknown->GetHash(), 1), 2500);
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 2500);
+
+    // A ten-year mint must still leave ten full years from its confirmation
+    // block. A distant unlock date alone does not keep the attempt valid.
+    CMutableTransaction long_tx(*MakeMintShapedTx(owner_key));
+    long_tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+        << CScriptNum(1) << CScriptNum(10000) << CScriptNum(21025000) << CScriptNum(9));
+    const auto long_mint = MakeTransactionRef(long_tx);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(long_mint, TxStateInactive{}));
+        m_wallet.SetLastBlockProcessed(999, uint256::ONE);
+    }
+    dd_wallet.AddDDUTXO(COutPoint(long_mint->GetHash(), 1), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 12500);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(1000, uint256::ONE);
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 2500);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace wallet

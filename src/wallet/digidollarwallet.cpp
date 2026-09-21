@@ -4218,8 +4218,8 @@ CAmount DigiDollarWallet::GetTotalDDBalance() const {
 CAmount DigiDollarWallet::GetPendingDDBalance() const {
     auto locks = LockDDWallet();
     try {
-        // Pending balance: all unconfirmed DD UTXOs. None are spendable until
-        // confirmed, even if they are trusted wallet-created change.
+        // Pending balance excludes expired local mint attempts. No unconfirmed
+        // output is spendable, including wallet-created change.
         CAmount pending = 0;
         if (!m_wallet) {
             return 0; // No pending in test scenarios
@@ -4233,6 +4233,20 @@ CAmount DigiDollarWallet::GetPendingDDBalance() const {
             LOCK(m_wallet->cs_wallet);
             const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(outpoint.hash);
             if (wtx && m_wallet->GetTxDepthInMainChain(*wtx) == 0 && wtx->isUnconfirmed()) {
+                // An expired mint cannot confirm on the current chain. Read its
+                // payload because older attempts may have no saved position.
+                // Keep the records: a reorganization can make it valid again.
+                if (DigiDollar::GetDigiDollarTxType(*wtx->tx) == DigiDollar::DD_TX_MINT && !wtx->InMempool() &&
+                    m_wallet->HasLastBlockHeight()) {
+                    int64_t unlock_height;
+                    uint32_t lock_tier;
+                    if (ExtractUnlockHeightFromOpReturn(*wtx->tx, unlock_height) &&
+                        ExtractTierFromOpReturn(*wtx->tx, lock_tier) &&
+                        MintLockWindowHasPassed(WalletCollateralPosition(outpoint.hash, dd_amount, 0,
+                            lock_tier, unlock_height), m_wallet->GetLastBlockHeight() + 1)) {
+                        continue;
+                    }
+                }
                 pending += dd_amount;
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetPendingDDBalance counting unconfirmed DD UTXO %s:%u (%lld cents)\n",
                          outpoint.hash.ToString(), outpoint.n, static_cast<long long>(dd_amount));
