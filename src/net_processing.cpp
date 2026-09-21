@@ -3113,7 +3113,13 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
 bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlockIndex* chain_start_header, std::vector<CBlockHeader>& headers)
 {
     // Calculate the total work on this chain.
-    arith_uint256 total_work = chain_start_header->GetChainWork() + CalculateHeadersWork(headers);
+    const auto headers_work = CalculateHeadersWork(headers, *chain_start_header);
+    if (!headers_work) {
+        LogPrint(BCLog::NET, "Ignoring headers with invalid work from peer=%d\n", pfrom.GetId());
+        headers.clear();
+        return true;
+    }
+    arith_uint256 total_work = chain_start_header->GetChainWork() + *headers_work;
 
     // Our dynamic anti-DoS threshold (minimum work required on a headers chain
     // before we'll store it)
@@ -4913,7 +4919,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer);
             }
             return;
-        } else if (prev_block->GetChainWork() + CalculateHeadersWork({cmpctblock.header}) < GetAntiDoSWorkThreshold()) {
+        } else if (const auto work = CalculateHeadersWork({cmpctblock.header}, *prev_block);
+                   !work || prev_block->GetChainWork() + *work < GetAntiDoSWorkThreshold()) {
             // If we get a low-work header in a compact block, we can ignore it.
             LogPrint(BCLog::NET, "Ignoring low-work compact block from peer %d\n", pfrom.GetId());
             return;
@@ -5234,8 +5241,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
 
             // Check work on this block against our anti-dos thresholds.
-            if (prev_block && prev_block->GetChainWork() + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
-                min_pow_checked = true;
+            if (prev_block) {
+                const auto work = CalculateHeadersWork({pblock->GetBlockHeader()}, *prev_block);
+                min_pow_checked = work && prev_block->GetChainWork() + *work >= GetAntiDoSWorkThreshold();
             }
         }
         ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);

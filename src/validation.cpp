@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <validation.h>
+#include <headerssync.h>
 #include <digidollar/validation.h>
 #include <digidollar/digidollar.h>
 #include <digidollar/health.h>
@@ -5379,12 +5380,14 @@ bool IsBlockMutated(const CBlock& block, bool check_witness_root)
     return false;
 }
 
-arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers)
+std::optional<arith_uint256> CalculateHeadersWork(const std::vector<CBlockHeader>& headers, const CBlockIndex& chain_start)
 {
     arith_uint256 total_work{0};
+    HeadersWorkState work_state(Params().GetConsensus(), chain_start);
     for (const CBlockHeader& header : headers) {
-        CBlockIndex dummy(header);
-        total_work += GetBlockProof(dummy);
+        const auto work = work_state.AddHeader(header);
+        if (!work) return std::nullopt;
+        total_work += *work;
     }
     return total_work;
 }

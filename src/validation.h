@@ -389,8 +389,10 @@ bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consens
 /** Check if a block has been mutated (with respect to its merkle root and witness commitments). */
 bool IsBlockMutated(const CBlock& block, bool check_witness_root);
 
-/** Return the sum of the work on a given set of headers */
-arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers);
+/** Count work from the real fork point; return no value for invalid work.
+ * The caller must check proof of work and that the headers form one chain.
+ */
+std::optional<arith_uint256> CalculateHeadersWork(const std::vector<CBlockHeader>& headers, const CBlockIndex& chain_start);
 
 enum class VerifyDBResult {
     SUCCESS,

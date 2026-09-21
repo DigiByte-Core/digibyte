@@ -405,6 +405,11 @@ protected:
 };
 
 arith_uint256 GetBlockProof(const CBlockIndex& block);
+/**
+ * Use equivalent per-algorithm ancestors when only the recent linked history
+ * is retained. See GetNextWorkRequired for the required history and lookups.
+ */
+arith_uint256 GetBlockProof(const CBlockIndex& block, const PreviousAlgoBlocks& previous_algos);
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo);
 
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */

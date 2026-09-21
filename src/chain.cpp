@@ -290,7 +290,7 @@ arith_uint256 GetBlockProofBase(const CBlockIndex& block)
     return (~bnTarget / (bnTarget + 1)) + 1;
 }
 
-arith_uint256 GetBlockProof(const CBlockIndex& block)
+static arith_uint256 GetBlockProofImpl(const CBlockIndex& block, const PreviousAlgoBlocks* previous_algos)
 {
     // Work uses the header version and time, which remain in memory. Preserve
     // CBlockHeader's algorithm decoding, including unknown version bits.
@@ -311,7 +311,9 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
         for (int i = 0; i < NUM_ALGOS_IMPL; i++) {
             if (!IsAlgoActive(block.pprev, params, i))
                 continue;
-            unsigned int nBits = GetNextWorkRequired(block.pprev, &header, params, i);
+            unsigned int nBits = previous_algos
+                ? GetNextWorkRequired(block.pprev, &header, params, i, *previous_algos)
+                : GetNextWorkRequired(block.pprev, &header, params, i);
             arith_uint256 bnTarget;
             bool fNegative;
             bool fOverflow;
@@ -328,6 +330,16 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
         bnRes <<= 7;
         return bnRes;
     }
+}
+
+arith_uint256 GetBlockProof(const CBlockIndex& block)
+{
+    return GetBlockProofImpl(block, nullptr);
+}
+
+arith_uint256 GetBlockProof(const CBlockIndex& block, const PreviousAlgoBlocks& previous_algos)
+{
+    return GetBlockProofImpl(block, &previous_algos);
 }
 
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo)
