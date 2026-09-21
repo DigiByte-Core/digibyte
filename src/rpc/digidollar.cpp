@@ -417,8 +417,13 @@ namespace {
 
     void RequireCandidateHealth(const CandidateHealthQuote& candidate)
     {
-        if (candidate.active && !candidate.ready) throw JSONRPCError(RPC_MISC_ERROR,
-            candidate.error.empty() ? "DigiDollar candidate health state not ready" : candidate.error);
+        if (candidate.active && !candidate.ready) {
+            throw JSONRPCError(RPC_MISC_ERROR, candidate.price <= 0 ?
+                "Waiting for a valid signed oracle quote for the next block. "
+                "Retry after oracle data is available; see getdigidollarstats.next_block_health.data_error for details." :
+                "DigiDollar health state is not ready. "
+                "Check getdigidollarstats.next_block_health.data_error before retrying.");
+        }
     }
 
     /**
