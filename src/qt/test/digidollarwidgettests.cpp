@@ -6233,3 +6233,163 @@ void DigiDollarWidgetTests::failedMintsKeepTheirWalletStatus()
         return label->text() == "Expired mint";
     }), 1);
 }
+
+void DigiDollarWidgetTests::digiDollarControlsStayReadableInBothThemes()
+{
+    struct RestoreStyle {
+        QString previous{qApp->styleSheet()};
+        ~RestoreStyle() { qApp->setStyleSheet(previous); }
+    } restore_style;
+    const auto luminance = [](const QColor& color) {
+        const auto linear = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+    };
+    const auto readable = [&](QColor foreground, QColor background) {
+        const double a = luminance(foreground), b = luminance(background);
+        return (std::max(a, b) + 0.05) / (std::min(a, b) + 0.05) >= 4.5;
+    };
+    const auto check = [&](QWidget& widget, const QString& theme) {
+        QFile file(":/css/" + theme);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        qApp->setStyleSheet(QString::fromUtf8(file.readAll()));
+        widget.resize(1000, 700);
+        widget.show();
+        QCoreApplication::processEvents();
+        for (auto* edit : widget.findChildren<QLineEdit*>()) {
+            if (!edit->isVisible()) continue;
+            const auto palette = edit->palette();
+            const QColor text = palette.color(QPalette::Text);
+            QColor base = palette.color(QPalette::Base);
+            // Transparent inputs are drawn over their parent frame.
+            if (base.alpha() < 255) {
+                const QColor behind = edit->parentWidget()->palette().color(QPalette::Window);
+                const double alpha = base.alphaF();
+                base = QColor::fromRgbF(base.redF() * alpha + behind.redF() * (1 - alpha),
+                    base.greenF() * alpha + behind.greenF() * (1 - alpha),
+                    base.blueF() * alpha + behind.blueF() * (1 - alpha));
+            }
+            QVERIFY2(readable(text, base), qPrintable(theme + " input text: " + edit->objectName()));
+            QVERIFY2(text.green() >= text.blue(), qPrintable(theme + " input uses blue text: " + edit->objectName()));
+            if (theme == "light") QVERIFY2(base.lightness() > 230, qPrintable(edit->objectName()));
+        }
+        for (auto* combo : widget.findChildren<QComboBox*>()) {
+            combo->showPopup();
+            QCoreApplication::processEvents();
+            const auto palette = combo->view()->palette();
+            const QColor highlight = palette.color(QPalette::Highlight);
+            QVERIFY2(highlight.green() > highlight.blue(), qPrintable(theme + " dropdown selection must use DD green"));
+            QVERIFY(readable(palette.color(QPalette::HighlightedText), highlight));
+            if (QApplication::platformName() != "minimal") {
+                const QModelIndex current = combo->model()->index(combo->currentIndex(), 0);
+                const QRect row = combo->view()->visualRect(current);
+                QVERIFY(!row.isEmpty());
+                const QImage rendered = combo->view()->viewport()->grab().toImage();
+                const QPoint sample(row.right() - 5, row.center().y());
+                const QColor selected = rendered.pixelColor(sample * rendered.devicePixelRatio());
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " dropdown must paint its selection green"));
+            }
+            combo->hidePopup();
+        }
+        if (QApplication::platformName() != "minimal") {
+            for (auto* table : widget.findChildren<QTableWidget*>()) {
+                if (!table->isVisible()) continue;
+                table->setRowCount(1);
+                table->setItem(0, 0, new QTableWidgetItem(QString()));
+                table->selectRow(0);
+                table->setFocus();
+                QCoreApplication::processEvents();
+                const QRect cell = table->visualItemRect(table->item(0, 0));
+                QVERIFY(!cell.isEmpty());
+                const QImage rendered = table->viewport()->grab().toImage();
+                const QColor selected = rendered.pixelColor(cell.center() * rendered.devicePixelRatio());
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " selected table row must use DD green"));
+                QVERIFY(readable(table->palette().color(QPalette::HighlightedText), selected));
+            }
+        }
+    };
+    TestChain100Setup chain;
+    auto wallet_loader = interfaces::MakeWalletLoader(*chain.m_node.chain, *Assert(chain.m_node.args));
+    chain.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&chain.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, chain);
+    wallet->EnsureDDWallet();
+    for (int i = 0; i < 2; ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.amount = 100;
+        tx.incoming = i == 0;
+        tx.category = tx.incoming ? "receive" : "send";
+        tx.timestamp = GetTime() + i;
+        wallet->GetDDWallet()->AddMockTransaction(tx);
+    }
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    for (const auto& theme : {QString("light"), QString("dark")}) {
+        DigiDollarOverviewWidget overview;
+        overview.setWalletModel(gui.walletModel.get());
+        overview.setClientModel(gui.clientModel.get());
+        check(overview, theme);
+        const auto amounts = overview.findChildren<QLabel*>("recentTxAmountLabel");
+        QCOMPARE(amounts.size(), 2);
+        const auto* recent = overview.findChild<QListWidget*>("transactionsList");
+        QVERIFY(recent);
+        for (const auto* amount : amounts) {
+            QVERIFY2(readable(amount->palette().color(QPalette::WindowText), recent->palette().color(QPalette::Base)),
+                     qPrintable(theme + " recent amount: " + amount->text()));
+        }
+        const auto check_headings = [&] {
+            const auto labels = overview.findChildren<QLabel*>();
+            const auto title = std::find_if(labels.begin(), labels.end(), [](const QLabel* label) {
+                return label->text() == "DigiDollar Balances";
+            });
+            QVERIFY(title != labels.end());
+            QVERIFY((*title)->font().bold());
+            QVERIFY(overview.findChild<QLabel*>("healthTitle")->font().bold());
+            for (const auto& name : {"ddBalanceLabel", "ddPendingLabel", "dgbCollateralLabel"}) {
+                const auto* label = overview.findChild<QLabel*>(name);
+                QVERIFY(label);
+                QVERIFY(label->text().endsWith(':'));
+            }
+        };
+        check_headings();
+        std::unique_ptr<const PlatformStyle> platform(PlatformStyle::instantiate("other"));
+        DigiDollarSendWidget send(platform.get());
+        check(send, theme);
+        send.updateView();
+        auto* send_amount = send.findChild<QLineEdit*>("amountEdit");
+        send_amount->setText("0");
+        send.setFixedSize(1194, 645);
+        QCoreApplication::processEvents();
+        const auto* amount_help = send.findChild<QLabel*>("amountValidationLabel");
+        const int input_bottom = send_amount->mapTo(&send, send_amount->rect().bottomLeft()).y();
+        const int help_top = amount_help->mapTo(&send, amount_help->rect().topLeft()).y();
+        QVERIFY2(help_top > input_bottom, qPrintable(QString("%1 amount message top %2 overlaps input bottom %3; page minimum height %4")
+            .arg(theme).arg(help_top).arg(input_bottom).arg(send.minimumSizeHint().height())));
+        for (const auto& name : {"addressValidationLabel", "amountValidationLabel"}) {
+            const auto* label = send.findChild<QLabel*>(name);
+            QVERIFY(label);
+            QVERIFY2(readable(label->palette().color(QPalette::WindowText),
+                              label->parentWidget()->palette().color(QPalette::Window)), name);
+        }
+        DigiDollarReceiveWidget receive;
+        check(receive, theme);
+        DigiDollarMintWidget mint;
+        check(mint, theme);
+        auto* amount = mint.findChild<QLineEdit*>("amountEdit");
+        amount->setText("0");
+        const auto* warning = mint.findChild<QLabel*>("amountWarningLabel");
+        QVERIFY(warning->isVisible());
+        QVERIFY2(readable(warning->palette().color(QPalette::WindowText),
+                          warning->parentWidget()->palette().color(QPalette::Window)), qPrintable(theme + " mint warning"));
+        DigiDollarRedeemWidget redeem;
+        check(redeem, theme);
+        const auto* suffix = redeem.findChild<QLabel*>("amountSuffix");
+        QVERIFY(suffix);
+        QVERIFY2(readable(suffix->palette().color(QPalette::WindowText),
+                          suffix->parentWidget()->palette().color(QPalette::Window)), qPrintable(theme + " redeem unit"));
+        DigiDollarPositionsWidget vault;
+        check(vault, theme);
+        DigiDollarTransactionsWidget transactions;
+        check(transactions, theme);
+    }
+}

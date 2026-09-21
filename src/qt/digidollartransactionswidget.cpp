@@ -28,6 +28,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QStyledItemDelegate>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
@@ -235,6 +236,8 @@ void DigiDollarTransactionsWidget::setupFilterBar()
     // Type filter
     QLabel* typeLabel = new QLabel(tr("Type:"), this);
     m_typeFilter = new QComboBox(this);
+    // Use the styled list so popup items follow the DigiDollar theme.
+    m_typeFilter->setItemDelegate(new QStyledItemDelegate(m_typeFilter));
     m_typeFilter->addItem(tr("All Types"), "");
     m_typeFilter->addItem(tr("Mints"), "mint");
     m_typeFilter->addItem(tr("Sends"), "send");

@@ -269,10 +269,6 @@ void DigiDollarSendWidget::setupAmountSection()
     m_amountLabel->setToolTip(tr("Enter the amount of DigiDollar to send"));
     m_amountLabel->setBuddy(m_amountEdit);
 
-    // Create horizontal layout for amount input and buttons
-    QHBoxLayout* amountInputLayout = new QHBoxLayout();
-    amountInputLayout->setSpacing(8);
-
     m_amountEdit = new QLineEdit(this);
     m_amountEdit->setObjectName("amountEdit");
     m_amountEdit->setValidator(m_amountValidator);
@@ -288,11 +284,10 @@ void DigiDollarSendWidget::setupAmountSection()
     m_useAvailableBalanceButton->setObjectName("useAvailableBalanceButton");
     m_useAvailableBalanceButton->setToolTip(tr("Use the full available DigiDollar balance (fees are paid in DGB)"));
 
-    amountInputLayout->addWidget(m_amountEdit, 0);
-    amountInputLayout->addWidget(m_useAvailableBalanceButton, 1);
-
+    // Keep the input in the grid so its full themed height sets the row height.
     m_amountLayout->addWidget(m_amountLabel, 0, 0);
-    m_amountLayout->addLayout(amountInputLayout, 0, 1);
+    m_amountLayout->addWidget(m_amountEdit, 0, 1);
+    m_amountLayout->addWidget(m_useAvailableBalanceButton, 0, 2);
 
     // The line that says what is wrong with the amount, under the box it is
     // about. Without it a refused amount showed only a red border and the user
@@ -301,11 +296,7 @@ void DigiDollarSendWidget::setupAmountSection()
     m_amountValidationLabel = new QLabel(this);
     m_amountValidationLabel->setObjectName("amountValidationLabel");
     m_amountValidationLabel->setWordWrap(true);
-    // The amount box is drawn taller than the row it is given, because its
-    // height comes from the stylesheet. Without a gap here the bottom edge of
-    // the box runs through this line of text.
-    m_amountValidationLabel->setContentsMargins(0, 14, 0, 0);
-    m_amountLayout->addWidget(m_amountValidationLabel, 1, 1);
+    m_amountLayout->addWidget(m_amountValidationLabel, 1, 1, 1, 2);
 
     // USD equivalent display
     m_usdEquivalentLabel = new QLabel(tr("$USD Equivalent:"), this);
@@ -317,7 +308,7 @@ void DigiDollarSendWidget::setupAmountSection()
     m_usdEquivalentValue->setToolTip(tr("USD value updates in real-time as you type"));
 
     m_amountLayout->addWidget(m_usdEquivalentLabel, 2, 0);
-    m_amountLayout->addWidget(m_usdEquivalentValue, 2, 1);
+    m_amountLayout->addWidget(m_usdEquivalentValue, 2, 1, 1, 2);
 
     // Available balance display
     m_availableBalanceLabel = new QLabel(tr("Available:"), this);
@@ -329,12 +320,13 @@ void DigiDollarSendWidget::setupAmountSection()
     m_availableBalanceValue->setToolTip(tr("Your current spendable DigiDollar balance"));
 
     m_amountLayout->addWidget(m_availableBalanceLabel, 3, 0);
-    m_amountLayout->addWidget(m_availableBalanceValue, 3, 1);
+    m_amountLayout->addWidget(m_availableBalanceValue, 3, 1, 1, 2);
 
     // Set column widths to prevent layout distortion on initial display
     m_amountLayout->setColumnMinimumWidth(0, 110);  // Label column
     m_amountLayout->setColumnStretch(0, 0);
-    m_amountLayout->setColumnStretch(1, 1);
+    m_amountLayout->setColumnStretch(1, 0);
+    m_amountLayout->setColumnStretch(2, 1);
 
     m_mainLayout->addWidget(m_amountFrame);
 }
@@ -1145,13 +1137,12 @@ void DigiDollarSendWidget::showBackendError(int status, const QString& reasonFai
 void DigiDollarSendWidget::updateAddressValidation()
 {
     QString address = m_addressEdit->text();
-    QPalette palette = QApplication::palette();
-    QString midColor = palette.color(QPalette::Mid).name();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    QString midColor = palette.color(QPalette::WindowText).name();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
     if (address.isEmpty()) {
         m_addressValidationLabel->setText(tr("Enter a valid DigiDollar address for this network"));
@@ -1203,14 +1194,13 @@ QString DigiDollarSendWidget::amountProblem() const
 void DigiDollarSendWidget::updateAmountValidation()
 {
     QString amountText = m_amountEdit->text();
-    QPalette palette = QApplication::palette();
-    QString midColor = palette.color(QPalette::Mid).name();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    QString midColor = palette.color(QPalette::WindowText).name();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
     const QString problem = amountProblem();
 

@@ -171,6 +171,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     titleLayout->setObjectName("titleLayout");
 
     QLabel* balanceTitle = new QLabel(tr("DigiDollar Balances"), this);
+    balanceTitle->setObjectName("balanceTitle");
     QFont titleFont = balanceTitle->font();
     titleFont.setBold(true);
     titleFont.setWeight(75); // Match main wallet weight
@@ -189,7 +190,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->setObjectName("balanceGridLayout");
 
     // DD Balance (Available / Confirmed)
-    m_ddBalanceLabel = new QLabel(tr("Available"), this);
+    m_ddBalanceLabel = new QLabel(tr("Available:"), this);
     m_ddBalanceLabel->setObjectName("ddBalanceLabel");
     m_ddBalanceValue = new QLabel("0.00 $DD", this);
     m_ddBalanceValue->setObjectName("ddBalanceValue");
@@ -201,7 +202,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_ddBalanceValue, 1, 1);
 
     // DD Pending (Unconfirmed)
-    m_ddPendingLabel = new QLabel(tr("Pending"), this);
+    m_ddPendingLabel = new QLabel(tr("Pending:"), this);
     m_ddPendingLabel->setObjectName("ddPendingLabel");
     m_ddPendingValue = new QLabel("0.00 $DD", this);
     m_ddPendingValue->setObjectName("ddPendingValue");
@@ -213,7 +214,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_ddPendingValue, 2, 1);
 
     // DGB Collateral (Locked)
-    m_dgbCollateralLabel = new QLabel(tr("Locked Collateral"), this);
+    m_dgbCollateralLabel = new QLabel(tr("Locked Collateral:"), this);
     m_dgbCollateralLabel->setObjectName("dgbCollateralLabel");
     m_dgbCollateralValue = new QLabel("0.00000000 DGB", this);
     m_dgbCollateralValue->setObjectName("dgbCollateralValue");
@@ -1008,9 +1009,9 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
         amountLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
         amountLabel->setAlignment(Qt::AlignRight);
         if (tx.amount < 0 || tx.category == "send" || tx.category == "redeem") {
-            amountLabel->setStyleSheet("color: #ff4646;");
+            amountLabel->setProperty("amountDirection", "outgoing");
         } else if (tx.amount > 0 || tx.category == "receive" || tx.category == "mint") {
-            amountLabel->setStyleSheet("color: #64ff64;");
+            amountLabel->setProperty("amountDirection", "incoming");
         }
         layout->addWidget(amountLabel);
 

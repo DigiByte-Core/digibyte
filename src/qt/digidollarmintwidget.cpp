@@ -28,6 +28,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QComboBox>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -245,6 +246,8 @@ void DigiDollarMintWidget::setupLockTierSection()
     m_lockTierLabel = new QLabel(tr("Time Lock Period:"), this);
     m_lockTierLabel->setToolTip(tr("Select how long your DGB collateral will be locked"));
     m_lockTierCombo = new QComboBox(this);
+    // Use the styled list so popup items follow the DigiDollar theme.
+    m_lockTierCombo->setItemDelegate(new QStyledItemDelegate(m_lockTierCombo));
     m_lockTierCombo->setObjectName("lockTierCombo");
     m_lockTierCombo->setToolTip(tr("WARNING: Your DGB will be locked for this period and cannot be accessed until the timelock expires.\nLonger locks require less collateral (30 days: 500%, 10 years: 200%)"));
     m_lockTierLabel->setBuddy(m_lockTierCombo);
@@ -1140,13 +1143,12 @@ int DigiDollarMintWidget::getLockTierBlocks(int tier) const
 void DigiDollarMintWidget::updateAmountValidation()
 {
     QString amountText = m_amountEdit->text();
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
     // Get min/max limits from chain params
     const auto& ddParams = Params().GetDigiDollarParams();

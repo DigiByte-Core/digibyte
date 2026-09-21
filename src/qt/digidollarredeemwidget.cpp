@@ -1176,13 +1176,12 @@ void DigiDollarRedeemWidget::applyTheme()
 
 void DigiDollarRedeemWidget::updateValidationLabels()
 {
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
-    QString infoColor = palette.color(QPalette::Mid).name();
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
+    QString infoColor = palette.color(QPalette::WindowText).name();
 
     // Update position validation styling
     QString validationText = m_positionValidationLabel->text();
@@ -1209,13 +1208,12 @@ void DigiDollarRedeemWidget::updateAmountValidation()
         return;
     }
 
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
     QString errorBg = isDarkTheme ? "#4a2c2c" : "#ffeaea";
     QString warningBg = isDarkTheme ? "#4a3d2a" : "#fff3cd";
 
