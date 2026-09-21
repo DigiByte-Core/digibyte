@@ -7,6 +7,7 @@
 #include <wallet/coincontrol.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
+#include <node/interface_ui.h>
 #include <key_io.h>
 #include <qt/digibyteamountfield.h>
 #include <qt/digibyteunits.h>
@@ -40,6 +41,7 @@
 #include <QObject>
 #include <QPushButton>
 #include <QTimer>
+#include <QSignalSpy>
 #include <QVBoxLayout>
 #include <QTextEdit>
 #include <QListView>
@@ -492,4 +494,57 @@ void WalletTests::walletTests()
     }
 #endif
     TestGUI(m_node);
+}
+
+void WalletTests::sendValidationExplainsInvalidFields()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    std::unique_ptr<const PlatformStyle> style(PlatformStyle::instantiate("other"));
+    MiniGUI gui(m_node, style.get());
+    gui.initModelForWallet(m_node, wallet, style.get());
+    auto& dialog = gui.sendCoinsDialog;
+    auto* entries = dialog.findChild<QVBoxLayout*>("entries");
+    auto* entry = qobject_cast<SendCoinsEntry*>(entries->itemAt(0)->widget());
+    QVERIFY(entry);
+    auto* address = entry->findChild<QValidatedLineEdit*>("payTo");
+    auto* amount = entry->findChild<DigiByteAmountField*>("payAmount");
+    QVERIFY(address);
+    QVERIFY(amount);
+    QSignalSpy messages(&dialog, &SendCoinsDialog::message);
+    QSignalSpy unlocks(gui.walletModel.get(), &WalletModel::requireUnlock);
+    const size_t before = wallet->mapWallet.size();
+    const QString valid_address = QString::fromStdString(EncodeDestination(PKHash()));
+    const auto check = [&](const QString& input, CAmount value, const QString& expected) {
+        address->setText(input);
+        amount->setValue(value);
+        messages.clear();
+        QVERIFY(QMetaObject::invokeMethod(&dialog, "sendButtonClicked", Q_ARG(bool, false)));
+        QCOMPARE(messages.count(), 1);
+        QVERIFY2(messages.at(0).at(1).toString().contains(expected), qPrintable(messages.at(0).at(1).toString()));
+        QVERIFY(messages.at(0).at(2).toUInt() & CClientUIInterface::MODAL);
+        QCOMPARE(wallet->mapWallet.size(), before);
+        QCOMPARE(unlocks.count(), 0);
+    };
+    check("", 0, "Pay To");
+    check("not-an-address", COIN, "valid DigiByte address");
+    check(valid_address, 0, "greater than zero");
+    check(valid_address, 1, "too small");
+
+    // A valid first recipient must not hide an empty second recipient.
+    address->setText(valid_address);
+    amount->setValue(COIN);
+    QVERIFY(dialog.addEntry());
+    messages.clear();
+    QVERIFY(QMetaObject::invokeMethod(&dialog, "sendButtonClicked", Q_ARG(bool, false)));
+    QCOMPARE(messages.count(), 1);
+    QVERIFY(messages.at(0).at(1).toString().contains("Pay To"));
+    QCOMPARE(wallet->mapWallet.size(), before);
+    QCOMPARE(unlocks.count(), 0);
 }
