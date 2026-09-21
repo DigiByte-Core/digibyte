@@ -32,6 +32,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QDateTime>
+#include <QLocale>
 #include <QFrame>
 #include <QApplication>
 #include <QPalette>
@@ -137,7 +138,7 @@ void DigiDollarPositionsWidget::setupTableHeader()
     header->setSectionResizeMode(COL_POSITION_ID, QHeaderView::Stretch);   // Stretch to fill width
     header->setSectionResizeMode(COL_DD_MINTED, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_DGB_COLLATERAL, QHeaderView::Interactive);
-    header->setSectionResizeMode(COL_LOCK_DATE, QHeaderView::Interactive);
+    header->setSectionResizeMode(COL_LOCK_DATE, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(COL_LOCK_TIER, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_TIME_REMAINING, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_HEALTH, QHeaderView::Fixed);
@@ -147,7 +148,6 @@ void DigiDollarPositionsWidget::setupTableHeader()
     // Total fixed: 115 + 145 + 100 + 85 + 130 + 105 + 100 = 780px, leaves ~170px for VAULT ID
     m_positionsTable->setColumnWidth(COL_DD_MINTED, 115);        // DD Minted
     m_positionsTable->setColumnWidth(COL_DGB_COLLATERAL, 145);   // DGB Collateral
-    m_positionsTable->setColumnWidth(COL_LOCK_DATE, 100);        // Lock Date
     m_positionsTable->setColumnWidth(COL_LOCK_TIER, 150);        // Lock Tier — must fit "10 years" / "3 months" without truncation
     m_positionsTable->setColumnWidth(COL_TIME_REMAINING, 130);   // Time Remaining (wider to fit header)
     m_positionsTable->setColumnWidth(COL_HEALTH, 105);           // Health
@@ -677,14 +677,14 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
         const int bufferBlocks = DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
         int64_t lockHeight = position.unlockHeight - lockTierBlocks - bufferBlocks;
 
-    QString lockDateStr = lockDate.toString("yyyy-MM-dd");
-    QTableWidgetItem* lockDateItem = new QTableWidgetItem(lockDateStr);
+    QString lockDateStr = QLocale::system().toString(lockDate.date(), QLocale::ShortFormat);
+    QTableWidgetItem* lockDateItem = new GUIUtil::NumericTableWidgetItem(lockDateStr);
     lockDateItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
     lockDateItem->setTextAlignment(Qt::AlignCenter);
-    // Store mintTime for sorting (higher = more recent)
-    lockDateItem->setData(Qt::UserRole, QVariant::fromValue(position.mintTime));
+    // Sort by the displayed date, including the estimate for older records.
+    lockDateItem->setData(Qt::UserRole, lockDate.toSecsSinceEpoch());
     lockDateItem->setToolTip(tr("Vault created: %1\nMint block height: %2\nUnlock block height: %3")
-                            .arg(lockDate.toString("yyyy-MM-dd hh:mm"))
+                            .arg(GUIUtil::dateTimeStr(lockDate))
                             .arg(lockHeight)
                             .arg(position.unlockHeight));
 

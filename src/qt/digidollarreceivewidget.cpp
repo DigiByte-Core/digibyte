@@ -37,6 +37,7 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QDateTime>
+#include <QLocale>
 #include <QPalette>
 #include <QUrl>
 #include <QStandardPaths>
@@ -369,12 +370,11 @@ void DigiDollarReceiveWidget::setupRecentRequestsSection()
     m_requestsTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_requestsTable->setSortingEnabled(true);
 
-    // Set column widths - Date compact, Label medium, Amount compact, Address stretches
-    m_requestsTable->setColumnWidth(0, 90);   // Date - compact "Dec 17"
+    // Let the date column fit the computer's regional format.
     m_requestsTable->setColumnWidth(1, 120);  // Label
     m_requestsTable->setColumnWidth(2, 80);   // Amount
     m_requestsTable->horizontalHeader()->setStretchLastSection(true);  // Address fills remaining
-    m_requestsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
+    m_requestsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_requestsTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
     m_requestsTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
     m_requestsTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -583,9 +583,9 @@ void DigiDollarReceiveWidget::generateNewAddress()
     }
 
     // Add to UI table for immediate display
-    QString dateStr = QDateTime::currentDateTime().toString("MMM dd");
+    const QDateTime date = QDateTime::currentDateTime();
     QString amountStr = requestedAmount > 0 ? formatDDAmount(requestedAmount / 100.0) : tr("Any");
-    addRequestToTable(dateStr, m_currentLabel, amountStr, m_currentAddress);
+    addRequestToTable(date, m_currentLabel, amountStr, m_currentAddress);
 
     // Show the QR code popup dialog (same as DGB receive behavior)
     DigiDollarReceiveRequestDialog* dialog = new DigiDollarReceiveRequestDialog(this);
@@ -835,9 +835,6 @@ void DigiDollarReceiveWidget::populateRecentRequests()
             continue;  // Skip non-DD addresses
         }
 
-        // Format date - compact format "Dec 17" with full date in tooltip
-        QString dateStr = entry.date.toString("MMM dd");
-
         // Get label
         QString label = entry.recipient.label;
 
@@ -852,7 +849,7 @@ void DigiDollarReceiveWidget::populateRecentRequests()
         }
 
         // Add to table
-        addRequestToTable(dateStr, label, amountStr, address, entry.id);
+        addRequestToTable(entry.date, label, amountStr, address, entry.id);
     }
 
     // Update visibility based on row count
@@ -865,15 +862,18 @@ void DigiDollarReceiveWidget::populateRecentRequests()
     }
 }
 
-void DigiDollarReceiveWidget::addRequestToTable(const QString& date, const QString& label,
+void DigiDollarReceiveWidget::addRequestToTable(const QDateTime& date, const QString& label,
                                                 const QString& amount, const QString& address, qint64 id)
 {
-    // Insert at row 0 so newest entries appear at top
+    // Keep the date and request details together while inserting a row.
+    const bool sorting = m_requestsTable->isSortingEnabled();
+    m_requestsTable->setSortingEnabled(false);
     m_requestsTable->insertRow(0);
 
     // Date column
-    QTableWidgetItem* dateItem = new QTableWidgetItem(date);
-    dateItem->setToolTip(date.isEmpty() ? tr("No date") : date);
+    auto* dateItem = new GUIUtil::NumericTableWidgetItem(QLocale::system().toString(date.date(), QLocale::ShortFormat));
+    dateItem->setData(Qt::UserRole, date.toSecsSinceEpoch());
+    dateItem->setToolTip(date.isValid() ? GUIUtil::dateTimeStr(date) : tr("No date"));
     m_requestsTable->setItem(0, 0, dateItem);
 
     // Label column
@@ -893,6 +893,7 @@ void DigiDollarReceiveWidget::addRequestToTable(const QString& date, const QStri
     addressItem->setToolTip(address.isEmpty() ? tr("No address available") : address);  // Show full address on hover
     addressItem->setFont(GUIUtil::fixedPitchFont());
     m_requestsTable->setItem(0, 3, addressItem);
+    m_requestsTable->setSortingEnabled(sorting);
 
     // Show table, hide "no requests" label
     m_requestsTable->setVisible(true);

@@ -39,18 +39,6 @@
 
 namespace {
 
-// Keep the displayed date or amount separate from the value used for sorting.
-class NumericTransactionItem : public QTableWidgetItem
-{
-public:
-    using QTableWidgetItem::QTableWidgetItem;
-
-    bool operator<(const QTableWidgetItem& other) const override
-    {
-        return data(Qt::UserRole).toLongLong() < other.data(Qt::UserRole).toLongLong();
-    }
-};
-
 QString DigiDollarTransactionDetailsDialogStyleSheet(bool dark_theme)
 {
     if (dark_theme) {
@@ -309,7 +297,7 @@ void DigiDollarTransactionsWidget::setupTable()
     // Let the table inherit colors from the application palette/theme
     // Don't override with custom colors - this ensures proper dark/light mode support
 
-    m_table->setColumnWidth(Column::Date, 130);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Date, QHeaderView::ResizeToContents);
     // The type column has to fit the longest name a row can carry, which is
     // the name for DigiDollars a redemption hands back.
     m_table->setColumnWidth(Column::Type,
@@ -518,7 +506,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Date
             uint64_t timestamp = tx.find_value("time").getInt<uint64_t>();
-            QTableWidgetItem* dateItem = new NumericTransactionItem(formatTimestamp(timestamp));
+            QTableWidgetItem* dateItem = new GUIUtil::NumericTableWidgetItem(formatTimestamp(timestamp));
             dateItem->setData(Qt::UserRole, QVariant::fromValue(timestamp));
             m_table->setItem(row, Column::Date, dateItem);
 
@@ -549,7 +537,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Amount
             CAmount amount = tx.find_value("amount").getInt<int64_t>();
-            QTableWidgetItem* amountItem = new NumericTransactionItem(formatDDAmount(amount));
+            QTableWidgetItem* amountItem = new GUIUtil::NumericTableWidgetItem(formatDDAmount(amount));
             amountItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             amountItem->setData(Qt::UserRole, QVariant::fromValue(amount));
 
@@ -763,7 +751,7 @@ QString DigiDollarTransactionsWidget::formatDDAmount(CAmount amount) const
 QString DigiDollarTransactionsWidget::formatTimestamp(uint64_t timestamp) const
 {
     QDateTime dt = QDateTime::fromSecsSinceEpoch(timestamp);
-    return dt.toString("MMM dd, yyyy hh:mm");
+    return GUIUtil::dateTimeStr(dt);
 }
 
 QString DigiDollarTransactionsWidget::formatConfirmations(int confirmations, bool isAbandoned, bool isLocal) const

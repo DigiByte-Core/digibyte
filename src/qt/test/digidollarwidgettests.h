@@ -43,6 +43,7 @@ private Q_SLOTS:
     void addressBookTests();
     void transactionsWidgetTests();
     void transactionsWidgetExportTests();
+    void datesFollowComputerLocale();
     void privacyTabSetPrivacySlotTests();
     void privacyOverviewMaskTests();
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();

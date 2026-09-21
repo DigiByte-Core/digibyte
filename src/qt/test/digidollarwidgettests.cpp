@@ -71,6 +71,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
@@ -80,6 +81,7 @@
 #include <QProgressBar>
 #include <QListWidget>
 #include <QTableWidget>
+#include <QStyleOptionViewItem>
 #include <QTreeWidget>
 #include <QTextDocumentFragment>
 #include <QTextEdit>
@@ -2722,6 +2724,134 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     QVERIFY(csv.contains("\"note, \"\"quoted\"\"\nsecond line\""));
     for (int i = 0; i < 3; ++i) {
         QVERIFY(csv.contains(QString::fromStdString(std::string(64, '1' + i))));
+    }
+}
+
+void DigiDollarWidgetTests::datesFollowComputerLocale()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    const QList<qint64> timestamps{1704110400, 1706788800, 1735732800};
+    const QLocale locale = QLocale::system();
+    QFile theme(":/css/dark");
+    QVERIFY(theme.open(QIODevice::ReadOnly));
+    const QString css = QString::fromUtf8(theme.readAll());
+    // Cover desktops that use a larger font as well as longer regional dates.
+    QFont font = QApplication::font();
+    font.setPointSize(14);
+    const auto dateFits = [](QTableWidget* table, int column) {
+        QStyleOptionViewItem option;
+        option.initFrom(table);
+        option.font = table->font();
+        const auto index = table->model()->index(0, column);
+        const int required = table->itemDelegate()->sizeHint(option, index).width();
+        QVERIFY2(table->columnWidth(column) >= required,
+                 qPrintable(QString("Date column is %1 pixels wide but needs %2").arg(table->columnWidth(column)).arg(required)));
+    };
+
+    for (int i = 0; i < timestamps.size(); ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.timestamp = timestamps[i];
+        tx.amount = 100;
+        tx.incoming = true;
+        tx.category = "receive";
+        tx.confirmations = 1;
+        wallet->GetDDWallet()->AddMockTransaction(tx);
+    }
+    DigiDollarTransactionsWidget history;
+    history.setStyleSheet(css);
+    history.setFont(font);
+    history.setWalletModel(mini_gui.walletModel.get());
+    history.setClientModel(mini_gui.clientModel.get());
+    history.show();
+    history.updateView();
+    auto* history_table = history.findChild<QTableWidget*>();
+    QVERIFY(history_table);
+    QCOMPARE(history_table->rowCount(), 3);
+    QCoreApplication::processEvents();
+    dateFits(history_table, 0);
+    for (int row = 0; row < 3; ++row) {
+        const auto* date = history_table->item(row, 0);
+        QCOMPARE(date->text(), GUIUtil::dateTimeStr(date->data(Qt::UserRole).toLongLong()));
+    }
+
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(mini_gui.walletModel.get());
+    overview.setClientModel(mini_gui.clientModel.get());
+    overview.show();
+    overview.updateView();
+    auto* recent = overview.findChild<QListWidget*>("transactionsList");
+    QVERIFY(recent);
+    QCOMPARE(recent->count(), 3);
+    for (int row = 0; row < 3; ++row) {
+        const auto labels = recent->itemWidget(recent->item(row))->findChildren<QLabel*>();
+        QCOMPARE(labels.at(4)->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamps[2 - row]).date(), QLocale::ShortFormat));
+    }
+
+    const QString address = mini_gui.walletModel->getNewDigiDollarAddress("date-test");
+    QVERIFY(!address.isEmpty());
+    for (int i = 0; i < timestamps.size(); ++i) {
+        RecentRequestEntry entry;
+        entry.id = i + 1;
+        entry.date = QDateTime::fromSecsSinceEpoch(timestamps[i]);
+        entry.recipient.address = address;
+        entry.recipient.label = QString::number(timestamps[i]);
+        entry.recipient.amount = 100;
+        DataStream stream{};
+        stream << entry;
+        QVERIFY(mini_gui.walletModel->wallet().setAddressReceiveRequest(
+            DecodeDigiDollarAddress(address.toStdString()), ToString(entry.id), stream.str()));
+    }
+    DigiDollarReceiveWidget receive;
+    receive.setWalletModel(mini_gui.walletModel.get());
+    receive.updateRecentRequests();
+    auto* requests = receive.findChild<QTableWidget*>("requestsTable");
+    QVERIFY(requests);
+    QCOMPARE(requests->rowCount(), 3);
+    for (const auto order : {Qt::AscendingOrder, Qt::DescendingOrder}) {
+        requests->sortItems(0, order);
+        receive.updateRecentRequests();
+        for (int row = 0; row < 3; ++row) {
+            const qint64 timestamp = timestamps[order == Qt::AscendingOrder ? row : 2 - row];
+            QCOMPARE(requests->item(row, 0)->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamp).date(), QLocale::ShortFormat));
+            QCOMPARE(requests->item(row, 1)->text(), QString::number(timestamp));
+            QCOMPARE(requests->item(row, 3)->data(Qt::UserRole + 1).toLongLong(), qint64(order == Qt::AscendingOrder ? row + 1 : 3 - row));
+        }
+    }
+
+    DigiDollarPositionsWidget vaults;
+    vaults.setStyleSheet(css);
+    vaults.setFont(font);
+    for (int i = 0; i < timestamps.size(); ++i) {
+        DigiDollarPosition position{};
+        position.positionId = QString::number(i);
+        position.mintTime = timestamps[i];
+        position.lockTier = 1;
+        position.health = 300;
+        position.blocksRemaining = 40;
+        vaults.m_positions.append(position);
+    }
+    vaults.populatePositionsTable();
+    vaults.show();
+    QCoreApplication::processEvents();
+    auto* positions = vaults.findChild<QTableWidget*>("positionsTable");
+    QVERIFY(positions);
+    dateFits(positions, DigiDollarPositionsWidget::COL_LOCK_DATE);
+    for (const auto order : {Qt::AscendingOrder, Qt::DescendingOrder}) {
+        positions->sortItems(DigiDollarPositionsWidget::COL_LOCK_DATE, order);
+        for (int row = 0; row < 3; ++row) {
+            const qint64 timestamp = timestamps[order == Qt::AscendingOrder ? row : 2 - row];
+            const auto* date = positions->item(row, DigiDollarPositionsWidget::COL_LOCK_DATE);
+            QCOMPARE(date->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamp).date(), QLocale::ShortFormat));
+            QVERIFY(date->toolTip().contains(GUIUtil::dateTimeStr(timestamp)));
+        }
     }
 }
 

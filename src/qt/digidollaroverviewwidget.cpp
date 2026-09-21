@@ -1005,7 +1005,7 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
 
         // Date/time
         QDateTime dateTime = QDateTime::fromSecsSinceEpoch(tx.timestamp);
-        QLabel* dateLabel = new QLabel(dateTime.toString("MMM dd, yyyy"));
+        QLabel* dateLabel = new QLabel(QLocale::system().toString(dateTime.date(), QLocale::ShortFormat));
         dateLabel->setObjectName("recentTxDateLabel");
         dateLabel->setAlignment(Qt::AlignRight);
         layout->addWidget(dateLabel);
