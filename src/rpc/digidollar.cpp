@@ -2856,10 +2856,13 @@ RPCHelpMan redeemdigidollar()
 
             // Check if redeemable
             int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
-            if (foundPosition.unlock_height > currentHeight) {
+            const int tipHeight = pwallet->GetLastBlockHeight();
+            // nLockTime names the last invalid block, so the tip must reach
+            // the unlock height before this redemption can enter the mempool.
+            if (foundPosition.unlock_height > tipHeight) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                     strprintf("Position locked until block %d (current: %d, remaining: %d blocks)",
-                              foundPosition.unlock_height, currentHeight, foundPosition.unlock_height - currentHeight));
+                              foundPosition.unlock_height, tipHeight, foundPosition.unlock_height - tipHeight));
             }
 
             // EXACT-AMOUNT REDEMPTION ENFORCEMENT: Must redeem full vault amount
@@ -4571,7 +4574,7 @@ RPCHelpMan getredemptioninfo()
                     strprintf("Position %s not found in wallet", positionIdStr));
             }
 
-            int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
+            int currentHeight = pwallet->GetLastBlockHeight();
             int blocksRemaining = std::max(0, static_cast<int>(foundPosition.unlock_height - currentHeight));
             const int confirmations = dd_wallet->GetDDTransactionConfirmations(positionId);
             const bool walletPrivateKeysDisabled = pwallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS);
