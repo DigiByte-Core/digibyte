@@ -58,6 +58,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <typeinfo>
@@ -638,6 +639,8 @@ private:
     bool CheckHeadersPoW(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams, Peer& peer);
     /** Calculate an anti-DoS work threshold for headers chains */
     arith_uint256 GetAntiDoSWorkThreshold();
+    /** Screen one block's work before contextual header validation. */
+    bool HasSufficientBlockWork(const CBlockHeader& header, CBlockIndex& previous);
     /** Deal with state tracking and headers sync for peers that send the
      * occasional non-connecting header (this can happen due to BIP 130 headers
      * announcements for blocks interacting with the 2hr (MAX_FUTURE_BLOCK_TIME) rule). */
@@ -2974,6 +2977,17 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
     return std::max(near_chaintip_work, m_chainman.MinimumChainWork());
 }
 
+bool PeerManagerImpl::HasSufficientBlockWork(const CBlockHeader& header, CBlockIndex& previous)
+{
+    if (previous.nHeight == std::numeric_limits<int>::max()) return false;
+    CBlockIndex index(header);
+    index.pprev = &previous;
+    index.nHeight = previous.nHeight + 1;
+    // Geometric work uses only active algorithms. Check the work threshold
+    // before contextual validation looks up a retired algorithm's history.
+    return previous.GetChainWork() + GetBlockProof(index) >= GetAntiDoSWorkThreshold();
+}
+
 /**
  * Special handling for unconnecting headers that might be part of a block
  * announcement.
@@ -4906,21 +4920,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         CBlockHeaderAndShortTxIDs cmpctblock;
         vRecv >> cmpctblock;
 
+        if (!CheckHeadersPoW({cmpctblock.header}, m_chainparams.GetConsensus(), *peer)) return;
+
         bool received_new_header = false;
         const auto blockhash = cmpctblock.header.GetHash();
 
         {
         LOCK(cs_main);
 
-        const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
+        CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
         if (!prev_block) {
             // Doesn't connect (or is genesis), instead of DoSing in AcceptBlockHeader, request deeper headers
             if (!m_chainman.IsInitialBlockDownload()) {
                 MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer);
             }
             return;
-        } else if (const auto work = CalculateHeadersWork({cmpctblock.header}, *prev_block);
-                   !work || prev_block->GetChainWork() + *work < GetAntiDoSWorkThreshold()) {
+        } else if (!HasSufficientBlockWork(cmpctblock.header, *prev_block)) {
             // If we get a low-work header in a compact block, we can ignore it.
             LogPrint(BCLog::NET, "Ignoring low-work compact block from peer %d\n", pfrom.GetId());
             return;
@@ -5215,7 +5230,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         LogPrint(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
-        const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
+        if (!CheckHeadersPoW({pblock->GetBlockHeader()}, m_chainparams.GetConsensus(), *peer)) {
+            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
+            return;
+        }
+
+        CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
 
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,
@@ -5235,16 +5255,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
             RemoveBlockRequest(hash, pfrom.GetId());
+
+            // Ignore unknown, unrequested low-work blocks before contextual
+            // validation. Known headers and requested blocks still proceed.
+            if (prev_block) {
+                min_pow_checked = HasSufficientBlockWork(pblock->GetBlockHeader(), *prev_block);
+                if (!min_pow_checked && !forceProcessing && !m_chainman.m_blockman.LookupBlockIndex(hash)) {
+                    LogPrint(BCLog::NET, "Ignoring low-work block from peer %d\n", pfrom.GetId());
+                    return;
+                }
+            }
+
             // mapBlockSource is only used for punishing peers and setting
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
-
-            // Check work on this block against our anti-dos thresholds.
-            if (prev_block) {
-                const auto work = CalculateHeadersWork({pblock->GetBlockHeader()}, *prev_block);
-                min_pow_checked = work && prev_block->GetChainWork() + *work >= GetAntiDoSWorkThreshold();
-            }
         }
         ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
         return;

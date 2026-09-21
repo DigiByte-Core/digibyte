@@ -38,6 +38,8 @@ HeadersWorkState::HeadersWorkState(const Consensus::Params& params, const CBlock
 
 std::optional<arith_uint256> HeadersWorkState::AddHeader(const CBlockHeader& header)
 {
+    // A zero hash checks the target range without hashing the header.
+    if (!CheckProofOfWork(uint256{}, header.nBits, m_params)) return std::nullopt;
     if (m_recent.back().nHeight == std::numeric_limits<int>::max()) return std::nullopt;
     CBlockIndex next;
     next.nHeight = m_recent.back().nHeight + 1;

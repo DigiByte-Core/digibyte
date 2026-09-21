@@ -298,6 +298,24 @@ BOOST_AUTO_TEST_CASE(full_history_equivalence)
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE(headers_work_regtest_tests, RegtestHeaderWorkSetup)
+BOOST_AUTO_TEST_CASE(invalid_targets_before_geometric_work)
+{
+    const auto& params = Params().GetConsensus();
+    CBlockIndex parent(Params().GenesisBlock());
+    HeadersWorkState work_state(params, parent);
+    CBlockHeader header;
+    header.nVersion = BLOCK_VERSION_DEFAULT;
+    header.nTime = parent.nTime + 1;
+    for (const uint32_t bits : {0U, 0x20800001U, 0x23000001U, 0x2100ffffU}) {
+        header.nBits = bits;
+        BOOST_CHECK(!work_state.AddHeader(header));
+        BOOST_CHECK_EQUAL(work_state.GetHistorySize(), 1U);
+    }
+    // Rejected targets must not change the history used by a valid header.
+    header.nBits = GetNextWorkRequired(&parent, &header, params, header.GetAlgo());
+    BOOST_CHECK(work_state.AddHeader(header));
+    BOOST_CHECK_EQUAL(work_state.GetHistorySize(), 2U);
+}
 BOOST_AUTO_TEST_CASE(full_history_equivalence)
 {
     CheckBoundedHeaderWork(Params().GetConsensus().workComputationChangeTarget);
