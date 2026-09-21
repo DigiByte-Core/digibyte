@@ -177,6 +177,7 @@ BASE_SCRIPTS = [
     'wallet_labels.py --legacy-wallet',
     'wallet_labels.py --descriptors',
     'p2p_compactblocks.py',
+    'p2p_compactblock_logging.py',
     'p2p_compactblocks_blocksonly.py',
     'p2p_block_sync.py --v2transport',
     'wallet_hd.py --legacy-wallet',
