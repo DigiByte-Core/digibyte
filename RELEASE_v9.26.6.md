@@ -1,13 +1,181 @@
 # DigiByte Core v9.26.6 release notes
 
-**Current version: v9.26.6rc2.** This is the second release candidate: a test
-build before the final release. It replaces rc1, which could reject a valid
-DigiDollar mint block during a reindex on a node holding a DigiDollar wallet.
-See "Changes since rc1" below.
+## RC2 — draft for the final candidate
+
+RC2 adds the changes below to RC1. The code change list covers source through
+`943243613ca119668a57ca412825cbe825ecb225`. The final candidate's source,
+binaries and verification record must match before these notes are published
+as completed release notes.
+
+**Full-node and mining operators must upgrade before mainnet block
+24,490,000.** Thaw Day changes the rules used to agree on valid blocks, even
+for operators who do not use DigiDollar. Older software can disagree after
+activation. Installing the update prepares the node; the block height starts
+the scheduled rule changes.
+
+| Network | Thaw Day activation block |
+| --- | --- |
+| Mainnet | **24,490,000** |
+| Testnet26 | **432,100** |
+
+Testnet26 has passed block 432,100 and Thaw Day activated there. RC2 is being
+tested on the already-active testnet. Mainnet block 24,490,000 remains the
+future production activation height. Calendar estimates in the preserved RC1
+notes are historical. The RC2 repair that removes wallet state from DigiDollar
+validation also applies when checking blocks below Thaw Day.
+
+### What the totals count
+
+| Candidate | Corrective fixes | Usability, performance and other improvements | Tests, tools and documentation | Total |
+| --- | ---: | ---: | ---: | ---: |
+| RC1 | 53 | 23 | 7 | **83** |
+| RC2 | 12 | 9 | 3 | **24** |
+| Combined release | 65 | 32 | 10 | **107** |
+
+Each numbered entry counts one distinct change group. Related repairs are
+grouped, and a repair's supporting tests are included with that repair. A
+separate test tool or coverage expansion has its own entry. Version labels,
+wallet version artwork and edits to these notes are not extra improvements.
+These totals are not counts of security vulnerabilities or outside reports.
+The categories describe the main purpose of each group, not its severity.
+
+### Corrective fixes since RC1
+
+1. **Change:** DigiDollar block and mempool validation read amounts and vault identity from chain records independently of the wallet's local script table.\
+   **Why:** Nodes checking the same transaction must reach the same result regardless of their wallet history.
+
+2. **Change:** Header synchronization calculates mining work using the header's actual chain history, including competing branches.\
+   **Why:** Valid headers must receive the work score required by the existing mining rules.
+
+3. **Change:** Incoming block checks verify proof of work before consulting more expensive chain history.\
+   **Why:** Invalid block submissions should be rejected without unnecessary history lookups.
+
+4. **Change:** The DigiByte send form identifies a missing or invalid address, an invalid amount, or an amount too small to send.\
+   **Why:** Clicking Send should explain the field that needs attention.
+
+5. **Change:** DigiDollar transaction dates and amounts, position dates and receive-request dates sort by their underlying values.\
+   **Why:** Formatted text can put dates and money in the wrong order.
+
+6. **Change:** DigiDollar transaction CSV exports write amounts as plain decimal numbers.\
+   **Why:** Spreadsheets and accounting tools need numeric amounts without a currency suffix.
+
+7. **Change:** DigiDollar pages distinguish expired, abandoned and conflicted mint attempts from confirmed vaults and completed redemptions.\
+   **Why:** An unsuccessful mint must not appear as collateral that was redeemed or can still be redeemed.
+
+8. **Change:** The pending DigiDollar balance excludes local mint attempts whose confirmation window has expired.\
+   **Why:** A mint that cannot confirm on the current chain should not inflate the pending balance.
+
+9. **Change:** Redemption commands and estimates use the correct block boundary for the transaction's time lock.\
+   **Why:** A vault must not be reported as redeemable one block before its redemption can enter the mempool.
+
+10. **Change:** Redemption status finds the actual collateral output when an older mint places its outputs in a different order.\
+    **Why:** An unconfirmed redemption must remain pending until it confirms, including when ordinary change precedes the collateral.
+
+11. **Change:** Bounds the recent Dandelion transaction hashes remembered for each peer while keeping exact checks for retained entries.\
+    **Why:** Long-running peer connections need predictable memory use without weakening transaction relay checks.
+
+12. **Change:** Clears Dandelion peer routes before shutdown deletes peer connections.\
+    **Why:** Shutdown must not leave transaction relay referring to a peer that has already been removed.
+
+### Usability and logging improvements since RC1
+
+13. **Change:** DigiDollar dates use the computer's regional format, with columns sized to fit.\
+    **Why:** Dates should follow the user's settings across the wallet.
+
+14. **Change:** The DigiDollar overview and mint pages explain missing prices, unavailable checks and restrictions that pause minting.\
+    **Why:** Users need to know why minting is unavailable and when they can check collateral and fees.
+
+15. **Change:** DigiDollar controls, labels, dropdowns and status text follow the wallet's light and dark themes consistently.\
+    **Why:** Both themes need readable text and recognizable controls.
+
+16. **Change:** Repeated redemption requests distinguish a pending redemption, a redeemed vault and another inactive position.\
+    **Why:** Users need the position's actual state before deciding whether to retry.
+
+17. **Change:** `estimatecollateral` includes mint restrictions and their reason alongside its collateral figures.\
+    **Why:** A collateral estimate alone does not mean a mint can currently proceed.
+
+18. **Change:** DigiDollar commands distinguish an unavailable next-block oracle quote from unavailable health state.\
+    **Why:** The error should identify which information is missing.
+
+19. **Change:** `senddigidollar` help explains that the sending wallet needs spendable DGB for the transaction fee.\
+    **Why:** A DigiDollar balance cannot pay a DGB network fee.
+
+20. **Change:** Repeated wallet reconciliation messages during synchronization require `-debug=digidollar`.\
+    **Why:** Routine progress should not fill the normal log once per block.
+
+21. **Change:** Routine compact-block header messages follow the network debug setting.\
+    **Why:** Normal logs should stay quiet when network debugging is disabled.
+
+### Tests, tools and documentation since RC1
+
+22. **Change:** Adds a repeatable, isolated Thaw Day rehearsal with build records and checks before, across and after activation.\
+    **Why:** The same wallet, oracle and chain scenarios need to be repeatable on each candidate.
+
+23. **Change:** Expands tests for DigiDollar transfer recovery after a mint is disconnected and later confirms again, including after restart.\
+    **Why:** Tests must cover normal wallet rebroadcast and balance recovery as well as rejection while the mint is unconfirmed.
+
+24. **Change:** Corrects the private security-reporting instructions.\
+    **Why:** Sensitive reports need to reach the project's designated private channels.
+
+### Verification and known limits
+
+The final combined source passed 3,755 unit test cases, the rendered Qt test
+suite, all 421 scheduled extended functional-test entries and all 256 fuzz
+targets under AddressSanitizer and UndefinedBehaviorSanitizer. The functional
+runner reported 17 expected skips for unsupported Signet, unavailable old
+release binaries, disabled USDT tracepoints and special test IP addresses.
+Focused shutdown tests also reproduced the stale-route failure before the fix
+and passed under AddressSanitizer after the fix.
+
+The isolated Thaw Day rehearsal built from commit
+`8ae095ae01b3bbdac13723db346c3970343ec544` also passed. It repeated DigiDollar
+minting, sending, redemption and accounting before and after the exact activation
+height. It also passed restart, backup restore, boundary rollback, competing-branch
+reorg, full private reindex and empty-directory fresh-sync checks.
+
+These results verify the source build used for testing. They do not certify the
+final RC2 release binaries. The release build record must identify the final tag,
+binary hashes, build options, completed checks, skips and unresolved findings.
+An isolated rehearsal does not establish public-network agreement.
+
+Large DigiByte sends from wallets with many small coins can still require
+consolidation. RC2 does not add a guided or automatic consolidation flow for
+that reported case. The abandoned-transaction icon has not been replaced.
+These notes do not claim that every reported synchronization problem or
+external wallet, pool or service issue has been resolved.
+
+The scheduled Thaw Day rules, mining difficulty, block rewards and the $1
+minimum DigiDollar output are unchanged from RC1. New minting status messages
+report current conditions; a successful mint does not make a later warning
+incorrect if those conditions change.
+
+Before installing a published build, back up wallets and configuration, verify
+the published signed checksums, and stop the old program normally. Keep the
+required DigiDollar block history. Use the release's reviewed recovery
+instructions if an older candidate stopped on a rejected block.
+
+Report ordinary problems with the version, network, block height, expected
+result and relevant logs with private information removed. Use
+[the private security-reporting instructions](SECURITY.md) for sensitive
+reports.
+
+## RC1 — preserved release notes
+
+The following is the unchanged RC1 note from tag `v9.26.6rc1`, commit
+`390f71d5cb74bf519dc0510cc5d8e9c70fefa3cc`. Its version, counts, dates,
+measurements and test results refer to RC1. The RC2 section above gives the
+current draft's additions, combined count and verification limits.
+
+---
+
+# DigiByte Core v9.26.6 release notes
+
+**Current version: v9.26.6rc1.** This is the first release candidate: a test
+build before the final release.
 
 ## Summary
 
-v9.26.6 includes **85 fixes and improvements**. It improves wallet recovery,
+v9.26.6 includes **83 fixes and improvements**. It improves wallet recovery,
 DigiDollar (DD) sending and redemption, wallet displays, node stability, price
 services, memory use and startup. The count also includes tests and documentation.
 
@@ -25,32 +193,6 @@ Older software may follow a different chain after the change.
 We are testing Thaw Day on **testnet first**. The final mainnet release follows
 the remaining tests and release review.
 
-## Changes since rc1
-
-**Block validation no longer reads the wallet's script table.** The node keeps
-an in-memory table that the wallet fills in with the DigiDollar amount behind
-each output script. It is keyed by the script alone, so an owner address that
-is used again keeps only the last amount. In rc1, block validation below Thaw
-Day read that table before the chain data. A mainnet rc1 node whose wallet had
-minted $100 and later held $98 of change at the same address rejected the
-first DigiDollar mint block, 23,869,549, while reindexing, then stopped
-following the chain. Nodes without such a wallet accepted the block. Validation
-now reads amounts from the chain only. The Thaw Day heights and rules are
-unchanged.
-
-**If an rc1 node is stuck**, install rc2, start it, and run:
-
-```bash
-digibyte-cli reconsiderblock 00000000000000052cc3d211b3d16196a3585d46474202dfa42e9f770d02e9bd
-```
-
-The node validates the remaining blocks and catches up. A fresh `-reindex`
-on rc2 also works. Do not start `-reindex` on an rc1 node that holds a
-DigiDollar wallet.
-
-**A wallet log line no longer repeats once per block** during a reindex or a
-first sync. It now needs `-debug=digidollar`.
-
 ## What you need to do
 
 1. **Read the upgrade notes below.** Check scripts that send DD amounts and
@@ -59,7 +201,7 @@ first sync. It now needs `-debug=digidollar`.
    and oracle keys too.
 3. **Verify the build, then replace the old program.** Check the release's
    signed checksums. Stop the old node normally and wait for it to exit first.
-   RC2 is for the test exercise; use the approved final build for the mainnet rollout.
+   RC1 is for the test exercise; use the approved final build for the mainnet rollout.
 4. **Let startup finish.** The node may need to check or rebuild accounting.
    Do not mistake a long scan for a stopped program.
 5. **Check the running node.** Confirm its version, network, sync progress and
@@ -193,7 +335,7 @@ Feather's RAM improvements work on installation. On Unix, the new database
 file allowance may expose a low system open-file limit. Check that limit if
 startup reports it or reduces connections.
 
-## All 85 fixes and improvements
+## All 83 fixes and improvements
 
 Each entry states the change and the reason. Related repairs are grouped.
 These are implemented changes, not a claim that every outside bug report is fixed.
@@ -469,31 +611,18 @@ The block index is the node's directory of known blocks. A header is a block's s
 83. **Change:** Adds setup steps for nodes sharing a router and for block-filter services used by lightweight wallets.\
     **Why:** Correct ports and service settings help those setups work; this does not claim a mobile-wallet code fix.
 
-### Reindex and block validation (rc2)
-
-84. **Change:** Block and mempool validation read DigiDollar amounts from the chain only, never from the wallet's in-memory script table.\
-    **Why:** A node's answer about a block must not depend on what its own wallet has done since.
-
-85. **Change:** The wallet's "ReconcilePositionStates skipped" message moves into the DigiDollar debug category.\
-    **Why:** It was written once per block during a reindex and filled the log.
-
 ## Tests completed and work still ahead
 
-These are the recorded results for the rc2 source commit
-`653484decd` (the block validation repair) with the rc2 version bump on top:
+These are the recorded results for source commit
+`d2097819f260f4d82409643fe9f7263cdd7e3eaa`:
 
 | Check | Result |
 | --- | --- |
-| C++ unit tests | 3,742 passed, none failed |
-| Extended functional tests | 396 passed, 17 skipped, none failed |
+| C++ unit tests | 3,739 passed |
+| Extended functional tests | 394 passed, 17 skipped, none failed |
 | Desktop wallet tests | Passed |
-| Mainnet node with the affected wallet | Accepted block 23,869,549 after `reconsiderblock` and caught up to the tip, 24,222,044, with 0 rejected blocks |
-| Thaw Day testnet lab exercise | Passed: isolated run `rc2-rehearsal-09` crossed Thaw Day at lab height 5,000, ran every DigiDollar feature before and after it, and finished at height 5,658 with 143 checks and 0 failures |
-
-The rc1 results for commit `d2097819f260f4d82409643fe9f7263cdd7e3eaa` were
-3,739 unit tests passed, 394 functional tests passed with 17 skipped, desktop
-wallet tests passed, and fuzz tests over 255 public targets with 28 longer
-runs. The fuzz targets were not rerun for rc2.
+| Fuzz tests | Saved inputs tested across 255 public targets; 28 longer runs passed |
+| Extra script and fee-estimator fuzz tests | Passed |
 
 Unit tests check pieces of the program. Functional tests run nodes and check
 how they behave. Fuzz tests try many inputs to find unexpected behavior.
@@ -503,7 +632,7 @@ One RC1 desktop run settled at about **3.65–3.67 GiB of RAM** and started in
 **108 seconds**. These figures describe that workload. They do not predict
 startup on every computer or the cost of the future Thaw Day accounting scan.
 
-Before the final mainnet release, complete the full mainnet history reindex,
+Before the final mainnet release, complete the full mainnet history replay,
 public testnet activation and observation, remaining platform checks and final
 release review.
 
