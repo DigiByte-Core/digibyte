@@ -6050,3 +6050,85 @@ void DigiDollarWidgetTests::sendWidgetSaysWhyAnAmountIsRefused()
     QVERIFY(sendButton != nullptr);
     QVERIFY2(!sendButton->isEnabled(), "an amount the form refuses must leave the Send button off");
 }
+
+void DigiDollarWidgetTests::overviewExplainsMintAvailability()
+{
+    TestChain100Setup test(ChainType::REGTEST,
+        {"-digidollaractivationheight=100", "-ddthawdayheight=109", "-digidollarstatsindex=0"});
+    struct ResetOracleState {
+        std::chrono::seconds mock_time{GetMockTime()};
+        ~ResetOracleState()
+        {
+            SetMockTime(mock_time);
+            OracleBundleManager::GetInstance().Clear();
+            MockOracleManager::GetInstance().Reset();
+            DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+            DigiDollar::SystemHealthMonitor::ResetMetrics();
+        }
+    } reset;
+    OracleBundleManager::GetInstance().Clear();
+    MockOracleManager::GetInstance().Reset();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    DigiDollar::SystemHealthMonitor::ResetMetrics();
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(gui.walletModel.get());
+    overview.setClientModel(gui.clientModel.get());
+    overview.show();
+    overview.updateSystemHealth();
+    auto* status = overview.findChild<QLabel*>("mintStatusLabel");
+    QVERIFY2(status, "Overview must show whether new mints are available");
+    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+
+    DigiDollar::Volatility::VolatilityMonitor::TriggerFreeze(false, 106);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("paused"), qPrintable(status->text()));
+    QVERIFY(status->text().contains("price protection"));
+
+    // The next block reaches Thaw Day. The old freeze no longer applies.
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+
+    SetMockTime(GetTime() + ORACLE_MAX_AGE_SECONDS + 60);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("oracle price"), qPrintable(status->text()));
+    QVERIFY(status->text().contains("paused"));
+
+    DigiDollarMintWidget mint;
+    mint.setWalletModel(gui.walletModel.get());
+    mint.setClientModel(gui.clientModel.get());
+    mint.show();
+    mint.updateOraclePrice();
+    auto* network_status = mint.findChild<QLabel*>("mintVolatilityStatus");
+    QVERIFY(network_status);
+    QVERIFY2(network_status->text().contains("oracle price"), qPrintable(network_status->text()));
+    auto* amount = mint.findChild<QLineEdit*>("amountEdit");
+    auto* warning = mint.findChild<QLabel*>("amountWarningLabel");
+    QVERIFY(amount);
+    QVERIFY(warning);
+    amount->setText("0");
+    QVERIFY(warning->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(&mint, "onClearClicked", Qt::DirectConnection));
+    QVERIFY(amount->text().isEmpty());
+    QVERIFY(!warning->isVisible());
+    QVERIFY(network_status->isVisible());
+    QVERIFY(network_status->text().contains("oracle price"));
+    auto* mint_button = mint.findChild<QPushButton*>("mintButton");
+    QVERIFY(mint_button);
+    QVERIFY(!mint_button->isEnabled());
+
+    overview.setClientModel(nullptr);
+    overview.updateSystemHealth();
+    QVERIFY(status->text().contains("unknown"));
+}

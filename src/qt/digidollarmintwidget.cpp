@@ -512,12 +512,13 @@ void DigiDollarMintWidget::updateOraclePrice()
             const bool healthReady = health.find_value("ready").get_bool();
             const bool emergency = healthReady && health.find_value("health_percentage").getInt<int>() < 100;
             m_mintVolatilityAllowed = ready && quoted && !restricted && healthReady && !emergency;
-            const QString reason = !quoted ? tr("No valid oracle quote; minting is paused.") :
-                (!ready ? tr("Required price history is unavailable; restore or download the missing blocks.") :
-                (restricted ? tr("Minting is paused: the quote differs by at least 20% from the ancestor reference.") :
-                 tr("Quote is within the mint volatility limit. Health, collateral and fees must also pass.")));
-            m_mintStatusLabel->setText(!healthReady ? tr("Canonical health is unavailable; wait for synchronization and retry.") :
-                (emergency ? tr("Minting is paused by emergency health calculated from open vaults.") : reason));
+            const QString reason = !quoted ? tr("Minting is paused while waiting for a valid oracle price.") :
+                (!ready ? tr("Minting is paused because required price history is unavailable.") :
+                (!healthReady ? tr("Minting is paused because the network health check is unavailable.") :
+                (emergency ? tr("Minting is paused because the network has too little collateral.") :
+                (restricted ? tr("Minting is paused: the price differs by at least 20% from recent block prices.") :
+                 tr("Minting is available. Enter an amount to check collateral and fees.")))));
+            m_mintStatusLabel->setText(reason);
             m_mintStatusLabel->setToolTip(tr("Candidate height: %1\nRule version: %2\nReference: %3 micro-USD\nSamples: %4\nWindow: %5 through %6\nDeviation: %7 basis points\nConfirmation conditions may change.")
                 .arg(status.find_value("candidate_height").getInt<int>())
                 .arg(status.find_value("rule_version").getInt<int>())

@@ -415,6 +415,11 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_systemHealthBar->setToolTip(tr("Visual indicator of overall blockchain health"));
     frameVLayout->addWidget(m_systemHealthBar);
 
+    m_mintStatusLabel = new QLabel(tr("Checking mint availability..."), this);
+    m_mintStatusLabel->setObjectName("mintStatusLabel");
+    m_mintStatusLabel->setWordWrap(true);
+    frameVLayout->addWidget(m_mintStatusLabel);
+
     // REMOVED: m_mainLayout->addWidget(m_systemHealthFrame);
     // Frame is now added to horizontal layout in setupUI()
 }
@@ -722,6 +727,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 {
     // Skip updates during Initial Block Download - system health only matters when synced
     if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+        m_mintStatusLabel->setText(tr("Minting is unavailable while the wallet synchronizes."));
         return;
     }
 
@@ -729,6 +735,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
     // This ensures Bob and Alice both see identical stats across the chain.
 
     if (!m_clientModel) {
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Connect to the network and try again."));
         m_systemHealthValue->setText("No Connection");
         m_networkTotalDDValue->setText("N/A");
         m_networkTotalCollateralValue->setText("N/A");
@@ -742,6 +749,29 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         // Execute RPC call to get blockchain-wide system health
         UniValue params(UniValue::VARR); // No parameters needed
         UniValue result = m_clientModel->node().executeRpc("getdigidollarstats", params, "");
+
+        // Use the node's next-block decision, including the activation rules.
+        // A missing quote also prevents a health check; name the missing price first.
+        const auto& quote = result.find_value("mint_volatility").find_value("quote_available");
+        const std::string reason = result.find_value("minting_restricted_reason").get_str();
+        if ((quote.isBool() && !quote.get_bool()) || reason == "oracle_unavailable") {
+            m_mintStatusLabel->setText(tr("Minting is paused while waiting for a valid oracle price."));
+        } else if (reason == "legacy_volatility_freeze" || reason == "volatility_pause") {
+            m_mintStatusLabel->setText(tr("Minting is paused by price protection. Check Mint $DD for details."));
+        } else if (reason == "volatility_state_not_ready") {
+            m_mintStatusLabel->setText(tr("Minting is paused because required price history is unavailable."));
+        } else if (reason == "health_state_not_ready") {
+            m_mintStatusLabel->setText(tr("Minting is paused because the network health check is unavailable."));
+        } else if (reason == "err_active") {
+            m_mintStatusLabel->setText(tr("Minting is paused because the network has too little collateral."));
+        } else if (reason == "none" && m_walletModel) {
+            const QString walletError = m_walletModel->getDigiDollarMintWalletError();
+            m_mintStatusLabel->setText(walletError.isEmpty()
+                ? tr("Minting is available. Check collateral and fees on Mint $DD.")
+                : tr("Minting is unavailable: %1").arg(walletError));
+        } else {
+            m_mintStatusLabel->setText(tr("Mint availability is unknown. Check Mint $DD before continuing."));
+        }
 
         // Extract values from RPC result
         int healthPercentage = result.find_value("health_percentage").getInt<int>();
@@ -813,6 +843,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 
     } catch (const UniValue& e) {
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.write());
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         m_systemHealthValue->setText("Loading...");
         m_networkTotalDDValue->setText("Loading...");
         m_networkTotalCollateralValue->setText("Loading...");
@@ -820,6 +851,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         m_errLevelValue->setText("Loading...");
         m_systemHealthBar->setValue(0);
     } catch (const std::exception& e) {
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         m_systemHealthValue->setText("Error");
         m_networkTotalDDValue->setText("Error");
         m_networkTotalCollateralValue->setText("Error");
