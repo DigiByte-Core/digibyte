@@ -38,6 +38,18 @@
 
 namespace {
 
+// Keep the displayed date or amount separate from the value used for sorting.
+class NumericTransactionItem : public QTableWidgetItem
+{
+public:
+    using QTableWidgetItem::QTableWidgetItem;
+
+    bool operator<(const QTableWidgetItem& other) const override
+    {
+        return data(Qt::UserRole).toLongLong() < other.data(Qt::UserRole).toLongLong();
+    }
+};
+
 QString DigiDollarTransactionDetailsDialogStyleSheet(bool dark_theme)
 {
     if (dark_theme) {
@@ -505,7 +517,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Date
             uint64_t timestamp = tx.find_value("time").getInt<uint64_t>();
-            QTableWidgetItem* dateItem = new QTableWidgetItem(formatTimestamp(timestamp));
+            QTableWidgetItem* dateItem = new NumericTransactionItem(formatTimestamp(timestamp));
             dateItem->setData(Qt::UserRole, QVariant::fromValue(timestamp));
             m_table->setItem(row, Column::Date, dateItem);
 
@@ -536,7 +548,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Amount
             CAmount amount = tx.find_value("amount").getInt<int64_t>();
-            QTableWidgetItem* amountItem = new QTableWidgetItem(formatDDAmount(amount));
+            QTableWidgetItem* amountItem = new NumericTransactionItem(formatDDAmount(amount));
             amountItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             amountItem->setData(Qt::UserRole, QVariant::fromValue(amount));
 
