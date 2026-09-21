@@ -105,7 +105,10 @@ namespace {
 #ifdef ENABLE_WALLET
     bool HasPendingDigiDollarRedeem(const wallet::CWallet& wallet, const uint256& position_id)
     {
-        const COutPoint collateral_outpoint(position_id, 0);
+        const auto* dd_wallet = wallet.GetDDWallet();
+        COutPoint collateral_outpoint;
+        // Legacy mints can place ordinary change before the collateral.
+        if (!dd_wallet || !dd_wallet->GetMintCollateralOutpoint(position_id, collateral_outpoint)) return false;
         for (const auto& wallet_entry : wallet.mapWallet) {
             const wallet::CWalletTx& wtx = wallet_entry.second;
             if (!wtx.tx || ::GetDigiDollarTxType(*wtx.tx) != ::DD_TX_REDEEM) continue;
