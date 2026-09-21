@@ -62,6 +62,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGuiApplication>
@@ -82,6 +83,7 @@
 #include <QTreeWidget>
 #include <QTextDocumentFragment>
 #include <QTextEdit>
+#include <QTemporaryDir>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QSignalSpy>
@@ -2626,6 +2628,21 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+    const CAmount amounts[]{12345, 105, 500};
+    for (int i = 0; i < 3; ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.amount = amounts[i];
+        tx.incoming = i != 1;
+        tx.category = tx.incoming ? "receive" : "send";
+        tx.timestamp = GetTime() + i;
+        tx.confirmations = 1;
+        tx.comment = "note, \"quoted\"\nsecond line";
+        dd_wallet->AddMockTransaction(tx);
+    }
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
@@ -2633,6 +2650,12 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     DigiDollarTransactionsWidget transactionsWidget;
     transactionsWidget.setWalletModel(mini_gui.walletModel.get());
     transactionsWidget.setClientModel(mini_gui.clientModel.get());
+    transactionsWidget.show();
+    transactionsWidget.updateView();
+
+    QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->rowCount(), 3);
 
     QPushButton* exportButton = transactionsWidget.findChild<QPushButton*>("m_exportButton");
     if (!exportButton) {
@@ -2646,6 +2669,60 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     }
     QVERIFY(exportButton != nullptr);
     QVERIFY(exportButton->isEnabled());
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath("transactions.csv");
+    const bool native_dialogs_disabled = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    bool timed_out = false;
+    bool file_selected = false;
+    QTimer close_dialogs;
+    connect(&close_dialogs, &QTimer::timeout, [&] {
+        for (QWidget* window : QApplication::topLevelWidgets()) {
+            if (!window->isVisible()) continue;
+            if (auto* dialog = qobject_cast<QFileDialog*>(window)) {
+                if (!file_selected) {
+                    dialog->setDirectory(directory.path());
+                    // Enter the name as a user would. selectFile() may ignore
+                    // a visible dialog when its filename field has focus.
+                    auto* filename = dialog->findChild<QLineEdit*>("fileNameEdit");
+                    if (filename) filename->setText(path);
+                    file_selected = true;
+                } else {
+                    QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+                }
+            } else if (auto* message = qobject_cast<QMessageBox*>(window)) {
+                QMetaObject::invokeMethod(message, "accept", Qt::QueuedConnection);
+            }
+        }
+    });
+    QTimer::singleShot(10000, &close_dialogs, [&] {
+        timed_out = true;
+        close_dialogs.stop();
+        for (QWidget* window : QApplication::topLevelWidgets()) {
+            if (qobject_cast<QFileDialog*>(window) || qobject_cast<QMessageBox*>(window)) {
+                QMetaObject::invokeMethod(window, "reject", Qt::QueuedConnection);
+            }
+        }
+    });
+    close_dialogs.start(10);
+    exportButton->click();
+    close_dialogs.stop();
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, native_dialogs_disabled);
+    QVERIFY2(!timed_out, "The export dialogs did not finish");
+
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QString csv = QString::fromUtf8(file.readAll());
+    QVERIFY2(!csv.contains("$DD"), qPrintable(csv));
+    QVERIFY(csv.contains("\"123.45\""));
+    QVERIFY(csv.contains("\"-1.05\""));
+    QVERIFY(csv.contains("\"5.00\""));
+    QVERIFY(csv.contains("\"note, \"\"quoted\"\"\nsecond line\""));
+    for (int i = 0; i < 3; ++i) {
+        QVERIFY(csv.contains(QString::fromStdString(std::string(64, '1' + i))));
+    }
 }
 
 void DigiDollarWidgetTests::addressBookTests()

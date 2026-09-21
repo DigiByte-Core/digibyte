@@ -9,6 +9,7 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/guiutil.h>
 #include <wallet/digidollarwallet.h>
+#include <digidollar/amount.h>
 #include <logging.h>
 #include <univalue.h>
 
@@ -860,6 +861,8 @@ void DigiDollarTransactionsWidget::exportClicked()
             if (item) {
                 if (col == Column::TxId) {
                     value = item->data(Qt::UserRole).toString();
+                } else if (col == Column::Amount) {
+                    value = QString::fromStdString(DigiDollar::FormatDDAmountDollars(item->data(Qt::UserRole).toLongLong()));
                 } else {
                     value = item->text();
                 }
