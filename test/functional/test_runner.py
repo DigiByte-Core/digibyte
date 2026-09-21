@@ -330,6 +330,7 @@ BASE_SCRIPTS = [
     'digidollar_rpc_protection.py',
     'digidollar_rpc_redemption.py',
     'digidollar_redemption_unlock_boundary.py --descriptors',
+    'digidollar_redemption_closed_position.py --descriptors',
     'digidollar_lock_tier_canonical.py',
     'digidollar_collateral_spend_guards.py',
     'digidollar_mempool_miner_parity.py',

@@ -2789,6 +2789,16 @@ RPCHelpMan redeemdigidollar()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Position not found");
             }
 
+            if (!foundPosition.is_active) {
+                if (HasPendingDigiDollarRedeem(*pwallet, positionId)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Position already has a pending redemption");
+                }
+                if (dd_wallet->GetDDTransactionConfirmations(positionId) > 0) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Position already redeemed");
+                }
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Position is not active");
+            }
+
             if (!dd_wallet->RefreshPositionMetadataFromMintTx(positionId)) {
                 throw JSONRPCError(RPC_WALLET_ERROR,
                     "Cannot verify DigiDollar mint metadata for this position. "
