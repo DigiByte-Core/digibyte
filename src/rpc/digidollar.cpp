@@ -2262,6 +2262,7 @@ RPCHelpMan senddigidollar()
     return RPCHelpMan{"senddigidollar",
                 "\nSend DigiDollar to another DigiDollar address.\n"
                 "Creates a transaction that transfers DigiDollar from your wallet to the specified address.\n"
+                "The sending wallet also needs spendable DGB to pay the transaction fee; DigiDollar cannot pay that fee.\n"
                 "The amount is a whole number of cents unless amount_unit says otherwise: 10000 is $100.00.\n"
                 "With amount_unit=\"dollars\" the amount is dollars with at most two decimals: 100.00 is $100.00.\n"
                 "An amount written with a decimal point and no amount_unit is refused, because 10000.00 could mean\n"
