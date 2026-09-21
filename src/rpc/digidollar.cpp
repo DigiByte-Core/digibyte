@@ -4329,6 +4329,9 @@ static RPCHelpMan estimatecollateral()
                     RPCResult::Type::OBJ, "", "",
                     {
                         NextBlockHealthResult(),
+                        MintVolatilityResult("mint_volatility"),
+                        {RPCResult::Type::BOOL, "minting_restricted", "Whether oracle, health, or volatility rules restrict the estimated mint; wallet and fee requirements also apply"},
+                        {RPCResult::Type::STR, "minting_restricted_reason", "Mint restriction reason, or none"},
                         {RPCResult::Type::STR_AMOUNT, "required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "minimum_required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "wallet_collateral_dgb", "DGB collateral the wallet mint builder will lock, including safety margin"},
@@ -4473,6 +4476,12 @@ static RPCHelpMan estimatecollateral()
             result.pushKV("system_health", systemHealth);
             result.pushKV("health_tier", healthTier.status);
             result.pushKV("next_block_health", NextBlockHealthJSON(EnsureAnyChainman(request.context), systemHealth, -1, oraclePriceMicroUSD, &candidate));
+            const UniValue mintVolatility = GetMintVolatilityRPC(EnsureAnyChainman(request.context), oraclePriceMicroUSD, &candidate);
+            const std::string mintingRestrictedReason = systemHealth < 100 ? "err_active" :
+                mintVolatility.find_value("rejection_reason").get_str();
+            result.pushKV("mint_volatility", mintVolatility);
+            result.pushKV("minting_restricted", mintingRestrictedReason != "none");
+            result.pushKV("minting_restricted_reason", mintingRestrictedReason);
             // Fix: ddAmount is in cents, so USD value = ddAmount / 100.0
             // Previously this path treated cents as satoshis, producing a
             // value ~100,000x too small (e.g., $0.001 instead of $100).
