@@ -6132,3 +6132,104 @@ void DigiDollarWidgetTests::overviewExplainsMintAvailability()
     overview.updateSystemHealth();
     QVERIFY(status->text().contains("unknown"));
 }
+
+void DigiDollarWidgetTests::failedMintsKeepTheirWalletStatus()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    auto* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet);
+    const auto tip_hash = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    std::map<QString, QString> expected;
+    uint256 expired_id;
+    const DigiDollarWallet::MintAttemptState states[]{DigiDollarWallet::MintAttemptState::Expired,
+        DigiDollarWallet::MintAttemptState::Abandoned, DigiDollarWallet::MintAttemptState::Conflicted,
+        DigiDollarWallet::MintAttemptState::Confirmed, DigiDollarWallet::MintAttemptState::Local};
+    for (int i = 0; i < 5; ++i) {
+        CMutableTransaction tx;
+        tx.SetDigiDollarType(DD_TX_MINT);
+        tx.vin.emplace_back(COutPoint(uint256::ONE, i));
+        tx.vout.emplace_back(COIN, CScript() << OP_TRUE);
+        const auto transaction = MakeTransactionRef(tx);
+        const auto id = transaction->GetHash();
+        {
+            LOCK(wallet->cs_wallet);
+            wallet::TxState state = wallet::TxStateInactive{};
+            if (i == 1) state = wallet::TxStateInactive{true};
+            if (i == 2) state = wallet::TxStateConflicted{tip_hash, 105};
+            if (i == 3) state = wallet::TxStateConfirmed{tip_hash, 105, 1};
+            QVERIFY(wallet->AddToWallet(transaction, state));
+        }
+        WalletCollateralPosition position(id, 100, COIN, 0, i == 0 ? 0 : 10000);
+        position.is_active = false;
+        dd_wallet->AddCollateralPosition(position);
+        QVERIFY(dd_wallet->GetMintAttemptState(id) == states[i]);
+        const QStringList labels{"Expired mint", "Abandoned", "Conflicted", "Redeemed", "Confirming"};
+        expected[QString::fromStdString(id.GetHex())] = labels[i];
+        if (i == 0) expired_id = id;
+    }
+    QVERIFY(dd_wallet->GetMintAttemptState(expired_id) == DigiDollarWallet::MintAttemptState::Expired);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarPositionsWidget vaults;
+    vaults.setWalletModel(gui.walletModel.get());
+    vaults.setClientModel(gui.clientModel.get());
+    vaults.loadPositionsFromWallet();
+    vaults.populatePositionsTable();
+    auto* table = vaults.findChild<QTableWidget*>("positionsTable");
+    QVERIFY(table);
+    QCOMPARE(table->rowCount(), 5);
+    for (int row = 0; row < table->rowCount(); ++row) {
+        const QString id = table->item(row, DigiDollarPositionsWidget::COL_POSITION_ID)->text();
+        QCOMPARE(table->item(row, DigiDollarPositionsWidget::COL_TIME_REMAINING)->text(), expected.at(id));
+        auto* action = qobject_cast<QPushButton*>(table->cellWidget(row, DigiDollarPositionsWidget::COL_ACTIONS));
+        QVERIFY(action);
+        QCOMPARE(action->text(), expected.at(id));
+        QVERIFY(!action->isEnabled());
+        // Check text width with the rendered Qt backend.
+        if (QApplication::platformName() != "minimal") {
+            action->ensurePolished();
+            QVERIFY(action->width() >= action->sizeHint().width());
+        }
+    }
+
+    DigiDollarTransactionsWidget transactions;
+    transactions.setWalletModel(gui.walletModel.get());
+    transactions.setClientModel(gui.clientModel.get());
+    transactions.show();
+    transactions.updateView();
+    auto* history_table = transactions.findChild<QTableWidget*>();
+    QVERIFY(history_table);
+    QCOMPARE(history_table->rowCount(), 5);
+    int expired_row = -1;
+    for (int row = 0; row < history_table->rowCount(); ++row) {
+        if (history_table->item(row, 5)->data(Qt::UserRole).toString() == QString::fromStdString(expired_id.GetHex())) {
+            expired_row = row;
+            break;
+        }
+    }
+    QVERIFY(expired_row >= 0);
+    QCOMPARE(history_table->item(expired_row, 6)->text(), QString("Expired mint"));
+    QFont large_font = history_table->font();
+    large_font.setPointSize(16);
+    history_table->setFont(large_font);
+    QCoreApplication::processEvents();
+    QVERIFY(history_table->columnWidth(6) >= history_table->fontMetrics().horizontalAdvance("Expired mint") + 16);
+
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(gui.walletModel.get());
+    overview.setClientModel(gui.clientModel.get());
+    overview.show();
+    const auto statuses = overview.findChildren<QLabel*>("recentTxStatusLabel");
+    QCOMPARE(statuses.size(), 5);
+    QCOMPARE(std::count_if(statuses.begin(), statuses.end(), [](const QLabel* label) {
+        return label->text() == "Expired mint";
+    }), 1);
+}

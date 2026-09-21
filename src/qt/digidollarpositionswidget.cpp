@@ -520,33 +520,21 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
         // Private-key-disabled/watch-only wallets may observe vaults but cannot unlock them.
         pos.canRedeem = walletCanSign && (pos.blocksRemaining == 0) && wp.is_active;
 
-        // A freshly-created mint can be known to the wallet before the collateral
-        // outpoint is confirmed in the UTXO set. During that window the wallet
-        // reconciliation layer may mark the position inactive because the coin
-        // lookup returns spent/missing, but that is NOT a redeemed vault. Surface
-        // it as confirming until the mint has at least one confirmation.
-        pos.isPendingMint = false;
-        try {
-            interfaces::WalletTxStatus status;
-            interfaces::WalletOrderForm orderForm;
-            bool inMempool = false;
-            int numBlocks = 0;
-            interfaces::WalletTx details = m_walletModel->wallet().getWalletTxDetails(
-                wp.dd_timelock_id, status, orderForm, inMempool, numBlocks);
-            if (details.tx && !status.is_abandoned && !status.is_in_main_chain && status.depth_in_main_chain == 0) {
-                // Wallet-local mints may not be in the mempool yet (for example
-                // when relay is disabled with -blocksonly), but they are still
-                // unconfirmed vaults, not redeemed vaults.
-                pos.isPendingMint = true;
-            }
-        } catch (...) {
-            pos.isPendingMint = false;
-        }
+        // The wallet already distinguishes failed attempts from mints awaiting confirmation.
+        const auto* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
+        const auto state = ddWallet->GetMintAttemptState(wp.dd_timelock_id);
+        using MintState = DigiDollarWallet::MintAttemptState;
+        pos.isPendingMint = state == MintState::Local || state == MintState::InMempool;
+        if (state == MintState::Expired) pos.failedMintStatus = tr("Expired mint");
+        if (state == MintState::Abandoned) pos.failedMintStatus = tr("Abandoned");
+        if (state == MintState::Conflicted) pos.failedMintStatus = tr("Conflicted");
+        const bool failedMint = !pos.failedMintStatus.isEmpty();
+        if (failedMint || pos.isPendingMint) pos.canRedeem = false;
 
-        // A wallet marks the position inactive as soon as a redemption spend is
-        // created. Keep unconfirmed spends visually pending until they confirm.
-        pos.isPendingRedeem = !pos.isPendingMint && !wp.is_active && pendingRedeemPositions.count(wp.dd_timelock_id) > 0;
-        pos.isRedeemed = !pos.isPendingMint && !wp.is_active && !pos.isPendingRedeem;
+        // An unconfirmed redemption remains pending until its spend confirms.
+        pos.isPendingRedeem = !failedMint && !pos.isPendingMint && !wp.is_active &&
+            pendingRedeemPositions.count(wp.dd_timelock_id) > 0;
+        pos.isRedeemed = !failedMint && !pos.isPendingMint && !wp.is_active && !pos.isPendingRedeem;
 
         // Get the mint transaction timestamp from the wallet
         pos.mintTime = 0;  // Default to 0 (will show current time if not found)
@@ -776,7 +764,9 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
 
     // Time Remaining - always show actual time remaining
     QString timeText;
-    if (position.isPendingMint) {
+    if (!position.failedMintStatus.isEmpty()) {
+        timeText = position.failedMintStatus;
+    } else if (position.isPendingMint) {
         timeText = tr("Confirming");
     } else if (position.isPendingRedeem) {
         timeText = tr("Pending");
@@ -793,7 +783,9 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
     timeItem->setTextAlignment(Qt::AlignCenter);
 
     // Apply styling based on status
-    if (position.isPendingMint) {
+    if (!position.failedMintStatus.isEmpty()) {
+        timeItem->setToolTip(tr("This mint has no confirmed vault to redeem."));
+    } else if (position.isPendingMint) {
         QString pendingColor = isDarkTheme ? "#ffb74d" : "#856404";
         QString pendingBg = isDarkTheme ? "#4a3a1f" : "#fff3cd";
         timeItem->setForeground(QBrush(QColor(pendingColor)));
@@ -831,7 +823,15 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
     m_positionsTable->setItem(row, COL_TIME_REMAINING, timeItem);
 
     // Health Status (using a custom widget with progress bar)
-    QWidget* healthWidget = createHealthWidget(position.health);
+    QWidget* healthWidget;
+    if (!position.failedMintStatus.isEmpty()) {
+        auto* label = new QLabel(QStringLiteral("—"));
+        label->setAlignment(Qt::AlignCenter);
+        label->setToolTip(tr("This mint has no confirmed vault to redeem."));
+        healthWidget = label;
+    } else {
+        healthWidget = createHealthWidget(position.health);
+    }
 
     // Apply redeemed styling to health widget background
     if (position.isRedeemed) {
@@ -847,6 +847,11 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
         m_walletModel ? m_walletModel->getEncryptionStatus() == WalletModel::Locked : false;
     QPushButton* redeemButton = createRedeemButton(
         position.positionId, position.isPendingMint, position.isPendingRedeem, position.isRedeemed, position.canRedeem, isWatchOnly, isWalletLocked, position.blocksRemaining);
+    if (!position.failedMintStatus.isEmpty()) {
+        redeemButton->setText(position.failedMintStatus);
+        redeemButton->setEnabled(false);
+        redeemButton->setToolTip(tr("This mint has no confirmed vault to redeem."));
+    }
     m_positionsTable->setCellWidget(row, COL_ACTIONS, redeemButton);
 }
 

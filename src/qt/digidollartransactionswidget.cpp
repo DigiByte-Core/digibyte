@@ -306,7 +306,7 @@ void DigiDollarTransactionsWidget::setupTable()
     m_table->setColumnWidth(Column::Amount, 110);
     m_table->setColumnWidth(Column::LockPeriod, 90);
     m_table->setColumnWidth(Column::Note, 150);
-    m_table->setColumnWidth(Column::Confirmations, 100);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Confirmations, QHeaderView::ResizeToContents);
 
     m_table->horizontalHeader()->setStretchLastSection(false);
     m_table->horizontalHeader()->setSectionResizeMode(Column::TxId, QHeaderView::Stretch);
@@ -469,10 +469,10 @@ void DigiDollarTransactionsWidget::populateTable()
                 txInfo.pushKV("abandoned", histTx.abandoned);
                 txInfo.pushKV("lock_tier", histTx.lock_tier);
                 txInfo.pushKV("in_mempool", histTx.in_mempool);
-                txInfo.pushKV("wallet_state", histTx.is_local ? "local" :
+                txInfo.pushKV("wallet_state", histTx.is_expired_mint ? "expired_mint" : (histTx.is_local ? "local" :
                     (histTx.abandoned ? "abandoned" :
                      (histTx.confirmations < 0 ? "conflicted" :
-                      (histTx.confirmations > 0 ? "confirmed" : "pending"))));
+                      (histTx.confirmations > 0 ? "confirmed" : "pending")))));
                 result.push_back(txInfo);
             }
         }
@@ -579,9 +579,13 @@ void DigiDollarTransactionsWidget::populateTable()
             if (walletStateVal.isStr()) {
                 isLocal = walletStateVal.get_str() == "local";
             }
-            QTableWidgetItem* confItem = new QTableWidgetItem(formatConfirmations(confirmations, isAbandoned, isLocal));
+            const bool isExpiredMint = walletStateVal.isStr() && walletStateVal.get_str() == "expired_mint";
+            QTableWidgetItem* confItem = new QTableWidgetItem(isExpiredMint ? tr("Expired mint") :
+                formatConfirmations(confirmations, isAbandoned, isLocal));
             confItem->setTextAlignment(Qt::AlignCenter);
-            if (isLocal) {
+            if (isExpiredMint) {
+                confItem->setToolTip(tr("This mint was not confirmed before its deadline."));
+            } else if (isLocal) {
                 confItem->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
             }
             m_table->setItem(row, Column::Confirmations, confItem);

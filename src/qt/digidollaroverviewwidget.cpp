@@ -1016,7 +1016,9 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
 
         // Confirmations - also check for abandoned status
         QString confirmText;
-        if (tx.abandoned) {
+        if (tx.is_expired_mint) {
+            confirmText = tr("Expired mint");
+        } else if (tx.abandoned) {
             confirmText = tr("Abandoned");
         } else if (tx.confirmations < 0) {
             confirmText = tr("Conflicted");
@@ -1029,10 +1031,13 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
         }
         QLabel* confirmLabel = new QLabel(confirmText);
         confirmLabel->setObjectName("recentTxStatusLabel");
-        if (tx.is_local) {
+        if (tx.is_expired_mint) {
+            confirmLabel->setToolTip(tr("This mint was not confirmed before its deadline."));
+        } else if (tx.is_local) {
             confirmLabel->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
         }
-        confirmLabel->setFixedWidth(100);
+        confirmLabel->ensurePolished();
+        confirmLabel->setFixedWidth(std::max(100, confirmLabel->fontMetrics().horizontalAdvance(tr("Expired mint")) + 12));
         layout->addWidget(confirmLabel);
 
         // Date/time
