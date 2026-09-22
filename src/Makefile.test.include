@@ -256,6 +256,7 @@ DIGIBYTE_TESTS =\
   test/dbwrapper_env_tests.cpp \
   test/dandelion_stempool_reorg_tests.cpp \
   test/dandelion_tests.cpp \
+  test/dandelion_shutdown_tests.cpp \
   test/denialofservice_tests.cpp \
   test/deployment_burial_tests.cpp \
   test/descriptor_tests.cpp \
