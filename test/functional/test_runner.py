@@ -257,6 +257,7 @@ BASE_SCRIPTS = [
     'p2p_addrfetch.py',
     # DigiByte-specific tests
     'p2p_dandelion.py',
+    'p2p_dandelion_inventory.py',
     'p2p_dandelion_lockorder.py',
     'p2p_dandelion_stempool_reorg.py',
     'p2p_dandelion_stempool_race.py',

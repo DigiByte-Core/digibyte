@@ -7,6 +7,7 @@
 // 2. New peers should learn about existing mempool transactions
 
 #include <chainparams.h>
+#include <arith_uint256.h>
 #include <consensus/validation.h>
 #include <net.h>
 #include <net_processing.h>
@@ -356,7 +357,7 @@ BOOST_AUTO_TEST_CASE(issue19_embargo_expiry_never_nests_cs_main_under_embargo_mu
 // was pushed to between two SendMessages cycles) reached the reversed order.
 // ==========================================================================
 namespace {
-CNode* AddHandshakedPeer(ConnmanTestMsg& connman, NodeId id, uint32_t ip_addr) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+CNode* AddHandshakedPeer(ConnmanTestMsg& connman, NodeId id, uint32_t ip_addr, bool wtxid_relay = false) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
 {
     CNode* pnode = new CNode(id,
                              /*sock=*/nullptr,
@@ -369,11 +370,20 @@ CNode* AddHandshakedPeer(ConnmanTestMsg& connman, NodeId id, uint32_t ip_addr) E
                              /*inbound_onion=*/false);
     connman.AddTestNode(*pnode);
     connman.Handshake(*pnode,
-                      /*successfully_connected=*/true,
+                      /*successfully_connected=*/!wtxid_relay,
                       /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
                       /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
                       /*version=*/PROTOCOL_VERSION,
                       /*relay_txs=*/true);
+    if (wtxid_relay) {
+        const CNetMsgMaker messages{pnode->GetCommonVersion()};
+        for (const auto& command : {NetMsgType::WTXIDRELAY, NetMsgType::VERACK}) {
+            connman.FlushSendBuffer(*pnode);
+            (void)connman.ReceiveMsgFrom(*pnode, messages.Make(command));
+            pnode->fPauseSend = false;
+            connman.ProcessMessagesOnce(*pnode);
+        }
+    }
     return pnode;
 }
 
@@ -549,6 +559,151 @@ BOOST_AUTO_TEST_CASE(issue19_inv_handler_pending_dandelion_inv_vs_m_nodes_mutex)
                         "no getdata queued after a Dandelion inv");
 
     peerman.FinalizeNode(*dest);
+    connman.ClearTestNodes();
+}
+
+BOOST_AUTO_TEST_CASE(incoming_inventory_history_is_bounded)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    auto& peerman = *m_node.peerman;
+    CNode* peer = AddHandshakedPeer(connman, 0, 0xa0b0c001);
+
+    auto announce = [&](const std::vector<CInv>& inventory) {
+        CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+        stream << inventory;
+        std::atomic<bool> interrupt{false};
+        peerman.ProcessMessage(*peer, NetMsgType::INV, stream, GetTime<std::chrono::microseconds>(), interrupt);
+    };
+    const CInv oldest(MSG_DANDELION_TX, ArithToUint256(1));
+    announce({oldest});
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, oldest));
+
+    std::vector<CInv> inventory;
+    for (uint64_t i = 2; i <= 50'001; ++i) inventory.emplace_back(MSG_DANDELION_TX, ArithToUint256(i));
+    announce(inventory);
+    BOOST_CHECK_MESSAGE(peerman.PushDandelionInventory(peer, oldest), "oldest incoming hash was not evicted");
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, inventory.front()));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, inventory.back()));
+
+    // Duplicate announcements must not consume the distinct-entry budget.
+    announce(std::vector<CInv>(50'000, inventory.back()));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, inventory.front()));
+    peerman.FinalizeNode(*peer);
+    connman.ClearTestNodes();
+}
+
+BOOST_AUTO_TEST_CASE(outgoing_inventory_history_is_bounded)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    auto& peerman = *m_node.peerman;
+    CNode* peer = AddHandshakedPeer(connman, 0, 0xa0b0c001);
+    const CInv oldest(MSG_DANDELION_TX, ArithToUint256(1));
+    BOOST_REQUIRE(peerman.PushDandelionInventory(peer, oldest));
+    BOOST_REQUIRE(peerman.SendMessages(peer));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, oldest));
+
+    // Drain small batches through the actual sender without retaining socket buffers.
+    for (uint64_t first = 2; first <= 50'001; first += 100) {
+        for (uint64_t i = first; i < first + 100; ++i) {
+            BOOST_REQUIRE(peerman.PushDandelionInventory(peer, CInv(MSG_DANDELION_TX, ArithToUint256(i))));
+        }
+        connman.FlushSendBuffer(*peer);
+        peer->fPauseSend = false;
+        BOOST_REQUIRE(peerman.SendMessages(peer));
+    }
+    BOOST_CHECK_MESSAGE(peerman.PushDandelionInventory(peer, oldest), "oldest outgoing hash was not evicted");
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, CInv(MSG_DANDELION_TX, ArithToUint256(50'001))));
+
+    // Eviction permits delivery again; the send path must then remember it.
+    connman.FlushSendBuffer(*peer);
+    peer->fPauseSend = false;
+    BOOST_REQUIRE(peerman.SendMessages(peer));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, oldest));
+    peerman.FinalizeNode(*peer);
+    connman.ClearTestNodes();
+}
+
+BOOST_AUTO_TEST_CASE(inventory_history_preserves_exact_stem_requests)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    auto& peerman = *m_node.peerman;
+    auto& stempool = *m_node.stempool;
+    CNode* peer = AddHandshakedPeer(connman, 0, 0xa0b0c001, /*wtxid_relay=*/true);
+
+    CMutableTransaction mtx;
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(InsecureRand256(), 0);
+    mtx.vin[0].scriptWitness.stack = {{1}};
+    mtx.vout.emplace_back(COIN, CScript() << OP_TRUE);
+    const CTransactionRef tx = MakeTransactionRef(mtx);
+    ++mtx.vin[0].prevout.n;
+    const CTransactionRef unknown = MakeTransactionRef(mtx);
+    BOOST_REQUIRE(tx->GetHash() != tx->GetWitnessHash());
+    {
+        LOCK2(cs_main, stempool.cs);
+        TestMemPoolEntryHelper entry;
+        stempool.addUnchecked(entry.FromTx(tx));
+        stempool.addUnchecked(entry.FromTx(unknown));
+    }
+
+    auto receive = [&](const std::string& command, const std::vector<CInv>& inventory) {
+        connman.FlushSendBuffer(*peer);
+        peer->fPauseSend = false;
+        CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+        stream << inventory;
+        std::atomic<bool> interrupt{false};
+        peerman.ProcessMessage(*peer, command, stream, GetTime<std::chrono::microseconds>(), interrupt);
+    };
+    auto request = [&](const CInv& inv, bool expected) {
+        receive(NetMsgType::GETDATA, {inv});
+        const auto types = QueuedMessageTypes(*peer);
+        const std::string wanted = expected ? (inv.IsDandelionMsg() ? NetMsgType::DANDELIONTX : NetMsgType::TX) : NetMsgType::NOTFOUND;
+        BOOST_REQUIRE_EQUAL(types.size(), 1U);
+        BOOST_CHECK_EQUAL(types.front(), wanted);
+    };
+    const CInv txid(MSG_DANDELION_TX, tx->GetHash());
+    const CInv wtxid(MSG_DANDELION_WITNESS_TX, tx->GetWitnessHash());
+    request(txid, false);
+    BOOST_REQUIRE(peerman.PushDandelionInventory(peer, txid));
+
+    // The peer can announce a queued tx before it is sent. Sending its other
+    // hash form at capacity must retain both aliases of the delivered tx.
+    receive(NetMsgType::INV, {txid});
+    std::vector<CInv> before_send;
+    for (uint64_t i = 1; i < 50'000; ++i) before_send.emplace_back(MSG_DANDELION_TX, ArithToUint256(i));
+    receive(NetMsgType::INV, before_send);
+    BOOST_REQUIRE(peerman.SendMessages(peer));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, txid));
+    BOOST_CHECK(!peerman.PushDandelionInventory(peer, wtxid));
+    request(txid, true);
+    request(wtxid, true);
+    request(CInv(MSG_WTX, tx->GetWitnessHash()), true);
+    request(CInv(MSG_DANDELION_TX, unknown->GetHash()), false);
+    request(CInv(MSG_WTX, unknown->GetWitnessHash()), false);
+
+    auto embargo = GetTime<std::chrono::microseconds>() + 1min;
+    connman.insertDandelionEmbargo(tx->GetHash(), embargo);
+    request(txid, false);
+    BOOST_REQUIRE(connman.removeDandelionEmbargo(tx->GetHash()));
+    request(txid, true);
+
+    std::vector<CInv> inventory;
+    for (uint64_t i = 50'001; i <= 100'000; ++i) inventory.emplace_back(MSG_DANDELION_TX, ArithToUint256(i));
+    receive(NetMsgType::INV, inventory);
+    request(txid, false);
+    request(wtxid, false);
+    request(CInv(MSG_WTX, tx->GetWitnessHash()), false);
+
+    // Forgotten authorization stays closed until an actual send records it again.
+    BOOST_REQUIRE(peerman.PushDandelionInventory(peer, txid));
+    BOOST_REQUIRE(peerman.SendMessages(peer));
+    request(txid, true);
+    request(wtxid, true);
+    request(CInv(MSG_DANDELION_TX, unknown->GetHash()), false);
+    peerman.FinalizeNode(*peer);
     connman.ClearTestNodes();
 }
 

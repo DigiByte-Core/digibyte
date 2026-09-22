@@ -19,6 +19,7 @@
 #include <headerssync.h>
 #include <index/blockfilterindex.h>
 #include <kernel/mempool_entry.h>
+#include <limitedmap.h>
 #include <logging.h>
 #include <kernel/chain.h>
 #include <merkleblock.h>
@@ -103,6 +104,8 @@ static constexpr int32_t MAX_PEER_TX_REQUEST_IN_FLIGHT = 100;
  *  rate (by our own policy, see INVENTORY_BROADCAST_PER_SECOND) for several minutes, while not receiving
  *  the actual transaction (from any peer) in response to requests for them. */
 static constexpr int32_t MAX_PEER_TX_ANNOUNCEMENTS = 5000;
+/** Maximum exact Dandelion hashes remembered per peer, counting both hash forms. */
+static constexpr size_t MAX_DANDELION_INVENTORY_KNOWN = 50'000;
 /** How long to delay requesting transactions via txids, if we have wtxid-relaying peers */
 static constexpr auto TXID_RELAY_DELAY{2s};
 /** How long to delay requesting transactions from non-preferred peers */
@@ -308,12 +311,21 @@ struct Peer {
         std::atomic<CAmount> m_fee_filter_received{0};
 
         // Dandelion++ fields
-        /** Set of Dandelion transaction hashes that we know this peer has seen. */
-        std::set<uint256> setDandelionInventoryKnown GUARDED_BY(m_tx_inventory_mutex);
+        /** Exact recent history: membership also permits stem transaction requests. */
+        limitedmap<uint256, uint64_t> m_dandelion_inventory_known GUARDED_BY(m_tx_inventory_mutex){MAX_DANDELION_INVENTORY_KNOWN};
+        uint64_t m_dandelion_inventory_sequence GUARDED_BY(m_tx_inventory_mutex){0};
         /** Vector of Dandelion transaction hashes to send to this peer. */
         std::vector<uint256> vInventoryDandelionTxToSend GUARDED_BY(m_tx_inventory_mutex);
         /** Set of other inventory items (like Dandelion transactions) to send to this peer. */
         std::set<CInv> setInventoryTxToSendOther GUARDED_BY(m_tx_inventory_mutex);
+
+        bool AddDandelionInventoryKnown(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_tx_inventory_mutex)
+        {
+            if (m_dandelion_inventory_known.count(hash)) return false;
+            // Only distinct entries advance the order; evict the oldest first.
+            m_dandelion_inventory_known.insert({hash, ++m_dandelion_inventory_sequence});
+            return true;
+        }
     };
 
     /* Initializes a TxRelay struct for this peer. Can be called at most once for a peer. */
@@ -1859,7 +1871,7 @@ bool PeerManagerImpl::PushDandelionInventory(CNode* pnode, const CInv& inv)
     // Check BOTH the Dandelion known set and the regular bloom filter to prevent
     // re-queuing transactions we've already sent. The Dandelion known set tracks
     // txids/wtxids of Dandelion TXs we've sent; the bloom filter tracks regular TXs.
-    if (tx_relay->setDandelionInventoryKnown.count(inv.hash) == 0 &&
+    if (tx_relay->m_dandelion_inventory_known.count(inv.hash) == 0 &&
         !tx_relay->m_tx_inventory_known_filter.contains(inv.hash)) {
         // For Dandelion transactions, use the proper vector
         if (inv.IsDandelionMsg()) {
@@ -2852,7 +2864,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
             }
 
             // If not embargoed, proceed with normal "send the tx" if we actually have it
-            if (txinfo.tx && tx_relay->setDandelionInventoryKnown.count(inv.hash) != 0) {
+            if (txinfo.tx && tx_relay->m_dandelion_inventory_known.count(inv.hash) != 0) {
                 LogPrintf("ProcessGetData: Sending Dandelion transaction %s to peer=%d (witness=%s)\n", 
                          inv.hash.ToString(), pfrom.GetId(), (inv.type & MSG_WITNESS_FLAG) ? "true" : "false");
                 m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::DANDELIONTX, *txinfo.tx));
@@ -2861,7 +2873,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 LogPrintf("ProcessGetData: Dandelion transaction %s not found for peer=%d (have_tx=%s, is_known=%s)\n", 
                          inv.hash.ToString(), pfrom.GetId(), 
                          txinfo.tx ? "true" : "false",
-                         tx_relay->setDandelionInventoryKnown.count(inv.hash) ? "true" : "false");
+                         tx_relay->m_dandelion_inventory_known.count(inv.hash) ? "true" : "false");
                 vNotFound.push_back(inv);
             }
             continue;
@@ -2871,7 +2883,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         bool push = false;
         
         // Check if we should serve from stempool for non-Dandelion peers
-        if (!peer.fSupportsDandelion.load() && !m_connman.isDandelionInbound(&pfrom) && tx_relay->setDandelionInventoryKnown.count(inv.hash)) {
+        if (!peer.fSupportsDandelion.load() && !m_connman.isDandelionInbound(&pfrom) && tx_relay->m_dandelion_inventory_known.count(inv.hash)) {
             // For regular TX messages from stempool, create GenTxid based on witness flag
             auto txinfo = m_stempool.info(inv.IsMsgWtx() ? GenTxid::Wtxid(inv.hash) : GenTxid::Txid(inv.hash));
             if (txinfo.tx) {
@@ -4439,8 +4451,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // after its handshake, so this runs on every connection.
                     const bool is_dandelion_inbound = m_connman.isDandelionInbound(&pfrom);
                     LOCK(tx_relay->m_tx_inventory_mutex);
-                    auto result = tx_relay->setDandelionInventoryKnown.insert(inv.hash);
-                    const bool fAlreadyHave = !result.second;
+                    const bool fAlreadyHave = !tx_relay->AddDandelionInventoryKnown(inv.hash);
                     LogPrint(BCLog::DANDELION, "ProcessMessage INV: Got dandelion inv: %s  %s peer=%d\n", inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
                     if ((!fAlreadyHave && !m_chainman.IsInitialBlockDownload() &&
                         is_dandelion_inbound) || (inv.hash == DANDELION_DISCOVERYHASH)) {
@@ -7362,9 +7373,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // PushDandelionInventory rejects re-queuing regardless of which
                         // hash form is used. This prevents the infinite relay loop where
                         // the txid was queued but only the wtxid was marked as known.
-                        tx_relay->setDandelionInventoryKnown.insert(hash);        // txid
+                        // Refresh sent aliases so one cannot evict the other at capacity.
+                        tx_relay->m_dandelion_inventory_known.erase(hash);
+                        tx_relay->AddDandelionInventoryKnown(hash);        // txid
                         if (known_hash != hash) {
-                            tx_relay->setDandelionInventoryKnown.insert(known_hash);  // wtxid
+                            tx_relay->m_dandelion_inventory_known.erase(known_hash);
+                            tx_relay->AddDandelionInventoryKnown(known_hash);  // wtxid
                         }
                         
                         if (!peer->fSupportsDandelion.load() && hash != DANDELION_DISCOVERYHASH) {
