@@ -1,11 +1,11 @@
 # DigiByte Core v9.26.6 release notes
 
-## RC2 — draft for the final candidate
+## RC2 — second release candidate
 
 RC2 adds the changes below to RC1. The code change list covers source through
-`943243613ca119668a57ca412825cbe825ecb225`. The final candidate's source,
-binaries and verification record must match before these notes are published
-as completed release notes.
+`943243613ce7f75492eae8b4a074859eeb5ba6d1`. RC2 is a test release before the
+final v9.26.6 release. Release packages must be built from the final RC2 tag
+and verified before distribution.
 
 **Full-node and mining operators must upgrade before mainnet block
 24,490,000.** Thaw Day changes the rules used to agree on valid blocks, even
@@ -119,11 +119,13 @@ The categories describe the main purpose of each group, not its severity.
 
 ### Verification and known limits
 
-The final combined source passed 3,755 unit test cases, the rendered Qt test
-suite, all 421 scheduled extended functional-test entries and all 256 fuzz
-targets under AddressSanitizer and UndefinedBehaviorSanitizer. The functional
-runner reported 17 expected skips for unsupported Signet, unavailable old
-release binaries, disabled USDT tracepoints and special test IP addresses.
+The combined source passed 3,755 unit test cases and the rendered Qt test
+suite. Of 421 scheduled extended functional-test entries, 404 passed and
+17 were skipped. None failed. The skips cover unsupported Signet, unavailable
+old release binaries, disabled USDT tracepoints and special test IP addresses.
+All 256 fuzz targets passed under AddressSanitizer and UndefinedBehaviorSanitizer,
+which check for memory errors and undefined behavior. That run replayed saved
+inputs and generated inputs for the target without a saved corpus.
 Focused shutdown tests also reproduced the stale-route failure before the fix
 and passed under AddressSanitizer after the fix.
 
@@ -164,7 +166,7 @@ reports.
 The following is the unchanged RC1 note from tag `v9.26.6rc1`, commit
 `390f71d5cb74bf519dc0510cc5d8e9c70fefa3cc`. Its version, counts, dates,
 measurements and test results refer to RC1. The RC2 section above gives the
-current draft's additions, combined count and verification limits.
+RC2 additions, combined count and verification limits.
 
 ---
 
