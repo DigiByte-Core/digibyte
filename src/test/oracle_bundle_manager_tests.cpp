@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <boost/test/unit_test.hpp>
+#include <atomic>
+#include <thread>
 #include <arith_uint256.h>
 #include <crypto/sha256.h>
 #include <logging.h>
@@ -61,6 +63,106 @@ static OracleVersionHeartbeatMsg MakeRegtestHeartbeat(uint32_t oracle_id, int64_
     msg.subversion = "/DigiByte:9.26.0(rc38)/";
     BOOST_REQUIRE(msg.Sign(key));
     return msg;
+}
+
+BOOST_AUTO_TEST_CASE(initialize_restores_network_configuration)
+{
+    auto& manager = OracleBundleManager::GetInstance();
+    manager.SetEnabled(false);
+    manager.SetMinOracleCount(1);
+
+    OracleBundleManager::Initialize();
+    BOOST_CHECK(manager.IsEnabled());
+    BOOST_CHECK_EQUAL(manager.GetMinOracleCount(), Params().GetConsensus().nOracleConsensusRequired);
+    BOOST_CHECK(manager.ValidateConfiguration());
+
+    manager.SetEnabled(false);
+    manager.SetMinOracleCount(2);
+    OracleBundleManager::Initialize();
+    BOOST_CHECK(manager.IsEnabled());
+    BOOST_CHECK_EQUAL(manager.GetMinOracleCount(), Params().GetConsensus().nOracleConsensusRequired);
+    BOOST_CHECK(manager.ValidateConfiguration());
+}
+
+BOOST_AUTO_TEST_CASE(initialize_with_concurrent_message_readers)
+{
+    auto& manager = OracleBundleManager::GetInstance();
+    OracleBundleManager::Initialize();
+    manager.Clear();
+    const auto message = MakeRegtestOracleMessage(0, 6000, GetTime());
+    BOOST_REQUIRE(manager.AddOracleMessage(message));
+    const int required = Params().GetConsensus().nOracleConsensusRequired;
+    std::atomic<bool> start{false};
+    std::atomic<bool> valid{true};
+
+    // Readers can already exist when setup is repeated. ThreadSanitizer also
+    // checks that writing the same settings does not race with these reads.
+    std::thread reader([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 256; ++i) {
+            if (!manager.IsEnabled() || manager.GetMinOracleCount() != required) valid = false;
+            manager.AddOracleMessage(message);
+            uint64_t price{0};
+            int64_t timestamp{0};
+            if (manager.ComputeConsensusValues(price, timestamp)) valid = false;
+        }
+    });
+    std::thread initializer([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 256; ++i) OracleBundleManager::Initialize();
+    });
+    start = true;
+    reader.join();
+    initializer.join();
+
+    BOOST_CHECK(valid.load());
+    BOOST_CHECK(manager.ValidateConfiguration());
+    BOOST_CHECK_EQUAL(manager.GetPendingMessageCount(), 1U);
+    manager.Clear();
+}
+
+BOOST_AUTO_TEST_CASE(signed_message_quorum_with_concurrent_bundle_publication)
+{
+    // Keep this test's proposal time behind later tests' real clock.
+    SetMockTime(1700000000);
+    auto& manager = OracleBundleManager::GetInstance();
+    OracleBundleManager::Initialize();
+    manager.Clear();
+    const int required = Params().GetConsensus().nOracleConsensusRequired;
+    const int64_t now = GetTime();
+    for (int id = 1; id < required; ++id) {
+        BOOST_REQUIRE(manager.AddOracleMessage(MakeRegtestOracleMessage(id, 6000, now)));
+    }
+    std::vector<COraclePriceMessage> messages;
+    for (int i = 0; i < 256; ++i) {
+        messages.push_back(MakeRegtestOracleMessage(0, 6000, now - 256 + i));
+    }
+    const auto bundle = MockOracleManager::GetInstance().CreateMockMuSig2Bundle(0, now);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(OracleBundleManager::ValidateMuSig2Bundle(
+        bundle, 0, Params().GetConsensus(), error), error);
+    std::atomic<bool> start{false};
+    std::atomic<bool> valid{true};
+    std::thread reader([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (const auto& message : messages) {
+            if (!manager.AddOracleMessage(message)) valid = false;
+        }
+    });
+    // Regtest RPCs publish mock bundles while peer messages can reach quorum.
+    std::thread publisher([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 256; ++i) {
+            if (!manager.UpdateBundle(bundle)) valid = false;
+        }
+    });
+    start = true;
+    reader.join();
+    publisher.join();
+    BOOST_CHECK(valid.load());
+    BOOST_CHECK_EQUAL(manager.GetPendingMessageCount(), static_cast<size_t>(required));
+    BOOST_CHECK_EQUAL(manager.GetStats().latest_epoch, 0);
+    manager.Clear();
 }
 
 /**

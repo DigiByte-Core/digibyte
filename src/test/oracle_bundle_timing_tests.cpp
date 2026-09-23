@@ -103,9 +103,13 @@ BOOST_AUTO_TEST_CASE(bundle_does_not_wait_for_near_quorum_legacy_messages)
         InjectSignedMessage(manager, keys[i], i, price, ts);
     }
 
-    std::thread late_oracle([&manager, &keys, price, ts]() {
+    bool late_message_valid{false};
+    std::thread late_oracle([&manager, &keys, price, ts, &late_message_valid]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        InjectSignedMessage(manager, keys[4], 4, price, ts);
+        COraclePriceMessage message(4, price, ts);
+        message.oracle_pubkey = XOnlyPubKey(keys[4].GetPubKey());
+        late_message_valid = message.SignAttestation(keys[4]) && message.VerifyAttestation();
+        if (late_message_valid) manager.InjectTestMessage(message);
     });
 
     CBlock block = MakeBlockWithCoinbase();
@@ -115,6 +119,8 @@ BOOST_AUTO_TEST_CASE(bundle_does_not_wait_for_near_quorum_legacy_messages)
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 
     late_oracle.join();
+    // Boost's assertion state is shared, so check the worker's result after joining.
+    BOOST_REQUIRE(late_message_valid);
 
     // AddOracleBundleToBlock no longer waits for a near-quorum Phase 2
     // message to arrive. The async MuSig2 orchestrator owns session

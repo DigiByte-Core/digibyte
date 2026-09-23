@@ -83,8 +83,10 @@ double GetDifficulty(const CBlockIndex* tip, const CBlockIndex* blockindex, int 
             nBits = powLimit;
         else
         {
-            // Use fast O(1) lookup instead of O(n) chain walking for RPC performance
-            blockindex = GetLastBlockIndexForAlgoFast(tip, Params().GetConsensus(), algo);
+            // This walks back block by block from the tip. It is the same
+            // lookup the difficulty rules use, so the number reported here
+            // always matches the number blocks are checked against.
+            blockindex = GetLastBlockIndexForAlgo(tip, Params().GetConsensus(), algo);
             if (blockindex == nullptr)
                 nBits = powLimit;
             else
@@ -163,16 +165,17 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
     result.pushKV("height", blockindex->nHeight);
     result.pushKV("version", blockindex->nVersion);
     result.pushKV("versionHex", strprintf("%08x", blockindex->nVersion));
-    result.pushKV("merkleroot", blockindex->hashMerkleRoot.GetHex());
+    const auto header_data = blockindex->GetHeaderData();
+    result.pushKV("merkleroot", header_data.merkle_root.GetHex());
     result.pushKV("time", (int64_t)blockindex->nTime);
     result.pushKV("mediantime", (int64_t)blockindex->GetMedianTimePast());
-    result.pushKV("nonce", (uint64_t)blockindex->nNonce);
+    result.pushKV("nonce", (uint64_t)header_data.nonce);
     result.pushKV("bits", strprintf("%08x", blockindex->nBits));
     int algo = GetAlgoForBlockIndex(blockindex, Params().GetConsensus());
     result.pushKV("difficulty", GetDifficulty(nullptr, blockindex, algo));
     result.pushKV("pow_algo_id", algo);
     result.pushKV("pow_algo", GetAlgoName(algo));
-    result.pushKV("chainwork", blockindex->nChainWork.GetHex());
+    result.pushKV("chainwork", blockindex->GetChainWork().GetHex());
     result.pushKV("nTx", (uint64_t)blockindex->nTx);
 
     if (blockindex->pprev)
@@ -1339,7 +1342,7 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("mediantime", tip.GetMedianTimePast());
     obj.pushKV("verificationprogress", GuessVerificationProgress(chainman.GetParams().TxData(), &tip));
     obj.pushKV("initialblockdownload", chainman.IsInitialBlockDownload());
-    obj.pushKV("chainwork", tip.nChainWork.GetHex());
+    obj.pushKV("chainwork", tip.GetChainWork().GetHex());
     obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {

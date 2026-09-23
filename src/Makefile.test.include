@@ -74,7 +74,14 @@ DIGIBYTE_TESTS =\
   test/base58_tests.cpp \
   test/base64_tests.cpp \
   test/digidollar_activation_tests.cpp \
+  test/digidollar_thawday_tests.cpp \
+  test/digidollar_thaw_volatility_tests.cpp \
+  test/digidollar_thaw_recovery_tests.cpp \
+  test/digidollar_chainstate_tests.cpp \
+  test/digidollar_chainstate_validation_tests.cpp \
   test/digidollar_activation_wave12_tests.cpp \
+  test/digidollar_thawday_chainparams_tests.cpp \
+  test/digidollar_thawday_selection_tests.cpp \
   test/digidollar_oracle_startup_tests.cpp \
   test/digidollar_wave26_compat_tests.cpp \
   test/digidollar_wave13_parity_tests.cpp \
@@ -95,6 +102,9 @@ DIGIBYTE_TESTS =\
   test/digidollar_err_tests.cpp \
   test/digidollar_health_dca_tests.cpp \
   test/digidollar_health_tests.cpp \
+  test/digidollar_chainstate_db_tests.cpp \
+  test/digidollar_stats_migration_tests.cpp \
+  test/digidollar_accounting_transition_tests.cpp \
   test/digidollar_t2_05_tests.cpp \
   test/digidollar_opcodes_tests.cpp \
   test/digidollar_script_attacks_tests.cpp \
@@ -107,6 +117,7 @@ DIGIBYTE_TESTS =\
   test/digidollar_musig2_session_state_tests.cpp \
   test/digidollar_oracle_feeds_wave11_tests.cpp \
   test/digidollar_hot_path_logging_tests.cpp \
+  test/digidollar_registry_isolation_tests.cpp \
   test/musig2_net_processing_tests.cpp \
   test/rh50_oracle_keyset_alignment_tests.cpp \
   test/rh51_checkphase3_v1_split_tests.cpp \
@@ -143,6 +154,7 @@ DIGIBYTE_TESTS =\
   test/oracle_rpc_tests.cpp \
   test/oracle_wallet_key_tests.cpp \
   test/oracle_wallet_autostart_tests.cpp \
+  test/oracle_shutdown_order_tests.cpp \
   test/oracle_phase2_tests.cpp \
   test/musig2_basic_tests.cpp \
   test/musig2_bundle_creation_tests.cpp \
@@ -163,9 +175,11 @@ DIGIBYTE_TESTS =\
   test/musig2_bundle_mining_tests.cpp \
   test/redteam_phase2_audit_tests.cpp \
   test/oracle_consensus_threshold_tests.cpp \
+  test/oracle_params_aggregation_tests.cpp \
   test/digidollar_p2p_tests.cpp \
   test/digidollar_rh46_rpc_input_validation_tests.cpp \
   test/digidollar_rpc_tests.cpp \
+  test/digidollar_rpc_totals_cache_tests.cpp \
   test/digidollar_integration_attack_tests.cpp \
   test/digidollar_redteam_tests.cpp \
   test/digidollar_rh26_tests.cpp \
@@ -197,7 +211,9 @@ DIGIBYTE_TESTS =\
   test/digidollar_structures_tests.cpp \
   test/digidollar_transaction_tests.cpp \
   test/digidollar_transfer_tests.cpp \
+  test/digidollar_amount_tests.cpp \
   test/digidollar_change_tests.cpp \
+  test/digidollar_txbuilder_change_tests.cpp \
   test/digidollar_txbuilder_tests.cpp \
   test/digidollar_validation_tests.cpp \
   test/digidollar_txindex_tests.cpp \
@@ -221,18 +237,26 @@ DIGIBYTE_TESTS =\
   test/blockencodings_tests.cpp \
   test/blockfilter_index_tests.cpp \
   test/blockfilter_tests.cpp \
+  test/blockheadercache_tests.cpp \
+  test/blockindexstorage_tests.cpp \
   test/blockmanager_tests.cpp \
+  test/blockmap_tests.cpp \
   test/bloom_tests.cpp \
   test/bswap_tests.cpp \
   test/checkqueue_tests.cpp \
+  test/coins_cursor_tests.cpp \
   test/coins_tests.cpp \
   test/coinstatsindex_tests.cpp \
   test/compilerbug_tests.cpp \
+  test/compact_work_tests.cpp \
   test/compress_tests.cpp \
   test/crypto_tests.cpp \
   test/cuckoocache_tests.cpp \
   test/dbwrapper_tests.cpp \
+  test/dbwrapper_env_tests.cpp \
+  test/dandelion_stempool_reorg_tests.cpp \
   test/dandelion_tests.cpp \
+  test/dandelion_shutdown_tests.cpp \
   test/denialofservice_tests.cpp \
   test/deployment_burial_tests.cpp \
   test/descriptor_tests.cpp \
@@ -264,11 +288,13 @@ DIGIBYTE_TESTS =\
   test/policy_fee_tests.cpp \
   test/policyestimator_tests.cpp \
   test/pool_tests.cpp \
+  test/pow_algo_lookup_tests.cpp \
   test/pow_tests.cpp \
   test/prevector_tests.cpp \
   test/raii_event_tests.cpp \
   test/random_tests.cpp \
   test/rest_tests.cpp \
+  test/headerresponse_tests.cpp \
   test/result_tests.cpp \
   test/reverselock_tests.cpp \
   test/rpc_tests.cpp \
@@ -329,13 +355,17 @@ DIGIBYTE_TESTS += \
   wallet/test/scriptpubkeyman_tests.cpp \
   wallet/test/walletload_tests.cpp \
   wallet/test/group_outputs_tests.cpp \
+  wallet/test/digidollar_mint_cleanup_tests.cpp \
   wallet/test/digidollar_persistence_wallet_tests.cpp \
+  wallet/test/digidollar_wallet_lock_safety_tests.cpp \
   wallet/test/digidollar_wallet_security_tests.cpp \
   wallet/test/rh59_coincontrol_dd_lock_bypass_tests.cpp \
   wallet/test/digidollar_wave16_persistence_tests.cpp \
   wallet/test/digidollar_wave17_spendability_tests.cpp \
   wallet/test/digidollar_wave17_helper_asymmetry_tests.cpp \
   test/digidollar_rpc_unit_tests.cpp \
+  test/digidollar_mint_cancel_tests.cpp \
+  test/digidollar_wallet_candidate_lock_tests.cpp \
   test/digidollar_wave18_rpc_schema_tests.cpp \
   test/digidollar_wallet_hd_tests.cpp
 
@@ -365,8 +395,14 @@ DIGIBYTE_TEST_SUITE += \
   wallet/test/init_test_fixture.h
 endif # ENABLE_WALLET
 
+# Some tests read a file out of the checkout, for example to confirm that a log
+# line is still in the source. Tell the test program where the checkout is, so
+# those tests work no matter which directory it is started from. See
+# src/test/util/source_root.h.
+TEST_SOURCE_ROOT_DEF = -DDIGIBYTE_TEST_SOURCE_ROOT=\"$(abs_top_srcdir)\"
+
 test_test_digibyte_SOURCES = $(DIGIBYTE_TEST_SUITE) $(DIGIBYTE_TESTS) $(JSON_TEST_FILES) $(RAW_TEST_FILES)
-test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS)
+test_test_digibyte_CPPFLAGS = $(AM_CPPFLAGS) $(DIGIBYTE_INCLUDES) $(TESTDEFS) $(BOOST_CPPFLAGS) $(EVENT_CFLAGS) $(TEST_SOURCE_ROOT_DEF) $(LEVELDB_CPPFLAGS)
 test_test_digibyte_LDADD = $(LIBTEST_UTIL)
 if ENABLE_WALLET
 test_test_digibyte_LDADD += $(LIBDIGIBYTE_WALLET)
@@ -412,6 +448,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/checkqueue.cpp \
  test/fuzz/coins_view.cpp \
  test/fuzz/coinscache_sim.cpp \
+ test/fuzz/compact_work.cpp \
  test/fuzz/connman.cpp \
  test/fuzz/dandelion.cpp \
  test/fuzz/crypto.cpp \
@@ -441,6 +478,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/fuzz_odocrypt_cipher.cpp \
  test/fuzz/fuzz_odocrypt_keccak.cpp \
  test/fuzz/fuzz_odocrypt_keygen.cpp \
+ test/fuzz/digidollar_amount.cpp \
  test/fuzz/digidollar_consensus.cpp \
  test/fuzz/digidollar_integer_math.cpp \
  test/fuzz/digidollar_logic.cpp \
@@ -531,6 +569,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/digidollar_txbuilder.cpp \
  test/fuzz/digidollar_txbuilder_validate.cpp \
  test/fuzz/digidollar_health.cpp \
+ test/fuzz/digidollar_chainstate.cpp \
  test/fuzz/digidollar_dca_volatility.cpp \
  test/fuzz/digidollar_lock_tier.cpp \
  test/fuzz/digidollar_prune_blockdb.cpp \

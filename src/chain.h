@@ -15,6 +15,7 @@
 #include <sync.h>
 #include <tinyformat.h>
 #include <uint256.h>
+#include <util/compact_work.h>
 #include <util/time.h>
 
 #include <vector>
@@ -143,8 +144,28 @@ enum BlockStatus : uint32_t {
  * candidates to be the next block. A blockindex may have multiple pprev pointing
  * to it, but at most one of them can be part of the currently active branch.
  */
+struct BlockHeaderData {
+    uint256 merkle_root;
+    uint32_t nonce{0};
+};
+
+/** Immutable header fields, shared by all entries owned by one block manager.
+ * A read failure is a local storage error and must not produce a made-up header.
+ */
+class BlockHeaderSource {
+public:
+    virtual ~BlockHeaderSource() = default;
+    virtual BlockHeaderData Read(const uint256& hash) const = 0;
+    virtual bool IsShared() const { return true; }
+};
+
 class CBlockIndex
 {
+    // Shared sources outlive the index. Local sources belong to this entry.
+    const BlockHeaderSource* m_header_source{nullptr};
+    //! (memory only) Total work in the chain up to and including this block.
+    CompactWork m_chain_work;
+
 public:
     //! pointer to the hash of the block, if any. Memory is owned by this CBlockIndex
     const uint256* phashBlock{nullptr};
@@ -167,8 +188,8 @@ public:
     //! Byte offset within rev?????.dat where this block's undo data is stored
     unsigned int nUndoPos GUARDED_BY(::cs_main){0};
 
-    //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
-    arith_uint256 nChainWork{};
+    arith_uint256 GetChainWork() const noexcept { return m_chain_work.Get(); }
+    void SetChainWork(arith_uint256 work) { m_chain_work.Set(work); }
 
     //! Number of transactions in this block.
     //! Note: in a potential headers-first mode, this number cannot be relied upon
@@ -197,20 +218,19 @@ public:
 
     //! block header
     int32_t nVersion{0};
-    uint256 hashMerkleRoot{};
     uint32_t nTime{0};
     uint32_t nBits{0};
-    uint32_t nNonce{0};
+
+    BlockHeaderData GetHeaderData() const;
+    void SetHeaderData(const BlockHeaderData& data);
+    /** Only call while constructing or loading the index, before publishing it. */
+    void UseHeaderSource(const BlockHeaderSource& source);
 
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     int32_t nSequenceId{0};
 
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
-
-    //! DigiByte: Track last block per algorithm for multi-algo mining
-    CBlockIndex *lastAlgoBlocks[NUM_ALGOS_IMPL];
-
 
     /**
      * Full constructor that copies fields from a block header.
@@ -242,14 +262,15 @@ public:
 
     CBlockHeader GetBlockHeader() const
     {
+        const auto data = GetHeaderData();
         CBlockHeader block;
         block.nVersion = nVersion;
         if (pprev)
             block.hashPrevBlock = pprev->GetBlockHash();
-        block.hashMerkleRoot = hashMerkleRoot;
+        block.hashMerkleRoot = data.merkle_root;
         block.nTime = nTime;
         block.nBits = nBits;
-        block.nNonce = nNonce;
+        block.nNonce = data.nonce;
         return block;
     }
 
@@ -364,8 +385,8 @@ public:
     CBlockIndex* GetAncestor(int height);
     const CBlockIndex* GetAncestor(int height) const;
 
-    CBlockIndex();
-    ~CBlockIndex() = default;
+    CBlockIndex() = default;
+    ~CBlockIndex();
 
 protected:
     //! CBlockIndex should not allow public copy construction because equality
@@ -377,13 +398,18 @@ protected:
     //!
     //! We declare these protected instead of simply deleting them so that
     //! CDiskBlockIndex can reuse copy construction.
-    CBlockIndex(const CBlockIndex&) = default;
+    CBlockIndex(const CBlockIndex&);
     CBlockIndex& operator=(const CBlockIndex&) = delete;
     CBlockIndex(CBlockIndex&&) = delete;
     CBlockIndex& operator=(CBlockIndex&&) = delete;
 };
 
 arith_uint256 GetBlockProof(const CBlockIndex& block);
+/**
+ * Use equivalent per-algorithm ancestors when only the recent linked history
+ * is retained. See GetNextWorkRequired for the required history and lookups.
+ */
+arith_uint256 GetBlockProof(const CBlockIndex& block, const PreviousAlgoBlocks& previous_algos);
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo);
 
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
@@ -419,6 +445,7 @@ public:
     SERIALIZE_METHODS(CDiskBlockIndex, obj)
     {
         LOCK(::cs_main);
+        auto header_data = obj.GetHeaderData();
         int _nVersion = DUMMY_VERSION;
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
 
@@ -432,21 +459,23 @@ public:
         // block header
         READWRITE(obj.nVersion);
         READWRITE(obj.hashPrev);
-        READWRITE(obj.hashMerkleRoot);
+        READWRITE(header_data.merkle_root);
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
-        READWRITE(obj.nNonce);
+        READWRITE(header_data.nonce);
+        SER_READ(obj, obj.SetHeaderData(header_data));
     }
 
     uint256 ConstructBlockHash() const
     {
+        const auto data = GetHeaderData();
         CBlockHeader block;
         block.nVersion = nVersion;
         block.hashPrevBlock = hashPrev;
-        block.hashMerkleRoot = hashMerkleRoot;
+        block.hashMerkleRoot = data.merkle_root;
         block.nTime = nTime;
         block.nBits = nBits;
-        block.nNonce = nNonce;
+        block.nNonce = data.nonce;
         return block.GetHash();
     }
 

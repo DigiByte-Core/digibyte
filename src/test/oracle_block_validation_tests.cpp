@@ -21,11 +21,13 @@
 #include <chainparams.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <consensus/volatility.h>
 #include <crypto/sha256.h>
 #include <key.h>
 #include <node/miner.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/musig2_aggregator.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/oracle.h>
 #include <primitives/transaction.h>
@@ -44,6 +46,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(oracle_block_validation_tests, TestChain100Setup)
@@ -559,6 +562,223 @@ BOOST_AUTO_TEST_CASE(contextual_checkblock_rejects_old_bundle)
     if (valid) {
         LogPrintf("TEST FAILURE (EXPECTED): ContextualCheckBlock accepted oracle bundle older than 1 hour\n");
     }
+}
+
+BOOST_AUTO_TEST_CASE(validated_bundle_output_tracks_only_the_checked_block)
+{
+    LOCK(cs_main);
+    const Consensus::Params params = Params().GetConsensus();
+    const CBlockIndex* parent = m_node.chainman->ActiveChain().Tip();
+    const int height = parent->nHeight + 1;
+    const int64_t timestamp = GetTime();
+    const auto expected = CreateValidMuSig2OracleBundle(50000, timestamp, height);
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript() << height << OP_0;
+    coinbase.vout.emplace_back(0, CScript() << OP_TRUE);
+    AddOracleBundleToCoinbase(coinbase, expected);
+    CBlock valid;
+    valid.nTime = timestamp;
+    valid.vtx.push_back(MakeTransactionRef(coinbase));
+    std::optional<COracleBundle> output;
+
+    const auto check = [&](const CBlock& block, const Consensus::Params& rules,
+                           bool accepted, const std::string& reason, bool has_bundle) {
+        output = expected;
+        BlockValidationState plain_state, output_state;
+        const bool plain = OracleDataValidator::ValidateBlockOracleData(block, parent, rules, plain_state);
+        const bool with_output = OracleDataValidator::ValidateBlockOracleData(block, parent, rules, output_state, &output);
+        BOOST_CHECK_EQUAL(plain, accepted);
+        BOOST_CHECK_EQUAL(with_output, accepted);
+        BOOST_CHECK_EQUAL(plain_state.GetRejectReason(), reason);
+        BOOST_CHECK_EQUAL(output_state.GetRejectReason(), reason);
+        BOOST_CHECK(plain_state.GetResult() == output_state.GetResult());
+        if (!accepted) BOOST_CHECK(output_state.GetResult() == BlockValidationResult::BLOCK_CONSENSUS);
+        BOOST_CHECK_EQUAL(plain_state.GetDebugMessage(), output_state.GetDebugMessage());
+        BOOST_CHECK_EQUAL(output.has_value(), has_bundle);
+        if (has_bundle) {
+            BOOST_REQUIRE(output);
+            BOOST_CHECK_EQUAL(output->median_price_micro_usd, expected.median_price_micro_usd);
+            BOOST_CHECK_EQUAL(output->timestamp, expected.timestamp);
+            BOOST_CHECK_EQUAL(output->epoch, expected.epoch);
+            BOOST_CHECK(output->aggregate_sig == expected.aggregate_sig);
+            BOOST_CHECK(output->participation_bitmap == expected.participation_bitmap);
+        }
+    };
+    check(valid, params, true, "", true);
+    check(CBlock{}, params, true, "", false);
+    auto inactive = params;
+    inactive.DigiDollarHeight = height + 1;
+    check(valid, inactive, true, "", false);
+
+    CBlock absent = valid;
+    CMutableTransaction absent_coinbase(coinbase);
+    absent_coinbase.vout.pop_back();
+    absent.vtx[0] = MakeTransactionRef(absent_coinbase);
+    check(absent, params, true, "", false);
+
+    CMutableTransaction mint;
+    mint.nVersion = MakeDigiDollarVersion(DD_TX_MINT);
+    mint.vin.emplace_back(COutPoint(uint256::ONE, 0));
+    mint.vout.emplace_back(0, CScript() << OP_TRUE);
+    CBlock missing_required = absent;
+    missing_required.vtx.push_back(MakeTransactionRef(mint));
+    check(missing_required, params, false, "bad-oracle-missing", false);
+
+    CBlock duplicate = valid;
+    CMutableTransaction duplicate_coinbase(coinbase);
+    duplicate_coinbase.vout.push_back(coinbase.vout.back());
+    duplicate.vtx[0] = MakeTransactionRef(duplicate_coinbase);
+    check(duplicate, params, false, "bad-oracle-multiple-outputs", false);
+
+    CBlock malformed = valid;
+    CMutableTransaction malformed_coinbase(coinbase);
+    malformed_coinbase.vout.back().scriptPubKey = CScript() << OP_RETURN << OP_ORACLE;
+    malformed.vtx[0] = MakeTransactionRef(malformed_coinbase);
+    check(malformed, params, false, "bad-oracle-malformed", false);
+
+    CBlock stale = valid;
+    stale.nTime += ORACLE_MAX_AGE_SECONDS;
+    check(stale, params, true, "", true);
+    ++stale.nTime;
+    check(stale, params, false, "bad-oracle-timestamp", false);
+    CBlock future = valid;
+    future.nTime -= 60;
+    check(future, params, true, "", true);
+    --future.nTime;
+    check(future, params, false, "bad-oracle-timestamp", false);
+    auto wrong_chain = params;
+    wrong_chain.hashGenesisBlock = uint256::ONE;
+    check(valid, wrong_chain, false, "bad-oracle-musig2", false);
+    check(valid, params, true, "", true);
+
+    auto bad_bundle = expected;
+    ++bad_bundle.epoch;
+    CMutableTransaction wrong_epoch_coinbase(absent_coinbase);
+    AddOracleBundleToCoinbase(wrong_epoch_coinbase, bad_bundle);
+    CBlock wrong_epoch = valid;
+    wrong_epoch.vtx[0] = MakeTransactionRef(wrong_epoch_coinbase);
+    check(wrong_epoch, params, false, "bad-oracle-musig2", false);
+
+    bad_bundle = expected;
+    bad_bundle.aggregate_sig[0] ^= 1;
+    CMutableTransaction bad_signature_coinbase(absent_coinbase);
+    AddOracleBundleToCoinbase(bad_signature_coinbase, bad_bundle);
+    CBlock bad_signature = valid;
+    bad_signature.vtx[0] = MakeTransactionRef(bad_signature_coinbase);
+    check(bad_signature, params, false, "bad-oracle-musig2", false);
+}
+
+BOOST_AUTO_TEST_CASE(reused_bundle_verifier_respects_parameter_snapshots)
+{
+    LOCK(cs_main);
+    const Consensus::Params params = Params().GetConsensus();
+    const int height = m_node.chainman->ActiveChain().Height() + 1;
+    const auto bundle = CreateValidMuSig2OracleBundle(50000, GetTime(), height);
+    const auto verify = [&](const Consensus::Params& rules, bool expected, const std::string& reason) {
+        std::string error;
+        BOOST_CHECK_EQUAL(OracleBundleManager::ValidateMuSig2Bundle(bundle, height, rules, error), expected);
+        BOOST_CHECK_EQUAL(error, reason);
+    };
+    verify(params, true, "");
+    auto changed = params;
+    changed.hashGenesisBlock = uint256::ONE;
+    verify(changed, false, "v0x03 aggregate signature verification failed");
+    verify(params, true, "");
+    changed = params;
+    changed.vOracleCompressedPublicKeys[0][0] ^= 1;
+    verify(changed, false, "v0x03 aggregate signature verification failed");
+    verify(params, true, "");
+    changed = params;
+    changed.vOraclePublicKeys[0] = std::string(64, '0');
+    verify(changed, false, "Failed to compute aggregate pubkey from bitmap");
+    verify(params, true, "");
+    changed = params;
+    changed.nOracleConsensusRequired = 5;
+    verify(changed, false, "v0x03 bundle below minimum oracle threshold (4 signers, need 5)");
+    verify(params, true, "");
+    changed = params;
+    changed.nOraclePubkeyCount = 3;
+    verify(changed, false, "v0x03 signer outside active oracle roster (id=3)");
+    verify(params, true, "");
+}
+
+BOOST_AUTO_TEST_CASE(startup_cancellation_after_scanning_preserves_existing_state)
+{
+    auto& manager = OracleBundleManager::GetInstance();
+    manager.Clear();
+    manager.SetEnabled(false);
+    int height;
+    {
+        LOCK(cs_main);
+        height = m_node.chainman->ActiveChain().Height() + 1;
+    }
+    CBlock block = CreateBlock({}, CScript() << OP_TRUE, m_node.chainman->ActiveChainstate());
+    CMutableTransaction coinbase(*block.vtx[0]);
+    const auto quote = CreateValidMuSig2OracleBundle(50000, block.nTime, height);
+    AddOracleBundleToCoinbase(coinbase, quote);
+    block.vtx[0] = MakeTransactionRef(coinbase);
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    block.nNonce = 0;
+    while (!CheckProofOfWork(GetPoWAlgoHash(block), block.nBits, m_node.chainman->GetConsensus())) {
+        ++block.nNonce;
+    }
+    bool new_block = false;
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(block),
+                                                  /*force_processing=*/true,
+                                                  /*min_pow_checked=*/true, &new_block));
+    BOOST_REQUIRE(new_block);
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(m_node.chainman->ActiveChain().Height(), height);
+    }
+
+    manager.Clear();
+    manager.UpdatePriceCache(height, 70000, GetTime());
+    DigiDollar::Volatility::VolatilityMonitor::ReconstructFromBlockData({{70000, GetTime(), uint32_t(height)}}, height);
+    const auto before = manager.GetStats();
+    const auto history = DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory();
+    BOOST_REQUIRE_EQUAL(history.size(), 1U);
+    int polls = 0;
+    OracleBundleManager::LoadCallbacks callbacks;
+    callbacks.cancelled = [&] { return ++polls > height; };
+    std::vector<std::pair<uint64_t, uint64_t>> progress;
+    callbacks.progress = [&](uint64_t completed, uint64_t total) { progress.emplace_back(completed, total); };
+    const auto cancelled = OracleBundleManager::LoadPricesFromChain(*m_node.chainman, callbacks);
+    BOOST_CHECK(cancelled.status == OracleBundleManager::LoadStatus::CANCELLED);
+    BOOST_CHECK_EQUAL(polls, height + 1);
+    BOOST_CHECK_EQUAL(manager.GetOraclePriceForHeight(height), 70000U);
+    BOOST_CHECK_EQUAL(manager.GetStats().latest_price, before.latest_price);
+    BOOST_CHECK_EQUAL(manager.GetStats().last_update, before.last_update);
+    const auto unchanged = DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory();
+    BOOST_REQUIRE_EQUAL(unchanged.size(), history.size());
+    BOOST_CHECK_EQUAL(unchanged[0].price, history[0].price);
+    BOOST_CHECK_EQUAL(unchanged[0].timestamp, history[0].timestamp);
+    BOOST_CHECK_EQUAL(unchanged[0].height, history[0].height);
+    BOOST_REQUIRE(!progress.empty());
+    BOOST_CHECK_EQUAL(progress.front().first, 0U);
+    BOOST_CHECK_LT(progress.back().first, uint64_t(height));
+
+    polls = 0;
+    callbacks.cancelled = [&] {
+        if (++polls == height / 2) manager.UpdatePriceCache(1, 60000, GetTime());
+        return false;
+    };
+    progress.clear();
+    const auto complete = OracleBundleManager::LoadPricesFromChain(*m_node.chainman, callbacks);
+    BOOST_CHECK(complete.status == OracleBundleManager::LoadStatus::COMPLETE);
+    BOOST_CHECK_EQUAL(manager.GetOraclePriceForHeight(1), 60000U);
+    BOOST_CHECK_EQUAL(manager.GetOraclePriceForHeight(height), quote.median_price_micro_usd);
+    BOOST_CHECK_EQUAL(manager.GetStats().last_update, quote.timestamp);
+    BOOST_CHECK(DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory().empty());
+    BOOST_REQUIRE(!progress.empty());
+    BOOST_CHECK_EQUAL(progress.front().first, 0U);
+    BOOST_CHECK_EQUAL(progress.back().first, uint64_t(height));
+    BOOST_CHECK_EQUAL(progress.back().second, uint64_t(height));
+    BOOST_CHECK_LE(progress.size(), 102U);
+    manager.Clear();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

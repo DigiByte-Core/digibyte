@@ -1,6 +1,6 @@
 # DigiDollar Oracle Setup Guide
 
-*The single source of truth for oracle operator setup — multi-oracle MuSig2 (V1 activates alongside DigiDollar; `nDigiDollarMuSig2Height = nDDActivationHeight` on mainnet and testnet26. On default regtest `nDigiDollarMuSig2Height = std::min(nDDActivationHeight, min_activation_height) = 0`.)*
+*The single source of truth for oracle operator setup — multi-oracle MuSig2 (V1 activates alongside DigiDollar; `nDigiDollarMuSig2Height = nDDActivationHeight` on mainnet and testnet26. On default regtest `nDigiDollarMuSig2Height = std::min(nDDActivationHeight, DigiDollarHeight) = 0`.)*
 
 ---
 
@@ -67,8 +67,6 @@ txindex=1
 server=1
 listen=1
 addnode=oracle1.digibyte.io
-debug=digidollar
-debug=net
 ```
 
 > **`testnet=1` goes at the top** (not under any section). Everything else under `[test]`.
@@ -89,6 +87,10 @@ algo=sha256d
 ```
 
 ---
+
+For two nodes behind one router, compact filter service and temporary debug
+logging, see [node operations](doc/digidollar-operations.md). Routine operation
+does not need `debug=digidollar` or `debug=net`.
 
 ## New Oracle Setup
 
@@ -130,11 +132,19 @@ Your oracle key persists in your wallet across upgrades. You do **not** need to 
 
 ### Current testnet26 restart / upgrade
 
+Follow the [upgrade and recovery guide](doc/digidollar-operations.md). Keep
+existing wallet backups and retained block/undo data. Mainnet Thaw Day is
+scheduled at 24,490,000, estimated for November 1, 2026. Testnet26 is scheduled
+at 432,100, estimated for September 18–19, 2026. The heights trigger activation.
+Signet is unsupported and remains unscheduled. Public activation, soak testing
+and release verification still need to be completed.
+
 ```bash
-# 1. Stop your node
+# 1. Back up the loaded wallet, then stop cleanly
+digibyte-cli -testnet -rpcwallet=oracle backupwallet "/secure/backup/oracle.dat"
 digibyte-cli -testnet stop
 
-# 2. Replace binaries (download new release or rebuild from source)
+# 2. Wait for shutdown, then install the reviewed replacement binaries
 
 # 3. Start your node
 digibyted -testnet -daemon
@@ -151,7 +161,7 @@ digibyte-cli -testnet getoracles true
 
 **Qt wallet users:** Start Qt → **File → Open Wallet → oracle**. If the oracle does not come up automatically, open **Console** and run `startoracle <your_oracle_id>`.
 
-> **Auto-start behavior:** since RC25, unencrypted oracle wallets auto-start when the wallet loads (`CWallet::TryAutoStartOracles` in `src/wallet/wallet.cpp:4870`), and encrypted wallets auto-start after `walletpassphrase` unlock. Keep the manual `startoracle` command handy anyway, because it remains the safest fallback if the oracle is not already running.
+> **Auto-start behavior:** since RC25, unencrypted oracle wallets auto-start when the wallet loads (`CWallet::TryAutoStartOracles` in `src/wallet/wallet.cpp:4904`), and encrypted wallets auto-start after `walletpassphrase` unlock. Keep the manual `startoracle` command handy anyway, because it remains the safest fallback if the oracle is not already running.
 
 ### Decommissioning retired testnets
 
@@ -243,7 +253,9 @@ removed / paid API key required).
 | Active Oracles (`nOraclePubkeyCount`) | 35 | 7 | 35 |
 | Reserved slots (`nOracleTotalOracles`) | 35 | 7 | 35 |
 | Consensus Required (`nOracleConsensusRequired`) | 7 | 4-of-7 | 7 |
-| Activation Height (`nDDActivationHeight`) | 600 | 650 | BIP9 (23,627,520) |
+| Static DD height (`nDDActivationHeight`) | 600 | 650 | 23,627,520 |
+| Buried DigiDollar height (`DigiDollarHeight`) | 600 | 0 | 23,869,440 |
+| Thaw Day (`nDDThawDayHeight`) | 432,100 | Disabled unless configured | 24,490,000 |
 | Rotation Interval (`nDDOracleEpochBlocks`) | 40 blocks | 40 blocks | 40 blocks |
 | Price Update Interval (`nDDOracleUpdateInterval`) | 2 blocks | 1 block | 4 blocks |
 | Bundle/MuSig2 Epoch (`nOracleEpochLength`) | 40 blocks | 40 blocks | 40 blocks |
@@ -363,7 +375,14 @@ List all oracles from chainparams with their status.
 ```
 digibyte-cli -testnet getoracles [active_only] [blocks]
 ```
-Returns array with: `oracle_id`, `name`, `pubkey`, `endpoint`, `is_active`, `last_price_micro_usd`, `last_price_usd`, `last_update`, `price_source`, `status`, `selected_for_epoch`, `is_running_locally`.
+Returns an array, one object per oracle slot, with: `oracle_id`, `name`,
+`pubkey`, `endpoint`, `is_active`, `active_oracle_count`, `total_oracle_slots`,
+`consensus_threshold`, `in_consensus`, `last_price_micro_usd`, `last_price_usd`,
+`last_update`, `price_source`, `status`, `selected_for_epoch`,
+`is_running_locally`, and the signed heartbeat fields `heartbeat_status`,
+`software_version`, `client_version`, `p2p_protocol_version`,
+`oracle_protocol_version`, `musig2_context_version`, `heartbeat_timestamp`,
+`heartbeat_age_seconds` and `heartbeat_signature_valid`.
 
 #### `listoracle`
 Show the status of the oracle running on this local node (no parameters).
@@ -383,6 +402,15 @@ digibyte-cli -testnet getalloracleprices
 > **Security note:** `sendoracleprice` was removed as a security vulnerability. Oracle operators must NOT be able to inject arbitrary prices. Oracle prices come exclusively from live exchange aggregation via `startoracle`. There is no operator-facing RPC for direct price submission anywhere in the current source tree.
 
 ### DigiDollar RPCs
+
+> **Amounts.** Every DigiDollar amount below is a whole number of cents: `10000`
+> is $100.00. `senddigidollar`, `sendmanydigidollar`, `redeemdigidollar`,
+> `getredemptioninfo`, `listdigidollarpositions` and `listdigidollaraddresses`
+> also take an optional trailing `amount_unit` of `"cents"` or `"dollars"`. With
+> `dollars` the amount may have up to two decimals, so `100.00` is $100.00. An
+> amount written with a decimal point and no unit is refused, not guessed,
+> because `10000.00` could mean $100.00 or $10,000.00. A single typed amount may
+> not exceed 10,000,000 cents ($100,000.00).
 
 #### `getoracleprice`
 Get the current consensus DGB/USD oracle price.
@@ -486,7 +514,7 @@ digibyte-cli -testnet getdigidollarstats
 ```
 
 #### `getdigidollardeploymentinfo`
-Get DigiDollar BIP9 deployment status.
+Get buried DigiDollar activation status and separate Thaw Day tip/next-block status.
 
 ```
 digibyte-cli -testnet getdigidollardeploymentinfo

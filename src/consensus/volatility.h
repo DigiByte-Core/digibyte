@@ -12,12 +12,51 @@
 #include <vector>
 #include <deque>
 #include <cstdint>
+#include <functional>
+#include <string>
 
 // Forward declarations
 class COraclePriceMessage;
+class CBlockIndex;
+namespace Consensus { struct Params; }
 
 namespace DigiDollar {
 namespace Volatility {
+
+/** The reference is bound to one candidate parent; it never stores an allow/reject answer. */
+static constexpr int MINT_REFERENCE_MIN_DEPTH{240};
+static constexpr int MINT_REFERENCE_MAX_DEPTH{1440};
+static constexpr size_t MINT_REFERENCE_SAMPLES{15};
+static constexpr int MINT_REFERENCE_RULE_VERSION{1};
+static constexpr int64_t MINT_MAX_DEVIATION_BPS{2000};
+
+enum class AncestorPriceResult { NO_BUNDLE, PRICE, UNAVAILABLE };
+using AncestorPriceReader = std::function<AncestorPriceResult(const CBlockIndex&, CAmount&, std::string&)>;
+
+struct MintReference {
+    bool ready{false};
+    int candidate_height{0};
+    uint256 parent_hash;
+    uint256 genesis_hash;
+    int rules_version{MINT_REFERENCE_RULE_VERSION};
+    CAmount price_micro_usd{0};
+    size_t sample_count{0};
+    int window_start_height{0};
+    int window_end_height{-1};
+    std::string error;
+};
+
+struct MintPriceStatus {
+    bool ready{false};
+    bool quote_available{false};
+    bool restricted{false};
+    int64_t deviation_bps{0}; //!< Display only; consensus compares the unrounded wide products.
+    std::string reason;
+};
+
+MintReference BuildMintReference(int candidate_height, const CBlockIndex* parent,
+                                const Consensus::Params& params, const AncestorPriceReader& read_price);
+MintPriceStatus EvaluateMintPrice(CAmount candidate_price_micro_usd, const MintReference& reference);
 
 // ============================================================================
 // Data Structures

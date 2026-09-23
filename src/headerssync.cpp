@@ -7,6 +7,98 @@
 #include <timedata.h>
 #include <util/check.h>
 #include <util/vector.h>
+#include <validation.h>
+#include <limits>
+
+namespace {
+// Work calculations need these fields, not a stored header or its block hash.
+void CopyWorkFields(CBlockIndex& to, const CBlockIndex& from)
+{
+    to.nHeight = from.nHeight;
+    to.nVersion = from.nVersion;
+    to.nTime = from.nTime;
+    to.nBits = from.nBits;
+}
+} // namespace
+
+HeadersWorkState::HeadersWorkState(const Consensus::Params& params, const CBlockIndex& chain_start)
+    : m_params(params), m_chain_start(chain_start),
+      m_history_limit(NUM_ALGOS * params.nAveragingInterval + CBlockIndex::nMedianTimeSpan)
+{
+    for (const CBlockIndex* index = &chain_start; index && m_recent.size() < m_history_limit; index = index->pprev) {
+        m_recent.emplace_front();
+        CopyWorkFields(m_recent.front(), *index);
+    }
+    CBlockIndex* previous{nullptr};
+    for (auto& index : m_recent) {
+        index.pprev = previous;
+        previous = &index;
+    }
+}
+
+std::optional<arith_uint256> HeadersWorkState::AddHeader(const CBlockHeader& header)
+{
+    // A zero hash checks the target range without hashing the header.
+    if (!CheckProofOfWork(uint256{}, header.nBits, m_params)) return std::nullopt;
+    if (m_recent.back().nHeight == std::numeric_limits<int>::max()) return std::nullopt;
+    CBlockIndex next;
+    next.nHeight = m_recent.back().nHeight + 1;
+    next.nVersion = header.nVersion;
+    next.nTime = header.nTime;
+    next.nBits = header.nBits;
+    next.pprev = &m_recent.back();
+
+    const int header_algo = header.GetAlgo();
+    if ((next.nHeight >= m_params.DeploymentHeight(Consensus::DEPLOYMENT_ALGOLOCK) ||
+         next.nHeight >= m_params.nGroestlDeactivationHeight) &&
+        (header_algo == ALGO_UNKNOWN || !IsAlgoActive(next.pprev, m_params, header_algo))) {
+        return std::nullopt;
+    }
+
+    PreviousAlgoBlocks previous_algos{};
+    if (next.nHeight >= m_params.workComputationChangeTarget) {
+        const bool minimum_difficulty = m_params.fPowAllowMinDifficultyBlocks &&
+            (m_params.fEasyPow || header.nTime > next.pprev->nTime + m_params.nTargetSpacing * 2);
+        for (int algo = 0; algo < NUM_ALGOS_IMPL; ++algo) {
+            if (minimum_difficulty) break;
+            if (!IsAlgoActive(next.pprev, m_params, algo) && algo != header_algo) continue;
+            // Seed a newly needed algorithm from the real fork point. Looking
+            // up inactive algorithms on every batch can scan years of blocks.
+            if (!m_initialized[algo]) {
+                if (const auto* previous = GetLastBlockIndexForAlgo(&m_chain_start, m_params, algo)) {
+                    CopyWorkFields(m_previous_algos[algo], *previous);
+                    m_present[algo] = true;
+                }
+                m_initialized[algo] = true;
+            }
+            if (m_present[algo]) previous_algos[algo] = &m_previous_algos[algo];
+        }
+        // Geometric work uses the required targets of all active algorithms.
+        // An easier claimed target must not earn that work before validation.
+        if (header.nBits != GetNextWorkRequired(next.pprev, &header, m_params, header_algo, previous_algos)) {
+            return std::nullopt;
+        }
+    }
+    const arith_uint256 work = GetBlockProof(next, previous_algos);
+
+    // Match the historical lookup, including its testnet minimum-difficulty
+    // exception. Use the actual parent before trimming the recent window.
+    if (!(m_params.fPowAllowMinDifficultyBlocks &&
+          next.nTime > next.pprev->nTime + m_params.nTargetSpacing * 2)) {
+        const int algo = next.GetAlgo();
+        CopyWorkFields(m_previous_algos[algo], next);
+        m_initialized[algo] = true;
+        m_present[algo] = true;
+    }
+    m_recent.emplace_back();
+    CopyWorkFields(m_recent.back(), next);
+    m_recent.back().pprev = next.pprev;
+    if (m_recent.size() > m_history_limit) {
+        m_recent.pop_front();
+        m_recent.front().pprev = nullptr;
+    }
+    return work;
+}
 
 // The two constants below are computed using the simulation script in
 // contrib/devtools/headerssync-params.py.
@@ -27,8 +119,9 @@ HeadersSyncState::HeadersSyncState(NodeId id, const Consensus::Params& consensus
     m_commit_offset(GetRand<unsigned>(HEADER_COMMITMENT_PERIOD)),
     m_id(id), m_consensus_params(consensus_params),
     m_chain_start(chain_start),
+    m_header_work(std::make_unique<HeadersWorkState>(consensus_params, *chain_start)),
     m_minimum_required_work(minimum_required_work),
-    m_current_chain_work(chain_start->nChainWork),
+    m_current_chain_work(chain_start->GetChainWork()),
     m_last_header_received(m_chain_start->GetBlockHeader()),
     m_current_height(chain_start->nHeight)
 {
@@ -54,6 +147,7 @@ void HeadersSyncState::Finalize()
     ClearShrink(m_header_commitments);
     m_last_header_received.SetNull();
     ClearShrink(m_redownloaded_headers);
+    m_header_work.reset();
     m_redownload_buffer_last_hash.SetNull();
     m_redownload_buffer_first_prev_hash.SetNull();
     m_process_all_remaining_headers = false;
@@ -167,7 +261,8 @@ bool HeadersSyncState::ValidateAndStoreHeadersCommitments(const std::vector<CBlo
         m_redownload_buffer_last_height = m_chain_start->nHeight;
         m_redownload_buffer_first_prev_hash = m_chain_start->GetBlockHash();
         m_redownload_buffer_last_hash = m_chain_start->GetBlockHash();
-        m_redownload_chain_work = m_chain_start->nChainWork;
+        m_redownload_chain_work = m_chain_start->GetChainWork();
+        m_header_work = std::make_unique<HeadersWorkState>(m_consensus_params, *m_chain_start);
         m_download_state = State::REDOWNLOAD;
         LogPrint(BCLog::NET, "Initial headers sync transition with peer=%d: reached sufficient work at height=%i, redownloading from height=%i\n", m_id, m_current_height, m_redownload_buffer_last_height);
     }
@@ -179,7 +274,7 @@ bool HeadersSyncState::ValidateAndProcessSingleHeader(const CBlockHeader& curren
     Assume(m_download_state == State::PRESYNC);
     if (m_download_state != State::PRESYNC) return false;
 
-    int next_height = m_current_height + 1;
+    int64_t next_height = m_current_height + 1;
 
     // Verify that the difficulty isn't growing too fast; an adversary with
     // limited hashing capability has a greater chance of producing a high
@@ -205,7 +300,12 @@ bool HeadersSyncState::ValidateAndProcessSingleHeader(const CBlockHeader& curren
         }
     }
 
-    m_current_chain_work += GetBlockProof(CBlockIndex(current));
+    const auto work = m_header_work->AddHeader(current);
+    if (!work) {
+        LogPrint(BCLog::NET, "Initial headers sync aborted with peer=%d: invalid header work at height=%i (presync phase)\n", m_id, next_height);
+        return false;
+    }
+    m_current_chain_work += *work;
     m_last_header_received = current;
     m_current_height = next_height;
 
@@ -241,7 +341,12 @@ bool HeadersSyncState::ValidateAndStoreRedownloadedHeader(const CBlockHeader& he
     }
 
     // Track work on the redownloaded chain
-    m_redownload_chain_work += GetBlockProof(CBlockIndex(header));
+    const auto work = m_header_work->AddHeader(header);
+    if (!work) {
+        LogPrint(BCLog::NET, "Initial headers sync aborted with peer=%d: invalid header work at height=%i (redownload phase)\n", m_id, next_height);
+        return false;
+    }
+    m_redownload_chain_work += *work;
 
     if (m_redownload_chain_work >= m_minimum_required_work) {
         m_process_all_remaining_headers = true;

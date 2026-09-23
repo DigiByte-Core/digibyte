@@ -221,6 +221,12 @@ struct DDTransferTestFixture : public TestingSetup {
         params.feeRate = 100000; // 100,000 sat/kB (DigiByte minimum relay fee)
         params.spenderKey = senderKey;
 
+        // An ordinary bech32 address for the leftover DGB. The builder refuses
+        // to place change anywhere else.
+        CKey changeKey;
+        changeKey.MakeNewKey(true);
+        params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(changeKey.GetPubKey())};
+
         // Add some mock UTXOs
         params.ddUtxos.push_back(CreateMockDDUTXO(TEST_DD_AMOUNT));
         params.feeUtxos.push_back(CreateMockDGBUTXO(COIN)); // 1 DGB for fees
@@ -684,11 +690,13 @@ BOOST_FIXTURE_TEST_CASE(test_build_transfer_inputs, DDTransferTestFixture)
     // Act: Build transfer transaction
     TxBuilderResult result = builder.BuildTransferTransaction(params);
 
-    // Assert: Transaction should be created with correct inputs
-    BOOST_CHECK_EQUAL(result.success, true);
+    // Assert: Transaction should be created with correct inputs.
+    // These two have to stop the test, not just record a failure. The checks
+    // below read the first inputs, and a build that was refused has none.
+    BOOST_REQUIRE_EQUAL(result.success, true);
 
     // Verify DD inputs were added (should be first 2 inputs before fee inputs)
-    BOOST_CHECK_GE(result.tx.vin.size(), 2);
+    BOOST_REQUIRE_GE(result.tx.vin.size(), 2u);
     BOOST_CHECK(result.tx.vin[0].prevout == utxo1);
     BOOST_CHECK(result.tx.vin[1].prevout == utxo2);
 }
@@ -725,6 +733,12 @@ BOOST_FIXTURE_TEST_CASE(test_multiple_dd_inputs_assembly, DDTransferTestFixture)
     params.spenderKey = senderKey;
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
+    // An ordinary bech32 address for the leftover DGB. The builder refuses to
+    // place change anywhere else.
+    CKey changeKey;
+    changeKey.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(changeKey.GetPubKey())};
+
     // Create 5 small UTXOs
     for (int i = 0; i < 5; ++i) {
         COutPoint utxo = CreateMockDDUTXO(3000);  // $30.00 each
@@ -760,6 +774,11 @@ BOOST_FIXTURE_TEST_CASE(test_dd_input_count_matches_utxo_count, DDTransferTestFi
         params.recipients = {{recipientAddr, count * 1000}}; // $10.00 per UTXO
         params.feeRate = 100000; // 100,000 sat/kB
         params.spenderKey = senderKey;
+        // An ordinary bech32 address for the leftover DGB. The builder
+        // refuses to place change anywhere else.
+        CKey params_change_key;
+        params_change_key.MakeNewKey(true);
+        params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
         params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
         for (int i = 0; i < count; ++i) {
@@ -796,6 +815,11 @@ BOOST_FIXTURE_TEST_CASE(test_build_transfer_outputs, DDTransferTestFixture)
     };
     params.feeRate = 100000; // 100,000 sat/kB (minimum relay fee for DigiByte)
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
 
     // Create DD UTXOs with sufficient balance (need 75000 cents total)
     params.ddUtxos.push_back(CreateMockDDUTXO(50000)); // $500
@@ -844,6 +868,11 @@ BOOST_FIXTURE_TEST_CASE(test_single_recipient_output, DDTransferTestFixture)
     params.recipients = {{recipient, 30000}}; // $300.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(30000)); // Exact amount
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -881,6 +910,11 @@ BOOST_FIXTURE_TEST_CASE(test_output_p2tr_script_format, DDTransferTestFixture)
     params.recipients = {{recipient, 10000}}; // $100.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(10000));
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -935,6 +969,11 @@ BOOST_FIXTURE_TEST_CASE(test_all_recipients_get_outputs, DDTransferTestFixture)
     };
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(60000)); // Exact total
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -980,6 +1019,11 @@ BOOST_FIXTURE_TEST_CASE(test_output_amounts_match_requested, DDTransferTestFixtu
     };
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(amount1 + amount2));
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1026,6 +1070,11 @@ BOOST_FIXTURE_TEST_CASE(test_fee_inputs_added, DDTransferTestFixture)
     params.recipients = {{recipientAddr, 50000}};
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos = {ddUtxo};
     params.feeUtxos = {feeUtxo};
 
@@ -1060,6 +1109,11 @@ BOOST_FIXTURE_TEST_CASE(test_transaction_finalization, DDTransferTestFixture)
     params.recipients = {{recipientAddr, 50000}}; // $500.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
 
     // Create DD UTXO with sufficient balance
     params.ddUtxos.push_back(CreateMockDDUTXO(50000)); // Exact amount
@@ -1096,6 +1150,11 @@ BOOST_FIXTURE_TEST_CASE(test_transaction_version_and_locktime, DDTransferTestFix
     params.recipients = {{recipientAddr, 25000}}; // $250.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(25000));
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1120,6 +1179,11 @@ BOOST_FIXTURE_TEST_CASE(test_dd_amount_balance_verification, DDTransferTestFixtu
     params.recipients = {{recipientAddr, 30000}}; // $300.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(30000)); // Exact balance
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1143,8 +1207,10 @@ BOOST_FIXTURE_TEST_CASE(test_dd_amount_balance_verification, DDTransferTestFixtu
         // Skip OP_RETURN outputs (metadata, not spendable DD)
         if (output.nValue == 0 && output.scriptPubKey.size() > 0 &&
             output.scriptPubKey[0] == OP_1) {
+            // The builder registers each output it creates; read that
+            // registry explicitly. Consensus never does.
             CAmount ddAmount = 0;
-            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount)) {
+            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount, /*allow_registry=*/true)) {
                 totalDDOut += ddAmount;
             }
         }
@@ -1162,6 +1228,11 @@ BOOST_FIXTURE_TEST_CASE(test_dd_amount_mismatch_detection, DDTransferTestFixture
     params.recipients = {{recipientAddr, 50000}}; // $500.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(30000)); // Only $300.00 (insufficient!)
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1221,6 +1292,11 @@ BOOST_FIXTURE_TEST_CASE(test_empty_inputs_validation, DDTransferTestFixture)
     params.recipients = {{recipientAddr, 10000}}; // $100.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     // No ddUtxos provided!
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1241,6 +1317,11 @@ BOOST_FIXTURE_TEST_CASE(test_empty_outputs_validation, DDTransferTestFixture)
     params.recipients = {}; // No recipients!
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(10000));
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1263,6 +1344,11 @@ BOOST_FIXTURE_TEST_CASE(test_complete_transaction_structure, DDTransferTestFixtu
     params.recipients = {{recipientAddr, 40000}}; // $400.00
     params.feeRate = 100000; // 100,000 sat/kB
     params.spenderKey = senderKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos.push_back(CreateMockDDUTXO(40000));
     params.feeUtxos.push_back(CreateMockDGBUTXO(COIN));
 
@@ -1291,8 +1377,10 @@ BOOST_FIXTURE_TEST_CASE(test_complete_transaction_structure, DDTransferTestFixtu
         // Skip OP_RETURN outputs (metadata, not spendable DD)
         if (output.nValue == 0 && output.scriptPubKey.size() > 0 &&
             output.scriptPubKey[0] == OP_1) {
+            // The builder registers each output it creates; read that
+            // registry explicitly. Consensus never does.
             CAmount ddAmount = 0;
-            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount)) {
+            if (DigiDollar::ExtractDDAmount(output.scriptPubKey, ddAmount, /*allow_registry=*/true)) {
                 totalDDOut += ddAmount;
             }
         }
@@ -1548,6 +1636,11 @@ BOOST_FIXTURE_TEST_CASE(test_transfer_broadcasts_to_network, DDTransferTestFixtu
     params.recipients = {{recipientAddr, transferAmount}};
     params.feeRate = 100000;
     params.spenderKey = ownerKey;
+    // An ordinary bech32 address for the leftover DGB. The builder
+    // refuses to place change anywhere else.
+    CKey params_change_key;
+    params_change_key.MakeNewKey(true);
+    params.dgbChangeDest = CTxDestination{WitnessV0KeyHash(params_change_key.GetPubKey())};
     params.ddUtxos = {mint_dd_utxo};
     params.ddAmounts = {mint_amount};  // Provide DD amounts for mock UTXO
     params.feeUtxos = {CreateMockDGBUTXO(COIN)};

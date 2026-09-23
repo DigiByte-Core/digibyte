@@ -2,6 +2,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <headerssync.h>
+#include <pow.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
 #include <test/util/setup_common.h>
@@ -10,6 +11,9 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
+#include <array>
+#include <deque>
 #include <iterator>
 #include <vector>
 
@@ -108,11 +112,88 @@ FUZZ_TARGET(headers_sync_state, .init = initialize_headers_sync_state_fuzz)
 
                     // If we get to redownloading, the presynced headers need
                     // to have the min amount of work on them.
-                    assert(CalculateHeadersWork(all_headers) >= min_work);
+                    const auto work = CalculateHeadersWork(all_headers, start_index);
+                    assert(work && *work >= min_work);
                 }
             }
 
             (void)headers_sync.NextHeadersRequestLocator();
         }
+    }
+}
+
+FUZZ_TARGET(headers_work, .init = initialize_headers_sync_state_fuzz)
+{
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    const auto& params = Params().GetConsensus();
+    constexpr std::array<int, 6> algorithms{ALGO_SHA256D, ALGO_SCRYPT, ALGO_GROESTL, ALGO_SKEIN, ALGO_QUBIT, ALGO_ODO};
+    const std::array<int, 3> event_heights{
+        static_cast<int>(params.workComputationChangeTarget),
+        std::max(static_cast<int>(params.algoSwapChangeTarget + 1), params.DeploymentHeight(Consensus::DEPLOYMENT_ODO)),
+        static_cast<int>(params.nGroestlDeactivationHeight),
+    };
+    const int next_height = event_heights[provider.ConsumeIntegralInRange<size_t>(0, event_heights.size() - 1)] +
+        provider.ConsumeIntegralInRange<int>(-2, 2);
+    const size_t count = provider.ConsumeIntegralInRange<size_t>(1, 300);
+    const bool only_scrypt = provider.ConsumeBool();
+
+    // The reference keeps every record. The download tracker must agree while
+    // discarding old records, including when an algorithm disappears for a while.
+    std::deque<CBlockIndex> full_chain;
+    for (int i = 0; i < 100; ++i) {
+        auto* previous = full_chain.empty() ? nullptr : &full_chain.back();
+        full_chain.emplace_back();
+        auto& index = full_chain.back();
+        index.pprev = previous;
+        index.nHeight = next_height - 100 + i;
+        index.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algorithms[i % algorithms.size()]);
+        index.nTime = (previous ? previous->nTime : 1500000000U) + provider.ConsumeIntegralInRange<uint32_t>(1, 240);
+        arith_uint256 target = UintToArith256(params.powLimit);
+        target >>= provider.ConsumeIntegralInRange<unsigned>(4, 64);
+        index.nBits = target.GetCompact();
+    }
+    HeadersWorkState work_state(params, full_chain.back());
+    const size_t history_limit = NUM_ALGOS * params.nAveragingInterval + CBlockIndex::nMedianTimeSpan;
+
+    for (size_t i = 0; i < count; ++i) {
+        auto* previous = &full_chain.back();
+        const int height = previous->nHeight + 1;
+        const bool algo_lock = height >= params.DeploymentHeight(Consensus::DEPLOYMENT_ALGOLOCK) ||
+            height >= params.nGroestlDeactivationHeight;
+        int algo = only_scrypt ? ALGO_SCRYPT : algorithms[provider.ConsumeIntegralInRange<size_t>(0, algorithms.size() - 1)];
+        if (algo_lock && !IsAlgoActive(previous, params, algo)) algo = ALGO_SCRYPT;
+        CBlockHeader header;
+        header.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
+        header.nTime = previous->nTime + provider.ConsumeIntegralInRange<uint32_t>(1, 240);
+        header.nBits = GetNextWorkRequired(previous, &header, params, algo);
+
+        const size_t history_size = work_state.GetHistorySize();
+        if (height >= params.workComputationChangeTarget && provider.ConsumeBool()) {
+            CBlockHeader invalid = header;
+            invalid.nBits ^= 1;
+            assert(!work_state.AddHeader(invalid));
+            assert(work_state.GetHistorySize() == history_size);
+        }
+        if (algo_lock && provider.ConsumeBool()) {
+            // Correct difficulty cannot make a retired algorithm valid again.
+            assert(!IsAlgoActive(previous, params, ALGO_GROESTL));
+            CBlockHeader invalid = header;
+            invalid.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(ALGO_GROESTL);
+            invalid.nBits = GetNextWorkRequired(previous, &invalid, params, ALGO_GROESTL);
+            assert(!work_state.AddHeader(invalid));
+            assert(work_state.GetHistorySize() == history_size);
+        }
+
+        const auto work = work_state.AddHeader(header);
+        assert(work);
+        full_chain.emplace_back();
+        auto& index = full_chain.back();
+        index.pprev = previous;
+        index.nHeight = height;
+        index.nVersion = header.nVersion;
+        index.nTime = header.nTime;
+        index.nBits = header.nBits;
+        assert(*work == GetBlockProof(index));
+        assert(work_state.GetHistorySize() <= history_limit);
     }
 }

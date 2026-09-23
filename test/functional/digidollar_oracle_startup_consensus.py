@@ -15,10 +15,10 @@ bundles + DD mints + a volatility move, then asserts the reconstructed oracle st
 is IDENTICAL:
   (before)              the live state before any restart
   (A) restart no reindex   -> windowed rescan rebuild
-  (B) restart -reindex     -> full block-replay rebuild (ground truth)
+  (B) restart -reindex     -> full reindex rebuild (ground truth)
 
 It also asserts the node does NOT write a durable oracle snapshot: the durable
-persist/replay optimization was intentionally NOT shipped here (it must be made
+persist/reindex optimization was intentionally NOT shipped here (it must be made
 byte-identical to a full rescan first, before it can be consensus-safe), so a
 stray oracle/oracleprices.dat would be a regression.
 """
@@ -104,15 +104,15 @@ class DigiDollarOracleStartupConsensusTest(DigiByteTestFramework):
         self.log.info(f"Post-restart (rescan) state: {after_restart}")
         assert_equal(before, after_restart)
 
-        # --- (B) Restart WITH -reindex -> full block replay = ground truth ---
-        self.log.info("Restart B: -reindex (authoritative full block replay) ...")
+        # --- (B) Restart WITH -reindex -> full reindex = ground truth ---
+        self.log.info("Restart B: -reindex (authoritative full reindex) ...")
         self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         node.setmocktime(self.t)
         after_reindex = self.reconstructed_state()
         self.log.info(f"Post-reindex state: {after_reindex}")
 
         # Restart (windowed rescan) must reconstruct EXACTLY what the authoritative
-        # full block replay does, or a restarted node could diverge in consensus.
+        # a full reindex does, or a restarted node could diverge in consensus.
         assert_equal(after_restart, after_reindex)
         assert_equal(before, after_reindex)
         self.log.info("PASS: restart (rescan) == full-reindex == pre-restart state; "

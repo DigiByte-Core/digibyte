@@ -6,6 +6,7 @@
 #define DIGIBYTE_DIGIDOLLAR_HEALTH_H
 
 #include <consensus/amount.h>
+#include <consensus/digidollar_state.h>
 #include <primitives/block.h>
 #include <univalue/include/univalue.h>
 #include <uint256.h>
@@ -15,9 +16,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <functional>
+#include <optional>
 
 // Forward declarations
 class CCoinsView;
+class Coin;
 class CTxMemPool;
 class ChainstateManager;
 class CChain;
@@ -35,6 +39,84 @@ namespace wallet {
 }
 
 namespace DigiDollar {
+
+using CanonicalTxLookup = std::function<bool(const uint256&, uint32_t, CTransactionRef&)>;
+
+struct HealthScanCallbacks {
+    std::function<bool()> cancelled;
+    //! A zero total means that only the completed count is known.
+    std::function<void(uint64_t completed, uint64_t total)> progress;
+};
+
+struct HealthScanResult {
+    enum class Status { COMPLETE, CANCELLED, READ_ERROR };
+    Status status{Status::COMPLETE};
+    std::string error;
+};
+
+struct CanonicalVault {
+    COutPoint outpoint;
+    CAmount principal{0};
+    CAmount collateral{0};
+};
+
+enum class VaultLookupResult { NOT_VAULT, VAULT, NOT_READY };
+
+/** Resolve identity from the creating transaction on the supplied ancestry.
+ * NOT_READY means only one thing: the creating block could not be read here, so
+ * another node with that block may still answer. Whenever the creating
+ * transaction can be read, the answer is VAULT or NOT_VAULT and is the same on
+ * every node, including for a mint that records no readable amount.
+ */
+VaultLookupResult LookupCanonicalVault(const COutPoint& outpoint, const Coin& coin,
+                                      const Consensus::Params& params,
+                                      const CanonicalTxLookup& lookup,
+                                      CanonicalVault& vault, std::string& error);
+
+/** Reconstruct from a consistent UTXO view. This never establishes history proof
+ * and never mutates either the view or the legacy health monitor.
+ * An optional availability result allows callers to retain an unknown token
+ * total when readable legacy metadata has no unambiguous amount. Missing source
+ * blocks still fail the scan. No partial token total is returned.
+ */
+bool ReconstructChainstateHealth(const CCoinsView& view, const Consensus::Params& params,
+                                const CanonicalTxLookup& lookup,
+                                ChainstateHealth& health, std::string& error,
+                                const std::function<bool()>& interrupted = {},
+                                CAmount* circulating_supply = nullptr,
+                                const std::function<void(uint64_t, uint64_t)>& progress = {},
+                                bool* circulating_supply_known = nullptr);
+
+/** How many times the whole coin set has been walked to rebuild the accounting.
+ * This walk reads a block from disk for every unspent DigiDollar output, so it
+ * should happen once when the node needs a new starting point and not again.
+ * Only tests and logs read this number; nothing in validation uses it.
+ */
+uint64_t ChainstateHealthRebuildCount();
+
+/** Apply or undo a transaction using the original amounts of its creating vaults. */
+bool UpdateChainstateHealth(const CTransaction& tx, const std::vector<Coin>& inputs,
+                           const Consensus::Params& params, const CanonicalTxLookup& lookup,
+                           ChainstateHealth& health, bool undo, std::string& error,
+                           uint32_t creating_height = std::numeric_limits<uint32_t>::max());
+
+enum class SupplyChangeResult { KNOWN, UNKNOWN_METADATA, FAILURE };
+
+/** Reporting only: inspect all token sources, distinguishing unavailable amounts
+ * in retained metadata from missing or inconsistent physical source data.
+ * Only KNOWN assigns change. An unknown amount never becomes a numeric delta.
+ */
+SupplyChangeResult GetCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                             uint32_t height, const Consensus::Params& params,
+                                             const CanonicalTxLookup& lookup, CAmount& change, std::string& error);
+
+/** Strict reporting wrapper: succeeds only when the complete delta is known. */
+bool CalculateCirculatingSupplyChange(const CTransaction& tx, const std::vector<Coin>& inputs,
+                                     uint32_t height, const Consensus::Params& params,
+                                     const CanonicalTxLookup& lookup, CAmount& change, std::string& error);
+
+/** The common post-activation health formula, without global ERR or price state. */
+std::optional<int> CalculateChainstateHealth(const ChainstateHealth& state, CAmount price_micro_usd);
 
 /**
  * System-wide health metrics structure
@@ -188,6 +270,12 @@ public:
     //! old silent-undercount behavior. Every caller must decide explicitly.
     static bool ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view, const node::BlockManager* blockman, const CTxMemPool* mempool, const CChain* chain, const Consensus::Params* consensus);
 
+    //! Cancellation and existing read failures leave the cached metrics unchanged.
+    static HealthScanResult ScanUTXOSet(CCoinsView* view, CCoinsView* validation_view,
+                                       const node::BlockManager* blockman, const CTxMemPool* mempool,
+                                       const CChain* chain, const Consensus::Params* consensus,
+                                       const HealthScanCallbacks& callbacks);
+
     /**
      * Reconstruct the cached system-health metrics (total DD supply + total
      * collateral) from the on-chain UTXO set at node startup.
@@ -209,6 +297,7 @@ public:
     //! (see ScanUTXOSet) — the caller must abort startup rather than run
     //! consensus with an incomplete health baseline.
     static bool ReconstructFromChain(ChainstateManager& chainman);
+    static HealthScanResult ReconstructFromChain(ChainstateManager& chainman, const HealthScanCallbacks& callbacks);
 
     /**
      * Get cached metrics without triggering updates
@@ -224,6 +313,12 @@ public:
     static void ResetMetrics() {
         std::lock_guard<std::mutex> lock(s_metricsMutex); // RH-44
         s_currentMetrics = SystemMetrics();
+    }
+
+    /** Restore metrics when legacy baseline reconstruction fails before publication. */
+    static void RestoreLegacyMetrics(const SystemMetrics& metrics) {
+        std::lock_guard<std::mutex> lock(s_metricsMutex);
+        s_currentMetrics = metrics;
     }
 
     /** Set metrics directly for unit tests that need deterministic cached totals */

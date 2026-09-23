@@ -389,8 +389,10 @@ bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consens
 /** Check if a block has been mutated (with respect to its merkle root and witness commitments). */
 bool IsBlockMutated(const CBlock& block, bool check_witness_root);
 
-/** Return the sum of the work on a given set of headers */
-arith_uint256 CalculateHeadersWork(const std::vector<CBlockHeader>& headers);
+/** Count work from the real fork point; return no value for invalid work.
+ * The caller must check proof of work and that the headers form one chain.
+ */
+std::optional<arith_uint256> CalculateHeadersWork(const std::vector<CBlockHeader>& headers, const CBlockIndex& chain_start);
 
 enum class VerifyDBResult {
     SUCCESS,
@@ -433,6 +435,8 @@ enum class FlushStateMode {
     PERIODIC,
     ALWAYS
 };
+
+enum class DigiDollarRecoveryPhase { VERIFY_TOTALS, PREFLIGHT, REWIND, REBUILD_ANCHOR, REPLAY, PERSIST };
 
 /**
  * A convenience class for constructing the CCoinsView* hierarchy used
@@ -494,6 +498,10 @@ enum class CoinsCacheSizeState
  */
 class Chainstate
 {
+private:
+    DisconnectResult DisconnectBlockInternal(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
+                                             bool fJustCheck, bool recovery) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 protected:
     /**
      * The ChainState Mutex
@@ -525,6 +533,9 @@ protected:
     //! In the unlikely case that the snapshot chainstate is found to be invalid, this
     //! is set to true on the snapshot chainstate.
     bool m_disabled GUARDED_BY(::cs_main) {false};
+
+    //! A cold activated chain has no live legacy baseline until it crosses back.
+    bool m_dd_legacy_restore_needed GUARDED_BY(::cs_main) {false};
 
     //! Cached result of LookupBlockIndex(*m_from_snapshot_blockhash)
     const CBlockIndex* m_cached_snapshot_base GUARDED_BY(::cs_main) {nullptr};
@@ -731,6 +742,10 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Verify canonical DD state, replaying previously unchecked activated history. */
+    bool InitializeDigiDollarState(const std::function<bool()>& interrupted, std::string& error,
+                                  const std::function<void(DigiDollarRecoveryPhase, uint64_t, uint64_t)>& progress = {}) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
 
@@ -745,11 +760,14 @@ public:
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Rebuild candidates using this chainstate's current tip and snapshot role. */
+    bool RebuildBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Find the last common block of this chain and a locator. */
     const CBlockIndex* FindForkInGlobalIndex(const CBlockLocator& locator) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    /** Update the chain tip based on database information, i.e. CoinsTip()'s best block. */
-    bool LoadChainTip() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Update the chain tip from CoinsTip()'s best block, optionally rebuilding startup candidates. */
+    bool LoadChainTip(bool rebuild_candidates = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Dictates whether we need to flush the cache to disk or not.
     //!
@@ -1227,8 +1245,8 @@ public:
     [[nodiscard]] MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    //! Load the block tree and coins database from disk, initializing state if we're running with -reindex
-    bool LoadBlockIndex() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Load the block index, optionally deferring candidates until the coins tip is recovered.
+    bool LoadBlockIndex(bool load_candidates = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Check to see if caches are out of balance and if so, call
     //! ResizeCoinsCaches() as needed.

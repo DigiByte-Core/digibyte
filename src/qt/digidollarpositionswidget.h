@@ -37,6 +37,7 @@ struct DigiDollarPosition {
     bool isPendingMint;
     bool isPendingRedeem;
     bool isRedeemed;
+    QString failedMintStatus;
     int64_t mintTime;      // Unix timestamp of mint transaction
 };
 

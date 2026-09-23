@@ -3,7 +3,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <policy/fees.h>
+#include <clientversion.h>
 #include <policy/policy.h>
+#include <streams.h>
 #include <test/util/txmempool.h>
 #include <txmempool.h>
 #include <uint256.h>
@@ -180,6 +182,102 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     for (int i = 2; i < 9; i++) { // At 9, the original estimate was already at the bottom (b/c scale = 2)
         BOOST_CHECK(feeEst.estimateFee(i).GetFeePerK() < origFeeEst[i-1] - deltaFee);
     }
+}
+
+BOOST_AUTO_TEST_CASE(FeeEstimateFileRoundTrip)
+{
+    const fs::path saved_path = m_path_root / "fee-estimates.dat";
+    CBlockPolicyEstimator original{saved_path, /*read_stale_estimates=*/false};
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vout.emplace_back(COIN, CScript() << OP_TRUE);
+    for (unsigned int height = 0; height < 100; ++height) {
+        tx.vin[0].prevout.n = height;
+        const auto entry = TestMemPoolEntryHelper().Fee(100000).Height(height).FromTx(tx);
+        original.processTransaction(entry, /*validFeeEstimate=*/true);
+        std::vector<const CTxMemPoolEntry*> entries{&entry};
+        original.processBlock(height + 1, entries);
+    }
+
+    const CAmount expected_smart = original.estimateSmartFee(2, nullptr, /*conservative=*/false).GetFeePerK();
+    const CAmount expected_raw = original.estimateRawFee(2, 0.85, FeeEstimateHorizon::SHORT_HALFLIFE).GetFeePerK();
+    BOOST_REQUIRE_GT(expected_smart, 0);
+    BOOST_REQUIRE_GT(expected_raw, 0);
+    {
+        AutoFile file{fsbridge::fopen(saved_path, "wb")};
+        BOOST_REQUIRE(!file.IsNull());
+        BOOST_REQUIRE(original.Write(file));
+    }
+    {
+        AutoFile file{fsbridge::fopen(saved_path, "rb")};
+        int required_version, writer_version;
+        file >> required_version >> writer_version;
+        BOOST_CHECK_EQUAL(required_version, 149900);
+        BOOST_CHECK_EQUAL(writer_version, CLIENT_VERSION);
+    }
+
+    const auto check_estimates = [&](const CBlockPolicyEstimator& estimator) {
+        BOOST_CHECK_EQUAL(estimator.estimateSmartFee(2, nullptr, /*conservative=*/false).GetFeePerK(), expected_smart);
+        BOOST_CHECK_EQUAL(estimator.estimateRawFee(2, 0.85, FeeEstimateHorizon::SHORT_HALFLIFE).GetFeePerK(), expected_raw);
+    };
+    CBlockPolicyEstimator restored{m_path_root / "no-estimates.dat", /*read_stale_estimates=*/false};
+    {
+        AutoFile file{fsbridge::fopen(saved_path, "rb")};
+        BOOST_REQUIRE(restored.Read(file));
+    }
+    check_estimates(restored);
+    // A fresh startup must restore the learned estimates before seeing another block.
+    CBlockPolicyEstimator restarted{saved_path, /*read_stale_estimates=*/false};
+    check_estimates(restarted);
+
+    const auto serialized_state = [&](const CBlockPolicyEstimator& estimator) {
+        const fs::path path = m_path_root / "fee-estimates-state.dat";
+        {
+            AutoFile file{fsbridge::fopen(path, "wb")};
+            BOOST_REQUIRE(estimator.Write(file));
+        }
+        std::vector<std::byte> data(fs::file_size(path));
+        AutoFile file{fsbridge::fopen(path, "rb")};
+        file.read(data);
+        return data;
+    };
+    const auto saved_state = serialized_state(restored);
+    {
+        AutoFile file{fsbridge::fopen(saved_path, "r+b")};
+        file << 149900 << 999999; // A newer producer can still write the supported format.
+    }
+    {
+        AutoFile file{fsbridge::fopen(saved_path, "rb")};
+        BOOST_CHECK(restored.Read(file));
+    }
+    BOOST_CHECK(serialized_state(restored) == saved_state);
+    check_estimates(restored);
+    const fs::path other_path = m_path_root / "other-estimates.dat";
+    for (const int required_version : {149899, 149900, 149901}) {
+        {
+            AutoFile file{fsbridge::fopen(other_path, "wb")};
+            // The supported header is truncated; the other headers select unsupported formats.
+            file << required_version << CLIENT_VERSION << 100U;
+        }
+        AutoFile file{fsbridge::fopen(other_path, "rb")};
+        if (required_version == 149899) {
+            BOOST_CHECK(restored.Read(file)); // Old formats are ignored without replacing history.
+        } else {
+            BOOST_CHECK(!restored.Read(file));
+        }
+        BOOST_CHECK(serialized_state(restored) == saved_state);
+        check_estimates(restored);
+    }
+    {
+        AutoFile file{fsbridge::fopen(other_path, "wb")};
+        file << 149900 << CLIENT_VERSION << 100U << 101U << 100U;
+    }
+    {
+        AutoFile file{fsbridge::fopen(other_path, "rb")};
+        BOOST_CHECK(!restored.Read(file)); // The historical start cannot exceed its end.
+    }
+    BOOST_CHECK(serialized_state(restored) == saved_state);
+    check_estimates(restored);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

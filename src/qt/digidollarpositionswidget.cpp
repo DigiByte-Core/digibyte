@@ -32,6 +32,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QDateTime>
+#include <QLocale>
 #include <QFrame>
 #include <QApplication>
 #include <QPalette>
@@ -137,7 +138,7 @@ void DigiDollarPositionsWidget::setupTableHeader()
     header->setSectionResizeMode(COL_POSITION_ID, QHeaderView::Stretch);   // Stretch to fill width
     header->setSectionResizeMode(COL_DD_MINTED, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_DGB_COLLATERAL, QHeaderView::Interactive);
-    header->setSectionResizeMode(COL_LOCK_DATE, QHeaderView::Interactive);
+    header->setSectionResizeMode(COL_LOCK_DATE, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(COL_LOCK_TIER, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_TIME_REMAINING, QHeaderView::Interactive);
     header->setSectionResizeMode(COL_HEALTH, QHeaderView::Fixed);
@@ -147,7 +148,6 @@ void DigiDollarPositionsWidget::setupTableHeader()
     // Total fixed: 115 + 145 + 100 + 85 + 130 + 105 + 100 = 780px, leaves ~170px for VAULT ID
     m_positionsTable->setColumnWidth(COL_DD_MINTED, 115);        // DD Minted
     m_positionsTable->setColumnWidth(COL_DGB_COLLATERAL, 145);   // DGB Collateral
-    m_positionsTable->setColumnWidth(COL_LOCK_DATE, 100);        // Lock Date
     m_positionsTable->setColumnWidth(COL_LOCK_TIER, 150);        // Lock Tier — must fit "10 years" / "3 months" without truncation
     m_positionsTable->setColumnWidth(COL_TIME_REMAINING, 130);   // Time Remaining (wider to fit header)
     m_positionsTable->setColumnWidth(COL_HEALTH, 105);           // Health
@@ -466,8 +466,10 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
     // while testnet/mainnet use the live oracle price.
     CAmount oraclePrice = GetMockOraclePrice();
     const bool isWatchOnly = m_walletModel->wallet().privateKeysDisabled();
-    const bool isWalletLocked = m_walletModel->getEncryptionStatus() == WalletModel::Locked;
-    const bool walletCanSign = !isWatchOnly && !isWalletLocked;
+    // A locked wallet still holds its keys. The Redeem tab asks for the
+    // passphrase when the user clicks Redeem there. Only a wallet with no
+    // private keys can never redeem, so only that one case blocks the button.
+    const bool walletCanSign = !isWatchOnly;
 
     // Get positions from wallet backend
     std::vector<WalletCollateralPosition> walletPositions = GetWalletPositions();
@@ -518,33 +520,21 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
         // Private-key-disabled/watch-only wallets may observe vaults but cannot unlock them.
         pos.canRedeem = walletCanSign && (pos.blocksRemaining == 0) && wp.is_active;
 
-        // A freshly-created mint can be known to the wallet before the collateral
-        // outpoint is confirmed in the UTXO set. During that window the wallet
-        // reconciliation layer may mark the position inactive because the coin
-        // lookup returns spent/missing, but that is NOT a redeemed vault. Surface
-        // it as confirming until the mint has at least one confirmation.
-        pos.isPendingMint = false;
-        try {
-            interfaces::WalletTxStatus status;
-            interfaces::WalletOrderForm orderForm;
-            bool inMempool = false;
-            int numBlocks = 0;
-            interfaces::WalletTx details = m_walletModel->wallet().getWalletTxDetails(
-                wp.dd_timelock_id, status, orderForm, inMempool, numBlocks);
-            if (details.tx && !status.is_abandoned && !status.is_in_main_chain && status.depth_in_main_chain == 0) {
-                // Wallet-local mints may not be in the mempool yet (for example
-                // when relay is disabled with -blocksonly), but they are still
-                // unconfirmed vaults, not redeemed vaults.
-                pos.isPendingMint = true;
-            }
-        } catch (...) {
-            pos.isPendingMint = false;
-        }
+        // The wallet already distinguishes failed attempts from mints awaiting confirmation.
+        const auto* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
+        const auto state = ddWallet->GetMintAttemptState(wp.dd_timelock_id);
+        using MintState = DigiDollarWallet::MintAttemptState;
+        pos.isPendingMint = state == MintState::Local || state == MintState::InMempool;
+        if (state == MintState::Expired) pos.failedMintStatus = tr("Expired mint");
+        if (state == MintState::Abandoned) pos.failedMintStatus = tr("Abandoned");
+        if (state == MintState::Conflicted) pos.failedMintStatus = tr("Conflicted");
+        const bool failedMint = !pos.failedMintStatus.isEmpty();
+        if (failedMint || pos.isPendingMint) pos.canRedeem = false;
 
-        // A wallet marks the position inactive as soon as a redemption spend is
-        // created. Keep unconfirmed spends visually pending until they confirm.
-        pos.isPendingRedeem = !pos.isPendingMint && !wp.is_active && pendingRedeemPositions.count(wp.dd_timelock_id) > 0;
-        pos.isRedeemed = !pos.isPendingMint && !wp.is_active && !pos.isPendingRedeem;
+        // An unconfirmed redemption remains pending until its spend confirms.
+        pos.isPendingRedeem = !failedMint && !pos.isPendingMint && !wp.is_active &&
+            pendingRedeemPositions.count(wp.dd_timelock_id) > 0;
+        pos.isRedeemed = !failedMint && !pos.isPendingMint && !wp.is_active && !pos.isPendingRedeem;
 
         // Get the mint transaction timestamp from the wallet
         pos.mintTime = 0;  // Default to 0 (will show current time if not found)
@@ -675,14 +665,14 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
         const int bufferBlocks = DigiDollar::MINT_LOCK_CONFIRMATION_BUFFER_BLOCKS;
         int64_t lockHeight = position.unlockHeight - lockTierBlocks - bufferBlocks;
 
-    QString lockDateStr = lockDate.toString("yyyy-MM-dd");
-    QTableWidgetItem* lockDateItem = new QTableWidgetItem(lockDateStr);
+    QString lockDateStr = QLocale::system().toString(lockDate.date(), QLocale::ShortFormat);
+    QTableWidgetItem* lockDateItem = new GUIUtil::NumericTableWidgetItem(lockDateStr);
     lockDateItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
     lockDateItem->setTextAlignment(Qt::AlignCenter);
-    // Store mintTime for sorting (higher = more recent)
-    lockDateItem->setData(Qt::UserRole, QVariant::fromValue(position.mintTime));
+    // Sort by the displayed date, including the estimate for older records.
+    lockDateItem->setData(Qt::UserRole, lockDate.toSecsSinceEpoch());
     lockDateItem->setToolTip(tr("Vault created: %1\nMint block height: %2\nUnlock block height: %3")
-                            .arg(lockDate.toString("yyyy-MM-dd hh:mm"))
+                            .arg(GUIUtil::dateTimeStr(lockDate))
                             .arg(lockHeight)
                             .arg(position.unlockHeight));
 
@@ -774,7 +764,9 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
 
     // Time Remaining - always show actual time remaining
     QString timeText;
-    if (position.isPendingMint) {
+    if (!position.failedMintStatus.isEmpty()) {
+        timeText = position.failedMintStatus;
+    } else if (position.isPendingMint) {
         timeText = tr("Confirming");
     } else if (position.isPendingRedeem) {
         timeText = tr("Pending");
@@ -791,7 +783,9 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
     timeItem->setTextAlignment(Qt::AlignCenter);
 
     // Apply styling based on status
-    if (position.isPendingMint) {
+    if (!position.failedMintStatus.isEmpty()) {
+        timeItem->setToolTip(tr("This mint has no confirmed vault to redeem."));
+    } else if (position.isPendingMint) {
         QString pendingColor = isDarkTheme ? "#ffb74d" : "#856404";
         QString pendingBg = isDarkTheme ? "#4a3a1f" : "#fff3cd";
         timeItem->setForeground(QBrush(QColor(pendingColor)));
@@ -829,7 +823,15 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
     m_positionsTable->setItem(row, COL_TIME_REMAINING, timeItem);
 
     // Health Status (using a custom widget with progress bar)
-    QWidget* healthWidget = createHealthWidget(position.health);
+    QWidget* healthWidget;
+    if (!position.failedMintStatus.isEmpty()) {
+        auto* label = new QLabel(QStringLiteral("—"));
+        label->setAlignment(Qt::AlignCenter);
+        label->setToolTip(tr("This mint has no confirmed vault to redeem."));
+        healthWidget = label;
+    } else {
+        healthWidget = createHealthWidget(position.health);
+    }
 
     // Apply redeemed styling to health widget background
     if (position.isRedeemed) {
@@ -845,6 +847,11 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
         m_walletModel ? m_walletModel->getEncryptionStatus() == WalletModel::Locked : false;
     QPushButton* redeemButton = createRedeemButton(
         position.positionId, position.isPendingMint, position.isPendingRedeem, position.isRedeemed, position.canRedeem, isWatchOnly, isWalletLocked, position.blocksRemaining);
+    if (!position.failedMintStatus.isEmpty()) {
+        redeemButton->setText(position.failedMintStatus);
+        redeemButton->setEnabled(false);
+        redeemButton->setToolTip(tr("This mint has no confirmed vault to redeem."));
+    }
     m_positionsTable->setCellWidget(row, COL_ACTIONS, redeemButton);
 }
 
@@ -856,8 +863,9 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
     // - "Redeemed" if already redeemed (with strikethrough)
     // - "Watch-Only" if the wallet has private keys disabled and so cannot
     //   ever construct a redemption witness
-    // - "Wallet Locked" if private keys exist but are currently unavailable
-    // - "Redeem" if can redeem now (green, clickable)
+    // - "Redeem" if it can be redeemed now (green, clickable). A locked wallet
+    //   gets this too. The Redeem tab asks for the passphrase on click, and the
+    //   tooltip says so.
     // - "Locked" if vault hasn't matured yet (grayed out)
     QString buttonText;
     if (isPendingMint) {
@@ -868,8 +876,6 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
         buttonText = tr("Redeemed");
     } else if (isWatchOnly) {
         buttonText = tr("Watch-Only");
-    } else if (isWalletLocked) {
-        buttonText = tr("Wallet Locked");
     } else if (canRedeem) {
         buttonText = tr("Redeem");
     } else {
@@ -967,25 +973,6 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
             .arg(woText);
         tooltip = tr("Watch-only wallet\nThis wallet cannot sign DigiDollar redemptions because private keys are disabled.");
         button->setEnabled(false);
-    } else if (isWalletLocked) {
-        QString lockedWalletBg = isDarkTheme ? "#4a4655" : "#e4dfea";
-        QString lockedWalletText = isDarkTheme ? "#d6c6e6" : "#4d3f5f";
-
-        buttonStyle = QString(
-            "QPushButton { "
-            "  background-color: %1; "
-            "  color: %2; "
-            "  border: 1px solid %2; "
-            "  border-radius: 5px; "
-            "  padding: 6px 8px; "
-            "  font-weight: 600; "
-            "  font-size: 10px; "
-            "  min-width: 72px; "
-            "}")
-            .arg(lockedWalletBg)
-            .arg(lockedWalletText);
-        tooltip = tr("Wallet is locked\nUnlock the wallet to redeem this DigiDollar vault.");
-        button->setEnabled(false);
     } else if (canRedeem) {
         // Can redeem - green button
         QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
@@ -1015,6 +1002,11 @@ QPushButton* DigiDollarPositionsWidget::createRedeemButton(const QString& positi
             .arg(successHover)
             .arg(successPressed);
         tooltip = tr("Click to redeem this DigiDollar position\nThis will return your DGB collateral and burn the $DD tokens");
+        if (isWalletLocked) {
+            // Still clickable. The Redeem tab asks for the passphrase.
+            tooltip += QLatin1Char('\n') +
+                tr("The wallet is locked: you will be asked for your passphrase on the Redeem tab.");
+        }
         button->setEnabled(true);
     } else {
         // Locked - vault hasn't matured yet - grayed out button with dark text

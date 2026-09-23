@@ -4,6 +4,7 @@
 
 #include <wallet/wallet.h>
 
+#include <cstring>
 #include <future>
 #include <memory>
 #include <stdint.h>
@@ -16,6 +17,7 @@
 #include <policy/policy.h>
 #include <rpc/server.h>
 #include <script/solver.h>
+#include <span.h>
 #include <validation.h>
 #include <test/util/logging.h>
 #include <test/util/random.h>
@@ -1037,6 +1039,341 @@ BOOST_FIXTURE_TEST_CASE(wallet_sync_tx_invalid_state_test, TestingSetup)
     BOOST_CHECK_EXCEPTION(wallet.transactionAddedToMempool(MakeTransactionRef(mtx)),
                           std::runtime_error,
                           HasReason("DB error adding transaction to wallet, write failed"));
+}
+
+/**
+ * Abandoning a transaction has to reach the wallet file.
+ *
+ * If the file refuses the change, the wallet has to say so. The file still says
+ * the coins that transaction spends are committed to it, so a caller that is
+ * told the abandon worked will hand those coins out again while the wallet file
+ * says they are spent.
+ */
+BOOST_FIXTURE_TEST_CASE(abandon_transaction_reports_a_refused_wallet_file_write, TestingSetup)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    // One unconfirmed transaction of this wallet's own, spending one coin.
+    const CTxDestination dest{*Assert(wallet.GetNewDestination(OutputType::BECH32M, ""))};
+    CMutableTransaction mtx;
+    mtx.vout.emplace_back(COIN, GetScriptForDestination(dest));
+    mtx.vin.emplace_back(g_insecure_rand_ctx.rand256(), 0);
+    const CTransactionRef tx{MakeTransactionRef(mtx)};
+    const uint256 txid{tx->GetHash()};
+    const COutPoint spent_coin{mtx.vin[0].prevout};
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(tx, TxStateInactive{}));
+        BOOST_REQUIRE(wallet.IsSpent(spent_coin));
+        BOOST_REQUIRE(wallet.TransactionCanBeAbandoned(txid));
+    }
+
+    // A wallet file that cannot be written to: a full disk, or a file that has
+    // gone read only.
+    GetMockableDatabase(wallet).m_pass = false;
+    bool abandoned{true};
+    {
+        LOCK(wallet.cs_wallet);
+        abandoned = wallet.AbandonTransaction(txid);
+    }
+    GetMockableDatabase(wallet).m_pass = true;
+
+    BOOST_CHECK(!abandoned);
+    {
+        LOCK(wallet.cs_wallet);
+        const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+        BOOST_REQUIRE(wtx != nullptr);
+        // Nothing was saved, so the transaction is still live here too, and the
+        // coin it spends is still committed to it.
+        BOOST_CHECK(!wtx->isAbandoned());
+        BOOST_CHECK(wallet.IsSpent(spent_coin));
+    }
+
+    // The same call against a working wallet file does the job.
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_CHECK(wallet.AbandonTransaction(txid));
+        const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(wtx->isAbandoned());
+        BOOST_CHECK(!wallet.IsSpent(spent_coin));
+    }
+}
+
+//! True when this is the wallet's own row for that transaction. The key is the
+//! text "tx" followed by the 32 bytes of the transaction id.
+static bool IsWalletTransactionRow(Span<const std::byte> key, const uint256& txid)
+{
+    const std::string name{"tx"};
+    if (key.size() != 1 + name.size() + 32) return false;
+    const unsigned char* bytes{reinterpret_cast<const unsigned char*>(key.data())};
+    if (bytes[0] != name.size()) return false;
+    if (std::memcmp(bytes + 1, name.data(), name.size()) != 0) return false;
+    return std::memcmp(bytes + 1 + name.size(), txid.begin(), 32) == 0;
+}
+
+//! What the wallet file holds for that transaction. Empty when it holds nothing.
+static SerializeData WalletTransactionRow(CWallet& wallet, const uint256& txid)
+{
+    for (const auto& [key, value] : GetMockableDatabase(wallet).m_records) {
+        if (IsWalletTransactionRow(Span{key.data(), key.size()}, txid)) return value;
+    }
+    return {};
+}
+
+/**
+ * Abandoning a transaction and its descendants reaches the wallet file whole.
+ *
+ * The wallet marks the transaction and every descendant of it abandoned, which
+ * is one row of the file each. If the file takes the first row and then refuses
+ * a later one, none of it may stay. A file left saying the parent is abandoned,
+ * while the wallet was told nothing happened, hands the parent's inputs out
+ * again at the next start, and the child that spends the parent's outputs is
+ * still live and still wants them.
+ */
+BOOST_FIXTURE_TEST_CASE(abandoning_a_transaction_and_its_descendants_is_all_or_nothing, TestingSetup)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    // A transaction of this wallet's own spending one coin, and a child that
+    // spends its output. Neither is confirmed and neither is in the mempool.
+    const CTxDestination dest{*Assert(wallet.GetNewDestination(OutputType::BECH32M, ""))};
+    CMutableTransaction parent_mtx;
+    parent_mtx.vout.emplace_back(COIN, GetScriptForDestination(dest));
+    parent_mtx.vin.emplace_back(g_insecure_rand_ctx.rand256(), 0);
+    const CTransactionRef parent{MakeTransactionRef(parent_mtx)};
+    const uint256 parent_txid{parent->GetHash()};
+    const COutPoint spent_coin{parent_mtx.vin[0].prevout};
+
+    CMutableTransaction child_mtx;
+    child_mtx.vout.emplace_back(COIN / 2, GetScriptForDestination(dest));
+    child_mtx.vin.emplace_back(parent_txid, 0);
+    const CTransactionRef child{MakeTransactionRef(child_mtx)};
+    const uint256 child_txid{child->GetHash()};
+    const COutPoint parent_output{parent_txid, 0};
+
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(parent, TxStateInactive{}));
+        BOOST_REQUIRE(wallet.AddToWallet(child, TxStateInactive{}));
+        BOOST_REQUIRE(wallet.IsSpent(spent_coin));
+        BOOST_REQUIRE(wallet.IsSpent(parent_output));
+        BOOST_REQUIRE(wallet.TransactionCanBeAbandoned(parent_txid));
+    }
+
+    // What the file holds for the parent before anything is abandoned.
+    const SerializeData parent_row_before{WalletTransactionRow(wallet, parent_txid)};
+    BOOST_REQUIRE(!parent_row_before.empty());
+
+    // A wallet file that takes the parent's row and then refuses the child's: a
+    // disk that fills up in the middle of the change.
+    int refused{0};
+    GetMockableDatabase(wallet).m_refuse_write = [&](Span<const std::byte> key) {
+        if (!IsWalletTransactionRow(key, child_txid)) return false;
+        ++refused;
+        return true;
+    };
+    bool abandoned{true};
+    {
+        LOCK(wallet.cs_wallet);
+        abandoned = wallet.AbandonTransaction(parent_txid);
+    }
+    GetMockableDatabase(wallet).m_refuse_write = nullptr;
+
+    BOOST_REQUIRE_MESSAGE(refused > 0, "the child's row was never refused, so this test proved nothing");
+    BOOST_CHECK(!abandoned);
+    {
+        LOCK(wallet.cs_wallet);
+        const CWalletTx* parent_wtx{wallet.GetWalletTx(parent_txid)};
+        const CWalletTx* child_wtx{wallet.GetWalletTx(child_txid)};
+        BOOST_REQUIRE(parent_wtx != nullptr);
+        BOOST_REQUIRE(child_wtx != nullptr);
+        // Neither transaction is abandoned here, so the coins they spend are
+        // still committed to them.
+        BOOST_CHECK(!parent_wtx->isAbandoned());
+        BOOST_CHECK(!child_wtx->isAbandoned());
+        BOOST_CHECK(wallet.IsSpent(spent_coin));
+        BOOST_CHECK(wallet.IsSpent(parent_output));
+    }
+    // The file holds the parent exactly as it did before, so the next start sees
+    // what this wallet shows. Before the whole change went in as one database
+    // transaction, the parent's row stayed behind saying it was abandoned.
+    BOOST_CHECK(WalletTransactionRow(wallet, parent_txid) == parent_row_before);
+
+    // The same call against a working wallet file abandons both.
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_CHECK(wallet.AbandonTransaction(parent_txid));
+        const CWalletTx* parent_wtx{wallet.GetWalletTx(parent_txid)};
+        const CWalletTx* child_wtx{wallet.GetWalletTx(child_txid)};
+        BOOST_REQUIRE(parent_wtx != nullptr);
+        BOOST_REQUIRE(child_wtx != nullptr);
+        BOOST_CHECK(parent_wtx->isAbandoned());
+        BOOST_CHECK(child_wtx->isAbandoned());
+        BOOST_CHECK(!wallet.IsSpent(spent_coin));
+        BOOST_CHECK(!wallet.IsSpent(parent_output));
+    }
+}
+
+/**
+ * Abandoning a transaction that throws part way through leaves the wallet saying
+ * what its file says.
+ *
+ * The wallet changes the parent's state and saves the parent's row, then changes
+ * the child's and saves that. If something throws while the child's row is being
+ * saved, the batch goes away with its database transaction still open, so the
+ * file keeps neither change. The wallet's own copy has to be put back to match,
+ * or it shows both transactions abandoned and offers their inputs again while
+ * its own file still records both as live. Running out of memory while
+ * serializing, or a listener that throws, arrive at the same place.
+ */
+BOOST_FIXTURE_TEST_CASE(abandoning_a_transaction_that_throws_leaves_the_wallet_matching_its_file, TestingSetup)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    // A transaction of this wallet's own spending one coin, and a child that
+    // spends its output. Neither is confirmed and neither is in the mempool.
+    const CTxDestination dest{*Assert(wallet.GetNewDestination(OutputType::BECH32M, ""))};
+    CMutableTransaction parent_mtx;
+    parent_mtx.vout.emplace_back(COIN, GetScriptForDestination(dest));
+    parent_mtx.vin.emplace_back(g_insecure_rand_ctx.rand256(), 0);
+    const CTransactionRef parent{MakeTransactionRef(parent_mtx)};
+    const uint256 parent_txid{parent->GetHash()};
+    const COutPoint spent_coin{parent_mtx.vin[0].prevout};
+
+    CMutableTransaction child_mtx;
+    child_mtx.vout.emplace_back(COIN / 2, GetScriptForDestination(dest));
+    child_mtx.vin.emplace_back(parent_txid, 0);
+    const CTransactionRef child{MakeTransactionRef(child_mtx)};
+    const uint256 child_txid{child->GetHash()};
+    const COutPoint parent_output{parent_txid, 0};
+
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(parent, TxStateInactive{}));
+        BOOST_REQUIRE(wallet.AddToWallet(child, TxStateInactive{}));
+        BOOST_REQUIRE(wallet.IsSpent(spent_coin));
+        BOOST_REQUIRE(wallet.IsSpent(parent_output));
+        BOOST_REQUIRE(wallet.TransactionCanBeAbandoned(parent_txid));
+    }
+
+    // What the file holds for both transactions before anything is abandoned.
+    const SerializeData parent_row_before{WalletTransactionRow(wallet, parent_txid)};
+    const SerializeData child_row_before{WalletTransactionRow(wallet, child_txid)};
+    BOOST_REQUIRE(!parent_row_before.empty());
+    BOOST_REQUIRE(!child_row_before.empty());
+
+    // Something throws as the child's row is saved, by which point the parent has
+    // already been changed and its row has already gone in.
+    int throws{0};
+    GetMockableDatabase(wallet).m_on_write = [&](Span<const std::byte> key) {
+        if (!IsWalletTransactionRow(key, child_txid)) return;
+        ++throws;
+        throw std::runtime_error("wallet write interrupted");
+    };
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_CHECK_EXCEPTION(wallet.AbandonTransaction(parent_txid), std::runtime_error,
+                              HasReason("wallet write interrupted"));
+    }
+    GetMockableDatabase(wallet).m_on_write = nullptr;
+
+    BOOST_REQUIRE_MESSAGE(throws > 0, "the child's row was never saved, so this test proved nothing");
+
+    // The file holds both rows exactly as it did, because the batch took its
+    // database transaction down with it on the way out.
+    BOOST_CHECK(WalletTransactionRow(wallet, parent_txid) == parent_row_before);
+    BOOST_CHECK(WalletTransactionRow(wallet, child_txid) == child_row_before);
+    {
+        LOCK(wallet.cs_wallet);
+        const CWalletTx* parent_wtx{wallet.GetWalletTx(parent_txid)};
+        const CWalletTx* child_wtx{wallet.GetWalletTx(child_txid)};
+        BOOST_REQUIRE(parent_wtx != nullptr);
+        BOOST_REQUIRE(child_wtx != nullptr);
+        // Neither transaction is abandoned here either, so the coins they spend
+        // are still committed to them and the wallet will not offer them again.
+        BOOST_CHECK(!parent_wtx->isAbandoned());
+        BOOST_CHECK(!child_wtx->isAbandoned());
+        BOOST_CHECK(wallet.IsSpent(spent_coin));
+        BOOST_CHECK(wallet.IsSpent(parent_output));
+    }
+
+    // The same call with nothing throwing abandons both.
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_CHECK(wallet.AbandonTransaction(parent_txid));
+        const CWalletTx* parent_wtx{wallet.GetWalletTx(parent_txid)};
+        const CWalletTx* child_wtx{wallet.GetWalletTx(child_txid)};
+        BOOST_REQUIRE(parent_wtx != nullptr);
+        BOOST_REQUIRE(child_wtx != nullptr);
+        BOOST_CHECK(parent_wtx->isAbandoned());
+        BOOST_CHECK(child_wtx->isAbandoned());
+        BOOST_CHECK(!wallet.IsSpent(spent_coin));
+        BOOST_CHECK(!wallet.IsSpent(parent_output));
+    }
+}
+
+/**
+ * A stale DigiDollar redemption counts as abandoned only once the wallet file
+ * has taken the change. Counting one the file refused tells the rest of the
+ * wallet that the DigiDollars it spends are free again, while the file still
+ * says they are committed to that redemption.
+ */
+BOOST_FIXTURE_TEST_CASE(stale_digidollar_redeems_are_only_abandoned_once_saved, TestingSetup)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    // An unconfirmed redemption that this node's mempool no longer holds.
+    const CTxDestination dest{*Assert(wallet.GetNewDestination(OutputType::BECH32M, ""))};
+    CMutableTransaction mtx;
+    mtx.SetDigiDollarType(::DD_TX_REDEEM);
+    mtx.vout.emplace_back(COIN, GetScriptForDestination(dest));
+    mtx.vin.emplace_back(g_insecure_rand_ctx.rand256(), 0);
+    const CTransactionRef redeem{MakeTransactionRef(mtx)};
+    const uint256 txid{redeem->GetHash()};
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(redeem, TxStateInactive{}));
+    }
+
+    GetMockableDatabase(wallet).m_pass = false;
+    BOOST_CHECK_EQUAL(wallet.AbandonStaleDigiDollarRedeems(), 0U);
+    GetMockableDatabase(wallet).m_pass = true;
+    {
+        LOCK(wallet.cs_wallet);
+        const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(!wtx->isAbandoned());
+    }
+
+    // Once the file works, the same sweep abandons it and says so.
+    BOOST_CHECK_EQUAL(wallet.AbandonStaleDigiDollarRedeems(), 1U);
+    {
+        LOCK(wallet.cs_wallet);
+        const CWalletTx* wtx{wallet.GetWalletTx(txid)};
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(wtx->isAbandoned());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

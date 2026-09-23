@@ -6,10 +6,14 @@
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/optionsmodel.h>
+#include <qt/transactiontablemodel.h>
 #include <qt/guiutil.h>
 #include <wallet/digidollarwallet.h>
+#include <digidollar/amount.h>
 #include <logging.h>
 #include <univalue.h>
+
+#include <algorithm>
 
 #include <QHeaderView>
 #include <QDateTime>
@@ -24,6 +28,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QStyledItemDelegate>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
@@ -231,12 +236,17 @@ void DigiDollarTransactionsWidget::setupFilterBar()
     // Type filter
     QLabel* typeLabel = new QLabel(tr("Type:"), this);
     m_typeFilter = new QComboBox(this);
+    // Use the styled list so popup items follow the DigiDollar theme.
+    m_typeFilter->setItemDelegate(new QStyledItemDelegate(m_typeFilter));
     m_typeFilter->addItem(tr("All Types"), "");
     m_typeFilter->addItem(tr("Mints"), "mint");
     m_typeFilter->addItem(tr("Sends"), "send");
     m_typeFilter->addItem(tr("Receives"), "receive");
     m_typeFilter->addItem(tr("Redemptions"), "redeem");
-    m_typeFilter->addItem(tr("Redemption Change"), "redeem_change");
+    m_typeFilter->addItem(DigiDollarLabels::ChangeReturned(), "redeem_change");
+    m_typeFilter->setItemData(m_typeFilter->count() - 1,
+                              DigiDollarLabels::ChangeReturnedExplanation(),
+                              Qt::ToolTipRole);
 
     // Search box
     QLabel* searchLabel = new QLabel(tr("Search:"), this);
@@ -290,12 +300,16 @@ void DigiDollarTransactionsWidget::setupTable()
     // Let the table inherit colors from the application palette/theme
     // Don't override with custom colors - this ensures proper dark/light mode support
 
-    m_table->setColumnWidth(Column::Date, 130);
-    m_table->setColumnWidth(Column::Type, 90);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Date, QHeaderView::ResizeToContents);
+    // The type column has to fit the longest name a row can carry, which is
+    // the name for DigiDollars a redemption hands back.
+    m_table->setColumnWidth(Column::Type,
+                            std::max(90, m_table->fontMetrics().horizontalAdvance(
+                                             DigiDollarLabels::ChangeReturned()) + 24));
     m_table->setColumnWidth(Column::Amount, 110);
     m_table->setColumnWidth(Column::LockPeriod, 90);
     m_table->setColumnWidth(Column::Note, 150);
-    m_table->setColumnWidth(Column::Confirmations, 100);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Confirmations, QHeaderView::ResizeToContents);
 
     m_table->horizontalHeader()->setStretchLastSection(false);
     m_table->horizontalHeader()->setSectionResizeMode(Column::TxId, QHeaderView::Stretch);
@@ -458,10 +472,10 @@ void DigiDollarTransactionsWidget::populateTable()
                 txInfo.pushKV("abandoned", histTx.abandoned);
                 txInfo.pushKV("lock_tier", histTx.lock_tier);
                 txInfo.pushKV("in_mempool", histTx.in_mempool);
-                txInfo.pushKV("wallet_state", histTx.is_local ? "local" :
+                txInfo.pushKV("wallet_state", histTx.is_expired_mint ? "expired_mint" : (histTx.is_local ? "local" :
                     (histTx.abandoned ? "abandoned" :
                      (histTx.confirmations < 0 ? "conflicted" :
-                      (histTx.confirmations > 0 ? "confirmed" : "pending"))));
+                      (histTx.confirmations > 0 ? "confirmed" : "pending")))));
                 result.push_back(txInfo);
             }
         }
@@ -495,7 +509,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Date
             uint64_t timestamp = tx.find_value("time").getInt<uint64_t>();
-            QTableWidgetItem* dateItem = new QTableWidgetItem(formatTimestamp(timestamp));
+            QTableWidgetItem* dateItem = new GUIUtil::NumericTableWidgetItem(formatTimestamp(timestamp));
             dateItem->setData(Qt::UserRole, QVariant::fromValue(timestamp));
             m_table->setItem(row, Column::Date, dateItem);
 
@@ -507,8 +521,10 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Type with lock period for mints/redeems
             QString typeText = category.left(1).toUpper() + category.mid(1);
+            QString typeTooltip;
             if (category == "redeem_change") {
-                typeText = tr("Redemption Change");
+                typeText = DigiDollarLabels::ChangeReturned();
+                typeTooltip = DigiDollarLabels::ChangeReturnedExplanation();
             }
             if ((category == "mint" || category == "redeem") && lockTier >= 0) {
                 QString lockPeriodShort = formatLockPeriodShort(lockTier);
@@ -517,11 +533,14 @@ void DigiDollarTransactionsWidget::populateTable()
                 }
             }
             QTableWidgetItem* typeItem = new QTableWidgetItem(typeText);
+            if (!typeTooltip.isEmpty()) {
+                typeItem->setToolTip(typeTooltip);
+            }
             m_table->setItem(row, Column::Type, typeItem);
 
             // Amount
             CAmount amount = tx.find_value("amount").getInt<int64_t>();
-            QTableWidgetItem* amountItem = new QTableWidgetItem(formatDDAmount(amount));
+            QTableWidgetItem* amountItem = new GUIUtil::NumericTableWidgetItem(formatDDAmount(amount));
             amountItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             amountItem->setData(Qt::UserRole, QVariant::fromValue(amount));
 
@@ -563,9 +582,13 @@ void DigiDollarTransactionsWidget::populateTable()
             if (walletStateVal.isStr()) {
                 isLocal = walletStateVal.get_str() == "local";
             }
-            QTableWidgetItem* confItem = new QTableWidgetItem(formatConfirmations(confirmations, isAbandoned, isLocal));
+            const bool isExpiredMint = walletStateVal.isStr() && walletStateVal.get_str() == "expired_mint";
+            QTableWidgetItem* confItem = new QTableWidgetItem(isExpiredMint ? tr("Expired mint") :
+                formatConfirmations(confirmations, isAbandoned, isLocal));
             confItem->setTextAlignment(Qt::AlignCenter);
-            if (isLocal) {
+            if (isExpiredMint) {
+                confItem->setToolTip(tr("This mint was not confirmed before its deadline."));
+            } else if (isLocal) {
                 confItem->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
             }
             m_table->setItem(row, Column::Confirmations, confItem);
@@ -673,7 +696,7 @@ void DigiDollarTransactionsWidget::showDetails()
         const QString lockText = lockItem ? lockItem->text() : QString();
         QString details;
         details += QStringLiteral("<html><body>");
-        details += DetailRow(tr("Status"), confItem ? confItem->text() : QString());
+        details += DetailRow(tr("Confirmations"), confItem ? confItem->text() : QString());
         details += DetailRow(tr("Date"), dateItem ? dateItem->text() : QString());
         details += DetailRow(tr("Type"), typeItem ? typeItem->text() : QString());
         details += DetailRow(tr("Amount"), amountItem ? amountItem->text() : QString());
@@ -735,7 +758,7 @@ QString DigiDollarTransactionsWidget::formatDDAmount(CAmount amount) const
 QString DigiDollarTransactionsWidget::formatTimestamp(uint64_t timestamp) const
 {
     QDateTime dt = QDateTime::fromSecsSinceEpoch(timestamp);
-    return dt.toString("MMM dd, yyyy hh:mm");
+    return GUIUtil::dateTimeStr(dt);
 }
 
 QString DigiDollarTransactionsWidget::formatConfirmations(int confirmations, bool isAbandoned, bool isLocal) const
@@ -751,10 +774,16 @@ QString DigiDollarTransactionsWidget::formatConfirmations(int confirmations, boo
             return tr("Local");
         }
         return tr("Pending");
-    } else if (confirmations >= 6) {
-        return tr("Confirmed");
     }
+    // Once a transaction is in a block this column shows how many blocks deep
+    // it is and nothing else, so every row in the column reads the same way.
+    // A word is used only where there is no count to show.
     return QString::number(confirmations);
+}
+
+QString DigiDollarTransactionsWidget::confirmationsTextForTesting(int confirmations, bool isAbandoned, bool isLocal) const
+{
+    return formatConfirmations(confirmations, isAbandoned, isLocal);
 }
 
 QString DigiDollarTransactionsWidget::formatLockPeriod(int lockTier) const
@@ -827,6 +856,8 @@ void DigiDollarTransactionsWidget::exportClicked()
             if (item) {
                 if (col == Column::TxId) {
                     value = item->data(Qt::UserRole).toString();
+                } else if (col == Column::Amount) {
+                    value = QString::fromStdString(DigiDollar::FormatDDAmountDollars(item->data(Qt::UserRole).toLongLong()));
                 } else {
                     value = item->text();
                 }

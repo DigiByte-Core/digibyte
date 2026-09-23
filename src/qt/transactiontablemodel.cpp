@@ -31,6 +31,23 @@
 #include <QList>
 
 
+namespace DigiDollarLabels {
+
+QString ChangeReturned()
+{
+    return QObject::tr("DigiDollar change returned");
+}
+
+QString ChangeReturnedExplanation()
+{
+    return QObject::tr(
+        "When you redeem, the wallet spends whole DigiDollar inputs. If they add up "
+        "to more than the redemption burns, the extra comes back to you as change. "
+        "The vault itself is always closed in full, never in part.");
+}
+
+} // namespace DigiDollarLabels
+
 // Amount column is right-aligned it contains numbers
 static int column_alignments[] = {
         Qt::AlignLeft|Qt::AlignVCenter, /*status=*/
@@ -38,7 +55,8 @@ static int column_alignments[] = {
         Qt::AlignLeft|Qt::AlignVCenter, /*date=*/
         Qt::AlignLeft|Qt::AlignVCenter, /*type=*/
         Qt::AlignLeft|Qt::AlignVCenter, /*address=*/
-        Qt::AlignRight|Qt::AlignVCenter /* amount */
+        Qt::AlignRight|Qt::AlignVCenter, /*amount in DGB=*/
+        Qt::AlignRight|Qt::AlignVCenter /*amount in $DD=*/
     };
 
 // Comparison operator for sort/binary search of model tx list
@@ -254,7 +272,9 @@ TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle
 {
     subscribeToCoreSignals();
 
-    columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label") << tr("Amount (%1/$DD)").arg(DigiByteUnits::shortName(walletModel->getOptionsModel()->getDisplayUnit()));
+    columns << QString() << QString() << tr("Date") << tr("Type") << tr("Label")
+            << tr("Amount (%1)").arg(DigiByteUnits::shortName(walletModel->getOptionsModel()->getDisplayUnit()))
+            << tr("Amount ($DD)");
     priv->refreshWallet(walletModel->wallet());
 
     connect(walletModel->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &TransactionTableModel::updateDisplayUnit);
@@ -266,10 +286,11 @@ TransactionTableModel::~TransactionTableModel()
     delete priv;
 }
 
-/** Updates the column title to include both the selected DGB display unit and DigiDollar rows. */
+/** Updates the DigiByte amount column title to the unit the user has chosen.
+    The DigiDollar column is always dollars, so its title never changes. */
 void TransactionTableModel::updateAmountColumnTitle()
 {
-    columns[Amount] = tr("Amount (%1/$DD)").arg(DigiByteUnits::shortName(walletModel->getOptionsModel()->getDisplayUnit()));
+    columns[Amount] = tr("Amount (%1)").arg(DigiByteUnits::shortName(walletModel->getOptionsModel()->getDisplayUnit()));
     Q_EMIT headerDataChanged(Qt::Horizontal,Amount,Amount);
 }
 
@@ -366,7 +387,7 @@ QString TransactionTableModel::lookupAddress(const std::string &address, bool to
     return description;
 }
 
-QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
+QString TransactionTableModel::formatTxType(const TransactionRecord *wtx)
 {
     switch(wtx->type)
     {
@@ -388,34 +409,49 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
     case TransactionRecord::DDRecv:
         return tr("DigiDollar Transfer (In)");
     case TransactionRecord::DDSendFee:
-        return tr("DigiDollar Transfer Fee");
+        // A mint pays a fee as well as a transfer, so this says fee and not
+        // transfer fee.
+        return tr("DigiDollar Fee");
+    case TransactionRecord::DDMint:
+        return tr("DigiDollar Mint");
+    case TransactionRecord::DDChangeReturned:
+        return DigiDollarLabels::ChangeReturned();
     default:
         return QString();
     }
 }
 
-QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx) const
+/** The icon a row gets in the label column. Money leaving the wallet uses the
+    outgoing icon, money arriving uses the incoming one. */
+QString TransactionTableModel::txTypeIconPath(const TransactionRecord *wtx)
 {
     switch(wtx->type)
     {
     case TransactionRecord::Generated:
-        return QIcon(":/icons/tx_mined");
+        return QStringLiteral(":/icons/tx_mined");
     case TransactionRecord::RecvWithAddress:
     case TransactionRecord::RecvFromOther:
-        return QIcon(":/icons/tx_input");
+        return QStringLiteral(":/icons/tx_input");
     case TransactionRecord::SendToAddress:
     case TransactionRecord::SendToOther:
-        return QIcon(":/icons/tx_output");
+        return QStringLiteral(":/icons/tx_output");
     case TransactionRecord::DDTimeLockCollateral:
     case TransactionRecord::DDSend:
     case TransactionRecord::DDSendFee:
-        return QIcon(":/icons/tx_output");  // Use output icon for DD sends
+        return QStringLiteral(":/icons/tx_output");
     case TransactionRecord::DDCollateralReturn:
     case TransactionRecord::DDRecv:
-        return QIcon(":/icons/tx_input");   // Use input icon for DD receives
+    case TransactionRecord::DDMint:
+    case TransactionRecord::DDChangeReturned:
+        return QStringLiteral(":/icons/tx_input");
     default:
-        return QIcon(":/icons/tx_inout");
+        return QStringLiteral(":/icons/tx_inout");
     }
+}
+
+QVariant TransactionTableModel::txAddressDecoration(const TransactionRecord *wtx) const
+{
+    return QIcon(txTypeIconPath(wtx));
 }
 
 QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, bool tooltip) const
@@ -445,7 +481,11 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
     case TransactionRecord::DDRecv:
         return tr("DigiDollar Transfer (In)") + watchAddress;
     case TransactionRecord::DDSendFee:
-        return tr("DigiDollar Transfer Fee") + watchAddress;
+        return tr("DigiDollar Fee") + watchAddress;
+    case TransactionRecord::DDMint:
+        return tr("DigiDollars Created") + watchAddress;
+    case TransactionRecord::DDChangeReturned:
+        return DigiDollarLabels::ChangeReturned() + watchAddress;
     default:
         return tr("(n/a)") + watchAddress;
     }
@@ -476,6 +516,8 @@ QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
     case TransactionRecord::DDSend:
     case TransactionRecord::DDRecv:
     case TransactionRecord::DDSendFee:
+    case TransactionRecord::DDMint:
+    case TransactionRecord::DDChangeReturned:
         {
         // DigiDollar transactions - use a distinctive color
         // Gold/amber for DD related transactions
@@ -488,25 +530,43 @@ QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
     return isDarkTheme ? QColor(255, 255, 255) : QColor(0, 51, 102);
 }
 
-QString TransactionTableModel::formatTxAmount(const TransactionRecord *wtx, bool showUnconfirmed, DigiByteUnits::SeparatorStyle separators) const
+/** True when a row carries DigiDollars and no DigiByte, so the only figure it
+    has to show is the dollar one. */
+static bool rowCarriesOnlyDigiDollar(const TransactionRecord* wtx)
 {
-    QString str;
-    if ((wtx->type == TransactionRecord::DDSend || wtx->type == TransactionRecord::DDRecv) && wtx->ddAmount != 0) {
-        const CAmount amount = wtx->ddAmount;
-        const CAmount absAmount = amount < 0 ? -amount : amount;
-        const QString prefix = amount > 0 ? QString("+") : (amount < 0 ? QString("-") : QString());
-        str = prefix + QString::number(absAmount / 100.0, 'f', 2) + QString(" $DD");
-    } else {
-        str = DigiByteUnits::format(walletModel->getOptionsModel()->getDisplayUnit(), wtx->credit + wtx->debit, false, separators);
+    return wtx->credit + wtx->debit == 0 && wtx->ddAmount != 0;
+}
+
+/** The DigiByte cell of a row. A row that carries DigiDollars leaves this cell
+    empty instead of printing a DigiByte zero, because the DigiByte side of that
+    transaction is already on its own row. */
+QString TransactionTableModel::formatAmountDGB(const TransactionRecord *wtx, DigiByteUnit unit, bool showUnconfirmed, DigiByteUnits::SeparatorStyle separators)
+{
+    const CAmount amount = wtx->credit + wtx->debit;
+    if (rowCarriesOnlyDigiDollar(wtx)) {
+        return QString();
     }
-    if(showUnconfirmed)
-    {
-        if(!wtx->status.countsForBalance)
-        {
-            str = QString("[") + str + QString("]");
-        }
+    QString str = DigiByteUnits::format(unit, amount, false, separators);
+    if (showUnconfirmed && !wtx->status.countsForBalance) {
+        str = QString("[") + str + QString("]");
     }
-    return QString(str);
+    return str;
+}
+
+/** The DigiDollar cell of a row, in dollars and cents. Empty on a row that only
+    moves DigiByte. */
+QString TransactionTableModel::formatAmountDD(const TransactionRecord *wtx, bool showUnconfirmed)
+{
+    if (wtx->ddAmount == 0) {
+        return QString();
+    }
+    const CAmount absAmount = wtx->ddAmount < 0 ? -wtx->ddAmount : wtx->ddAmount;
+    QString str = (wtx->ddAmount > 0 ? QString("+") : QString("-"))
+                + QString::number(absAmount / 100.0, 'f', 2) + QString(" $DD");
+    if (showUnconfirmed && !wtx->status.countsForBalance) {
+        str = QString("[") + str + QString("]");
+    }
+    return str;
 }
 
 QVariant TransactionTableModel::txStatusDecoration(const TransactionRecord *wtx) const
@@ -558,6 +618,11 @@ QString TransactionTableModel::formatTooltip(const TransactionRecord *rec) const
     {
         tooltip += QString(" ") + formatTxToAddress(rec, true);
     }
+    if (rec->type == TransactionRecord::DDChangeReturned) {
+        // People ask where this money came from, so say it here rather than
+        // leaving them to guess.
+        tooltip += QString("\n") + DigiDollarLabels::ChangeReturnedExplanation();
+    }
     return tooltip;
 }
 
@@ -580,6 +645,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case ToAddress:
             return txAddressDecoration(rec);
         case Amount: return {};
+        case AmountDD: return {};
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::DecorationRole:
@@ -598,7 +664,9 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case ToAddress:
             return formatTxToAddress(rec, false);
         case Amount:
-            return formatTxAmount(rec, true, DigiByteUnits::SeparatorStyle::ALWAYS);
+            return formatAmountDGB(rec, walletModel->getOptionsModel()->getDisplayUnit(), true, DigiByteUnits::SeparatorStyle::ALWAYS);
+        case AmountDD:
+            return formatAmountDD(rec, true);
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::EditRole:
@@ -615,10 +683,9 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         case ToAddress:
             return formatTxToAddress(rec, true);
         case Amount:
-            if ((rec->type == TransactionRecord::DDSend || rec->type == TransactionRecord::DDRecv) && rec->ddAmount != 0) {
-                return qint64(rec->ddAmount);
-            }
             return qint64(rec->credit + rec->debit);
+        case AmountDD:
+            return qint64(rec->ddAmount);
         } // no default case, so the compiler can warn about missing cases
         assert(false);
     case Qt::ToolTipRole:
@@ -645,17 +712,17 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
                 // Let the specific column logic below handle the actual colors
                 // This used to return gray, but we want theme-aware colors
             }
-            const CAmount displayAmount = ((rec->type == TransactionRecord::DDSend || rec->type == TransactionRecord::DDRecv) && rec->ddAmount != 0)
-                ? rec->ddAmount
-                : (rec->credit + rec->debit);
-            if(index.column() == Amount && displayAmount < 0)
+            // Each amount column is coloured by its own number: red when money
+            // leaves the wallet, green when it arrives.
+            if(index.column() == Amount || index.column() == AmountDD)
             {
-                // Red for negative amounts
-                return isDarkTheme ? QColor(255, 70, 70) : QColor(200, 0, 0);
-            }
-            if(index.column() == Amount)
-            {
-                // Green for positive amounts
+                const CAmount columnAmount = (index.column() == AmountDD)
+                    ? rec->ddAmount
+                    : (rec->credit + rec->debit);
+                if(columnAmount < 0)
+                {
+                    return isDarkTheme ? QColor(255, 70, 70) : QColor(200, 0, 0);
+                }
                 return isDarkTheme ? QColor(100, 255, 100) : QColor(0, 150, 0);
             }
             if(index.column() == ToAddress)
@@ -686,6 +753,8 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return walletModel->getAddressTableModel()->labelForAddress(QString::fromStdString(rec->address));
     case AmountRole:
         return qint64(rec->credit + rec->debit);
+    case AmountDDRole:
+        return qint64(rec->ddAmount);
     case TxHashRole:
         return rec->getTxHash();
     case TxHexRole:
@@ -715,14 +784,35 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
                 details.append(QString::fromStdString(rec->address));
                 details.append(" ");
             }
-            details.append(formatTxAmount(rec, false, DigiByteUnits::SeparatorStyle::NEVER));
+            // A row carries a DigiByte amount or a DigiDollar amount. Print the
+            // one it has.
+            const QString amountDGB = formatAmountDGB(rec, walletModel->getOptionsModel()->getDisplayUnit(), false, DigiByteUnits::SeparatorStyle::NEVER);
+            details.append(amountDGB.isEmpty() ? formatAmountDD(rec, false) : amountDGB);
             return details;
         }
     case ConfirmedRole:
         return rec->status.status == TransactionStatus::Status::Confirming || rec->status.status == TransactionStatus::Status::Confirmed;
     case FormattedAmountRole:
         // Used for copy/export, so don't include separators
-        return formatTxAmount(rec, false, DigiByteUnits::SeparatorStyle::NEVER);
+        return formatAmountDGB(rec, walletModel->getOptionsModel()->getDisplayUnit(), false, DigiByteUnits::SeparatorStyle::NEVER);
+    case FormattedAmountDDRole:
+        return formatAmountDD(rec, false);
+    case FormattedSingleAmountRole:
+        // The pop-up that announces a new transaction and the short list on the
+        // main overview have room for one figure. A DigiDollar row holds no
+        // DigiByte, so reading the DigiByte figure there would announce a
+        // DigiDollar payment as zero DigiByte.
+        if (rowCarriesOnlyDigiDollar(rec)) {
+            return formatAmountDD(rec, false);
+        }
+        return DigiByteUnits::formatWithUnit(walletModel->getOptionsModel()->getDisplayUnit(),
+                                             rec->credit + rec->debit, true,
+                                             DigiByteUnits::SeparatorStyle::ALWAYS);
+    case SingleAmountRole:
+        if (rowCarriesOnlyDigiDollar(rec)) {
+            return qint64(rec->ddAmount);
+        }
+        return qint64(rec->credit + rec->debit);
     case StatusRole:
         return rec->status.status;
     }
@@ -755,7 +845,9 @@ QVariant TransactionTableModel::headerData(int section, Qt::Orientation orientat
             case ToAddress:
                 return tr("User-defined intent/purpose of the transaction.");
             case Amount:
-                return tr("Amount removed from or added to balance.");
+                return tr("DigiByte amount removed from or added to balance.");
+            case AmountDD:
+                return tr("DigiDollar amount removed from or added to balance.");
             }
         }
     }

@@ -52,12 +52,12 @@ can with DigiDollar:
           mode), prunes pre-activation history clamped by the DD lock, stays in
           DD parity, and can even explicitly re-enable the stats index.
   * F9  - a pruned datadir that IS missing DD-era blocks (created by pruning
-          under default-regtest rules, where DigiDollar is always-active with
-          floor 0 and no lock is registered) refuses to start under the real
-          activation schedule with the "DigiDollar-era block data is incomplete"
-          error; ``-prune`` + explicit ``-txindex=1`` is still rejected; and the
-          error's prescribed recovery — restart with ``-reindex`` — rebuilds the
-          DD-era window from the network and restores full parity.
+          with DigiDollar activation and its retention floor temporarily beyond
+          the bounded regtest fixture) refuses to start under the original
+          activation schedule with retained-history repair guidance;
+          ``-prune`` + explicit ``-txindex=1`` is still rejected; and explicit
+          ``-reindex`` recovery rebuilds the DD-era window from the network and
+          restores full parity.
 
 The fixture uses ``-digidollaractivationheight=432``: DigiDollar is a buried
 deployment (BIP90), so the knob retargets the hardcoded activation height and
@@ -631,27 +631,40 @@ class DigiDollarPruningTest(DigiByteTestFramework):
     def test_f9_incomplete_dd_window_guard(self):
         """A pruned datadir missing DD-era blocks refuses to start.
 
-        Under DEFAULT regtest rules DigiDollar is buried at height 0 with an
-        activation floor of 0, so no prune lock is registered and DD-era blocks
-        CAN be pruned away (a regtest-only property; mainnet/testnet floors are
-        23,627,520 / 600). We use that to fabricate exactly the damaged state
-        the startup guard exists for — "this datadir was pruned under different
-        rules" — then restart under the real activation schedule and require
-        the refuse-to-start error. Also pins the -prune/-txindex=1 conflict.
+        Temporarily delay regtest DigiDollar activation and its retention floor
+        beyond this bounded fixture. The registered lock then permits pruning
+        blocks required by the original schedule. Restore that schedule and
+        require the missing-history startup error. Also pins the
+        -prune/-txindex=1 conflict.
         """
         node2 = self.nodes[2]
         self.log.info("F9: pruned datadir missing DD-era blocks refuses to start")
 
         floor_hash = node2.getblockhash(ACTIVATION_HEIGHT)
-        default_rules_args = ["-prune=1", "-fastprune=1", "-dandelion=0"]
+        delayed_activation_height = 1_000_000
+        prune_batches = 8
+        blocks_per_batch = 200
+        # Keep the entire mining budget, with a pruning margin, below the
+        # temporary activation floor so its lock cannot constrain this fixture.
+        assert_greater_than(
+            delayed_activation_height,
+            node2.getblockcount() + prune_batches * blocks_per_batch + MIN_BLOCKS_TO_KEEP,
+        )
+        delayed_activation_args = [
+            f"-digidollaractivationheight={delayed_activation_height}",
+            "-prune=1", "-fastprune=1", "-dandelion=0",
+        ]
 
-        # Restart node 2 WITHOUT the activation-height knob: always-active DD,
-        # floor 0, no "digidollar" prune lock. Prune away the DD-era window.
+        # Move both the buried activation height and the static retention floor.
+        # Default regtest retains all history through its lock at height zero.
         # A 64 KiB fastprune block file holds many small regtest blocks, and a
         # file is only deleted once EVERY block in it is prunable, so we mine
-        # further past the floor and re-prune until the floor block's file goes.
+        # past the original activation height and prune until its file is gone.
         self.stop_node(2)
-        self.start_node(2, extra_args=default_rules_args)
+        self.start_node(2, extra_args=delayed_activation_args)
+        deployment = node2.getdigidollardeploymentinfo()
+        assert_equal(deployment["activation_height"], delayed_activation_height)
+        assert_equal(deployment["enabled"], False)
 
         def floor_block_pruned():
             try:
@@ -660,37 +673,36 @@ class DigiDollarPruningTest(DigiByteTestFramework):
             except Exception:
                 return True
 
-        for _ in range(8):
+        for _ in range(prune_batches):
             if floor_block_pruned():
                 break
-            self.generate(node2, 200, sync_fun=self.no_op)
+            self.generate(node2, blocks_per_batch, sync_fun=self.no_op)
             node2.pruneblockchain(node2.getblockcount())
         assert_raises_rpc_error(-1, "Block not available (pruned data)",
                                 node2.getblock, floor_hash)
-        self.log.info("  DD-era blocks destroyed under default-regtest rules "
+        self.log.info("  DD-era blocks pruned with activation temporarily delayed "
                       "(tip %d)", node2.getblockcount())
 
         # Under the real activation schedule this datadir is now unusable for
-        # DigiDollar validation: the node must refuse to start and ask for
-        # -reindex instead of running with an incomplete DD window.
+        # DigiDollar validation: startup must refuse incomplete retained data
+        # and identify the required history without offering an automatic rebuild.
         self.stop_node(2)
         node2.assert_start_raises_init_error(
             extra_args=self.extra_args[2],
-            expected_msg="DigiDollar-era block data is incomplete on this "
-                         "pruned node\\. Restart with -reindex to rebuild it",
+            expected_msg="DigiDollar state not ready: retained block history is incomplete\\. "
+                         "Restore the required block and undo files",
             match=ErrorMatch.PARTIAL_REGEX,
         )
-        self.log.info("  startup correctly refused with the -reindex guidance")
+        self.log.info("  startup correctly refused with retained-history repair guidance")
 
         # -prune plus an explicit -txindex=1 is still rejected outright.
         node2.assert_start_raises_init_error(
-            extra_args=default_rules_args + ["-txindex=1"],
+            extra_args=self.extra_args[2] + ["-txindex=1"],
             expected_msg="Error: Prune mode is incompatible with -txindex.",
         )
 
-        # Recovery: the guard's error prescribes -reindex. The damaged node
-        # rebuilds from its remaining block files, re-downloads the missing
-        # DD-era window from the full node, and returns to full parity.
+        # The error requires restoring history. Exercise explicit reindex
+        # recovery from remaining files and the full node, then require parity.
         self.log.info("  recovering the damaged node with -reindex")
         self.start_node(2, extra_args=self.extra_args[2] + ["-reindex"])
         self.connect_nodes(0, 2)
@@ -748,7 +760,7 @@ class DigiDollarPruningTest(DigiByteTestFramework):
 
         node1.assert_start_raises_init_error(
             extra_args=self.extra_args[1],
-            expected_msg="DigiDollar-era block data is incomplete",
+            expected_msg="Oracle price reconstruction could not read block",
             match=ErrorMatch.PARTIAL_REGEX,
         )
         self.log.info("  startup correctly refused on truncated block data")

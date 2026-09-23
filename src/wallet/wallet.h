@@ -375,15 +375,117 @@ private:
 
     using TryUpdatingStateFn = std::function<TxUpdate(CWalletTx& wtx)>;
 
+    /** What one walk over a transaction and its in-wallet descendants changed. */
+    struct TxStateChanges {
+        //! False when the wallet file would not take at least one of the changes.
+        bool all_writes_stored{true};
+        //! The state each changed transaction had before, so a caller can put
+        //! them back when the wallet file refused the change.
+        std::vector<std::pair<uint256, TxState>> previous_states;
+    };
+
     /** Mark a transaction (and its in-wallet descendants) as a particular tx state. */
-    void RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    TxStateChanges RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * The same walk, writing through a batch the caller owns and recording what
+     * it changed in a list the caller owns.
+     *
+     * A caller that needs every row of the walk to reach the wallet file
+     * together opens the batch, begins a database transaction on it, and
+     * commits or aborts that transaction around this call.
+     *
+     * The list of previous states belongs to the caller because this walk can
+     * throw part way through: serializing a transaction allocates, collecting
+     * descendants allocates, and the listeners it tells are code this wallet
+     * does not control. A list returned by value would be destroyed while the
+     * stack unwinds, leaving states changed in memory with nothing left to put
+     * them back from. A list the caller holds is still there.
+     */
+    void RecursiveUpdateTxState(WalletBatch& batch, const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state, TxStateChanges& changes) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * Put transaction states back in memory as they were.
+     *
+     * Used when the new states did not reach the wallet file: what this wallet
+     * shows has to match what its file says, or a restart changes the wallet's
+     * mind. Nothing is written here, because the caller has already put the file
+     * back by aborting the database transaction the states were written in.
+     *
+     * This can run while the stack unwinds, so it is written not to throw: every
+     * state goes back first, and the listeners are told afterwards, one at a
+     * time, so that one of them throwing does not stop the rest.
+     */
+    void RestoreTxStatesInMemory(const std::vector<std::pair<uint256, TxState>>& previous_states) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * Puts transaction states back in memory unless it is told they were saved.
+     *
+     * The walk above changes states one transaction at a time and can throw part
+     * way through. The wallet file is put back by the batch, which rolls its
+     * database transaction back when it goes away, so memory has to be put back
+     * as well. Otherwise the wallet shows a transaction abandoned that its own
+     * file still records as live, and hands out the coins that transaction
+     * spends. Holding the list here and putting it back from the destructor is
+     * what makes that happen while the stack unwinds.
+     *
+     * Whoever owns one of these holds cs_wallet for the whole of its life.
+     */
+    class TxStateRollback
+    {
+    public:
+        explicit TxStateRollback(CWallet& wallet) : m_wallet{wallet} {}
+        TxStateRollback(const TxStateRollback&) = delete;
+        TxStateRollback& operator=(const TxStateRollback&) = delete;
+
+        ~TxStateRollback()
+        {
+            try {
+                Restore();
+            } catch (...) {
+                // Putting states back allocates nothing and does not let a
+                // listener's exception out, so there should be nothing to catch
+                // here. Catching anyway is what stops a throw from ending the
+                // process during unwinding, which would be far worse than the
+                // wallet and its file disagreeing.
+            }
+        }
+
+        //! Where the walk records what it changed, and where the caller reads
+        //! whether every row reached the wallet file.
+        TxStateChanges changes;
+
+        //! Put the states back now. Asking again does nothing. The wallet lock
+        //! is held by whoever owns this object, which the analysis cannot see
+        //! from here.
+        void Restore() NO_THREAD_SAFETY_ANALYSIS
+        {
+            if (m_settled) return;
+            m_settled = true;
+            m_wallet.RestoreTxStatesInMemory(changes.previous_states);
+        }
+
+        //! The change reached the wallet file, so memory is right as it is.
+        void Keep() { m_settled = true; }
+
+    private:
+        CWallet& m_wallet;
+        bool m_settled{false};
+    };
 
     /** Mark a transaction's inputs dirty, thus forcing the outputs to be recomputed */
     void MarkInputsDirty(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     void SyncMetaData(std::pair<TxSpends::iterator, TxSpends::iterator>) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
-    void SyncTransaction(const CTransactionRef& tx, const SyncTxState& state, bool update_tx = true, bool rescanning_old_block = false) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /**
+     * rescan_block_time is the timestamp of the block being rescanned. The
+     * DigiDollar wallet needs it and must not ask the chain for it, because a
+     * rescan holds the wallet lock while it reads a block and the chain takes
+     * its own lock before it calls into the wallet. Only the rescan caller
+     * passes it; it has the block in hand already.
+     */
+    void SyncTransaction(const CTransactionRef& tx, const SyncTxState& state, bool update_tx = true, bool rescanning_old_block = false, int64_t rescan_block_time = 0) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /** WalletFlags set on this wallet. */
     std::atomic<uint64_t> m_wallet_flags{0};
@@ -966,6 +1068,15 @@ public:
     const CKeyingMaterial& GetEncryptionKey() const override;
     bool HasEncryptionKeys() const override;
 
+    /** True once the wallet has been told which block it last processed.
+     *  Until then the height is unknown and GetLastBlockHeight() must not be
+     *  called, because it asserts. Callers that only want to know the height
+     *  when it is available ask this first. */
+    bool HasLastBlockHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_last_block_processed_height >= 0;
+    }
     /** Get last block processed height */
     int GetLastBlockHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {

@@ -52,6 +52,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -77,6 +78,19 @@ CKey MakeFuzzKey(FuzzedDataProvider& fdp)
         key.Set(seed.begin(), seed.end(), true);
     }
     return key;
+}
+
+/** Where a redemption sends the collateral it unlocks. The build refuses when
+ *  there is no address for it, so pick one most of the time and leave it out
+ *  now and then to cover the refusal too. */
+std::optional<CTxDestination> MakeFuzzCollateralDest(FuzzedDataProvider& fdp)
+{
+    const CKey key = MakeFuzzKey(fdp);
+    const int choice = fdp.ConsumeIntegralInRange<int>(0, 3);
+    if (!key.IsValid() || choice == 0) return std::nullopt;
+    if (choice == 1) return CTxDestination{WitnessV1Taproot(XOnlyPubKey(key.GetPubKey()))};
+    if (choice == 2) return CTxDestination{WitnessV0KeyHash(key.GetPubKey())};
+    return CTxDestination{PKHash(key.GetPubKey())};
 }
 
 COutPoint MakeFuzzOutpoint(FuzzedDataProvider& fdp)
@@ -279,6 +293,7 @@ FUZZ_TARGET(dd_txbuilder_redeem_consensus_round_trip, .init = initialize_dd_txbu
     params.path = fdp.ConsumeBool() ? DigiDollar::RedemptionPath::NORMAL
                                     : DigiDollar::RedemptionPath::ERR;
     params.ownerKey = MakeFuzzKey(fdp);
+    params.collateralDest = MakeFuzzCollateralDest(fdp);
     params.feeRate = fdp.ConsumeIntegralInRange<CAmount>(100000, 100000000);
     params.collateralAmount = fdp.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY);
     params.ddMinted = fdp.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY / 2);

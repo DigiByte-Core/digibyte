@@ -40,6 +40,15 @@ static CPubKey ParsePubKey(const std::string& hex) {
     return pubkey;
 }
 
+static void SetOracleCompressedPublicKeys(Consensus::Params& consensus,
+                                         const std::vector<OracleNodeInfo>& nodes)
+{
+    consensus.vOracleCompressedPublicKeys.clear();
+    for (const auto& node : nodes) {
+        consensus.vOracleCompressedPublicKeys.emplace_back(node.pubkey.begin(), node.pubkey.end());
+    }
+}
+
 static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
     CMutableTransaction txNew;
@@ -186,6 +195,10 @@ public:
         consensus.TaprootHeight = 21168000;
         consensus.DigiDollarHeight = 23869440;
         consensus.AlgoLockHeight = 23869440;
+
+        // Thaw Day applies from this block, estimated around November 1 2026.
+        // The block height is the trigger; the calendar date is an estimate.
+        consensus.nDDThawDayHeight = 24490000;
 
         // The best chain should have at least this much work.
         // NOTE: must stay reachable by the headers pre-sync, which measures *contextless*
@@ -385,6 +398,8 @@ public:
         consensus.vOraclePublicKeys.push_back("2218c8607635c1f4d71d5497a9d395404fe3c01adf58f92432fbc84b3849534c");  // 33: LiberatedLark (mainnet RC46 key)
         consensus.vOraclePublicKeys.push_back("8e6bc5e7addbf15369c87cd194cc63590c710b8d5c9e592d52ea13ce03927446");  // 34: Manu_DGB_oracle (mainnet RC46 key)
 
+        SetOracleCompressedPublicKeys(consensus, vOracleNodes);
+
         LogPrintf("Oracle: Mainnet MuSig2 oracle bundles active at block %d, %d-of-%d quorum\n",
                  consensus.nDigiDollarMuSig2Height, consensus.nOracleConsensusRequired,
                  consensus.nOraclePubkeyCount);
@@ -397,46 +412,46 @@ private:
         vOracleNodes = {
             // Oracle 0-9: Active MuSig2 operator set. Slots 0-16 must stay aligned
             // with consensus.vOraclePublicKeys for MuSig2 bitmap/quorum validation.
-            {0,  ParsePubKey("0345c1c7aeb4559f1b79629e0de36fb101cf279a07c5853e305240233e6945882e"), "oracle1.digibyte.io:12024", true},  // DigiByte.Io Oracle (mainnet RC46 key)
-            {1,  ParsePubKey("02615653c7883eadb97f5625b0e7fecc960094b9d33a1e281c3a6dfbaa47d529ef"), "oracle2.digidollar.org:12024", true},  // Green Candle (mainnet RC46 key)
-            {2,  ParsePubKey("02842d9481a07d949a60b526cea8d315db24f467f33901c1e73875f378bb40c75d"), "oracle3.digidollar.org:12024", true},  // Bastian (mainnet RC46 key)
-            {3,  ParsePubKey("03ddb1e57cc9691d4f4aef18b7b46a7240170f73307037822444b4a76327f6d27e"), "oracle4.digidollar.org:12024", true},  // DanGB (mainnet RC46 key)
-            {4,  ParsePubKey("02d4199fb00150d02ffae0b1b3fed207a08029c91a1d044fbc27125ac8f6d45261"), "oracle5.digidollar.org:12024", true},  // Shenger (mainnet RC46 key)
-            {5,  ParsePubKey("035e80419393fad8ff0426bd32bde8ccc6570b024a9138660f3fae5ecd60bc195a"), "oracle6.digidollar.org:12024", true},  // Ycagel (mainnet RC46 key)
-            {6,  ParsePubKey("03b9a11dde09f69e864223615daecf4e0829b6e2f5e417f50f8cfd74d0a6181488"), "oracle7.digidollar.org:12024", true},  // Aussie (mainnet RC46 key)
-            {7,  ParsePubKey("03d15eb49e30bedecbf37f5863d266ea6ca19e81863f4df268d717c62013741f79"), "oracle8.digidollar.org:12024", true},  // LookInto (mainnet RC46 key)
-            {8,  ParsePubKey("0299a8442a35abaac5b9c4922e0754d0de6c8ed9d946a1ad9690b62f89a791b374"), "oracle9.digidollar.org:12024", true},  // JohnnyLawDGB (mainnet RC46 key)
-            {9,  ParsePubKey("0220bcc8be5f739f826c771f86f45eda0b5b50d11d8f8832c92ed626a65c44c4f2"), "oracle10.digidollar.org:12024", true},  // Ogilvie (mainnet RC46 key)
+            {0,  ParsePubKey("0345c1c7aeb4559f1b79629e0de36fb101cf279a07c5853e305240233e6945882e"), "oracle1.digibyte.io:12024", true, "DigiByte.Io Oracle"},  // DigiByte.Io Oracle (mainnet RC46 key)
+            {1,  ParsePubKey("02615653c7883eadb97f5625b0e7fecc960094b9d33a1e281c3a6dfbaa47d529ef"), "oracle2.digidollar.org:12024", true, "Green Candle"},  // Green Candle (mainnet RC46 key)
+            {2,  ParsePubKey("02842d9481a07d949a60b526cea8d315db24f467f33901c1e73875f378bb40c75d"), "oracle3.digidollar.org:12024", true, "Bastian"},  // Bastian (mainnet RC46 key)
+            {3,  ParsePubKey("03ddb1e57cc9691d4f4aef18b7b46a7240170f73307037822444b4a76327f6d27e"), "oracle4.digidollar.org:12024", true, "DanGB"},  // DanGB (mainnet RC46 key)
+            {4,  ParsePubKey("02d4199fb00150d02ffae0b1b3fed207a08029c91a1d044fbc27125ac8f6d45261"), "oracle5.digidollar.org:12024", true, "Shenger"},  // Shenger (mainnet RC46 key)
+            {5,  ParsePubKey("035e80419393fad8ff0426bd32bde8ccc6570b024a9138660f3fae5ecd60bc195a"), "oracle6.digidollar.org:12024", true, "Ycagel"},  // Ycagel (mainnet RC46 key)
+            {6,  ParsePubKey("03b9a11dde09f69e864223615daecf4e0829b6e2f5e417f50f8cfd74d0a6181488"), "oracle7.digidollar.org:12024", true, "Aussie"},  // Aussie (mainnet RC46 key)
+            {7,  ParsePubKey("03d15eb49e30bedecbf37f5863d266ea6ca19e81863f4df268d717c62013741f79"), "oracle8.digidollar.org:12024", true, "LookInto"},  // LookInto (mainnet RC46 key)
+            {8,  ParsePubKey("0299a8442a35abaac5b9c4922e0754d0de6c8ed9d946a1ad9690b62f89a791b374"), "oracle9.digidollar.org:12024", true, "JohnnyLawDGB"},  // JohnnyLawDGB (mainnet RC46 key)
+            {9,  ParsePubKey("0220bcc8be5f739f826c771f86f45eda0b5b50d11d8f8832c92ed626a65c44c4f2"), "oracle10.digidollar.org:12024", true, "Ogilvie"},  // Ogilvie (mainnet RC46 key)
 
             // Oracle 10-16: Keep the first 17 slots aligned with the active roster.
-            {10, ParsePubKey("02b710dfc3a74137a0d9f3e26d3fd5091ba9ce29b990e12920ac1101b001e23858"), "oracle11.digidollar.org:12024", true},  // ChopperBrian (mainnet RC46 key)
-            {11, ParsePubKey("03b9ca28f68bbe4f0b6f93c08b184e81e11b754906f2426739a1cfee48508276ca"), "oracle12.digidollar.org:12024", true},  // Crypto Corner Shop (mainnet RC46 key)
-            {12, ParsePubKey("032c4422fb8e5eac5d27423272d35abe6cff0acb19ab051e51204e3392365c18f3"), "oracle13.digidollar.org:12024", true},  // DaPunzy (mainnet RC46 key)
-            {13, ParsePubKey("0258889fb092fdf366004032d3af7cc35fddd951eb8413409699e879f795111a0e"), "oracle14.digidollar.org:12024", true},  // DigiByte_FORCE (mainnet RC46 key)
-            {14, ParsePubKey("034b013d2203e06461187604992333b367db165f0e79905c0974ba8a554bc69fec"), "oracle15.digidollar.org:12024", true},  // Neel (mainnet RC46 key)
-            {15, ParsePubKey("030f809ccbeea32bcca9c817dbf674e38e2fbc234f4462b88612876287489197a9"), "oracle16.digidollar.org:12024", true},  // DigiSwarm (mainnet RC46 key)
-            {16, ParsePubKey("03943744e1635c2871db786b2ef98d3d5007b2d1f8bb622b44a99b31fbe63cc5bf"), "oracle17.digidollar.org:12024", true},  // GTO90 (mainnet RC46 key)
+            {10, ParsePubKey("02b710dfc3a74137a0d9f3e26d3fd5091ba9ce29b990e12920ac1101b001e23858"), "oracle11.digidollar.org:12024", true, "ChopperBrian"},  // ChopperBrian (mainnet RC46 key)
+            {11, ParsePubKey("03b9ca28f68bbe4f0b6f93c08b184e81e11b754906f2426739a1cfee48508276ca"), "oracle12.digidollar.org:12024", true, "Crypto Corner Shop"},  // Crypto Corner Shop (mainnet RC46 key)
+            {12, ParsePubKey("032c4422fb8e5eac5d27423272d35abe6cff0acb19ab051e51204e3392365c18f3"), "oracle13.digidollar.org:12024", true, "DaPunzy"},  // DaPunzy (mainnet RC46 key)
+            {13, ParsePubKey("0258889fb092fdf366004032d3af7cc35fddd951eb8413409699e879f795111a0e"), "oracle14.digidollar.org:12024", true, "DigiByteForce"},  // DigiByte_FORCE (mainnet RC46 key)
+            {14, ParsePubKey("034b013d2203e06461187604992333b367db165f0e79905c0974ba8a554bc69fec"), "oracle15.digidollar.org:12024", true, "Neel"},  // Neel (mainnet RC46 key)
+            {15, ParsePubKey("030f809ccbeea32bcca9c817dbf674e38e2fbc234f4462b88612876287489197a9"), "oracle16.digidollar.org:12024", true, "DigiSwarm"},  // DigiSwarm (mainnet RC46 key)
+            {16, ParsePubKey("03943744e1635c2871db786b2ef98d3d5007b2d1f8bb622b44a99b31fbe63cc5bf"), "oracle17.digidollar.org:12024", true, "GTO90"},  // GTO90 (mainnet RC46 key)
 
             // Oracle 17-34: Active launch roster additions.
-            {17, ParsePubKey("039d83219cf9056854da1f56fbf1d792ef14b1853ec027cd9c0a51465e2ec2afaa"), "oracle18.digidollar.org:12024", true},  // digibyte-maxi (mainnet RC46 key)
-            {18, ParsePubKey("03e2fa8be3480929a59fb93b284e49f4b74bfb52ffed3934de751bdb1c33c54e6e"), "oracle19.digidollar.org:12024", true},  // Anthony (mainnet RC46 key)
-            {19, ParsePubKey("02507a43d15e0b6c149dd1835347879a1b723bdbecb4cc8afe124c52df37212295"), "oracle20.digidollar.org:12024", true},  // mbah_jambon (mainnet RC46 key)
-            {20, ParsePubKey("021bf934b18dd8bab94cec0dfc127f293afd542b8042df60a439affd5e64831285"), "oracle21.digidollar.org:12024", true},  // Camden (mainnet RC46 key)
-            {21,  ParsePubKey("0275481d5d543b27e298ba726674730d11d5bc1139f13205957b20d9936225ea38"), "oracle22.digidollar.org:12024", true},  // Twoface123 (mainnet RC46 key)
-            {22,  ParsePubKey("02deec78492920e9010c3015c50bacbcc158272a941220bdf74208f4796d962542"), "oracle23.digidollar.org:12024", true},  // LivingTheLife (mainnet RC46 key)
-            {23,  ParsePubKey("025b25677c412923376670284021ed9e99b53ebee6f4e3ef6123e742fb020e1f48"), "oracle24.digidollar.org:12024", true},  // ChozenOne43 (mainnet RC46 key)
-            {24,  ParsePubKey("0339543917295ddbba5bf3fa1198f3d7f63321364192f5839e9699a6f50572b68a"), "oracle25.digidollar.org:12024", true},  // ckunchained (mainnet RC46 key)
-            {25,  ParsePubKey("03d476d0565e20ca0901c1b61a0aee36e3a6544346df48bdf45447ea051827ddee"), "oracle26.digidollar.org:12024", true},  // JMag (mainnet RC46 key)
+            {17, ParsePubKey("039d83219cf9056854da1f56fbf1d792ef14b1853ec027cd9c0a51465e2ec2afaa"), "oracle18.digidollar.org:12024", true, "digibyte-maxi"},  // digibyte-maxi (mainnet RC46 key)
+            {18, ParsePubKey("03e2fa8be3480929a59fb93b284e49f4b74bfb52ffed3934de751bdb1c33c54e6e"), "oracle19.digidollar.org:12024", true, "Anthony"},  // Anthony (mainnet RC46 key)
+            {19, ParsePubKey("02507a43d15e0b6c149dd1835347879a1b723bdbecb4cc8afe124c52df37212295"), "oracle20.digidollar.org:12024", true, "mbah_jambon"},  // mbah_jambon (mainnet RC46 key)
+            {20, ParsePubKey("021bf934b18dd8bab94cec0dfc127f293afd542b8042df60a439affd5e64831285"), "oracle21.digidollar.org:12024", true, "Camden"},  // Camden (mainnet RC46 key)
+            {21,  ParsePubKey("0275481d5d543b27e298ba726674730d11d5bc1139f13205957b20d9936225ea38"), "oracle22.digidollar.org:12024", true, "Twoface123"},  // Twoface123 (mainnet RC46 key)
+            {22,  ParsePubKey("02deec78492920e9010c3015c50bacbcc158272a941220bdf74208f4796d962542"), "oracle23.digidollar.org:12024", true, "LivingTheLife"},  // LivingTheLife (mainnet RC46 key)
+            {23,  ParsePubKey("025b25677c412923376670284021ed9e99b53ebee6f4e3ef6123e742fb020e1f48"), "oracle24.digidollar.org:12024", true, "ChozenOne43"},  // ChozenOne43 (mainnet RC46 key)
+            {24,  ParsePubKey("0339543917295ddbba5bf3fa1198f3d7f63321364192f5839e9699a6f50572b68a"), "oracle25.digidollar.org:12024", true, "ckunchained"},  // ckunchained (mainnet RC46 key)
+            {25,  ParsePubKey("03d476d0565e20ca0901c1b61a0aee36e3a6544346df48bdf45447ea051827ddee"), "oracle26.digidollar.org:12024", true, "JMag"},  // JMag (mainnet RC46 key)
 
-            {26,  ParsePubKey("0336031b96a287f671172106f2d62cbeec0e547d31b591169ebbe9ddef7277e5b9"), "oracle27.digidollar.org:12024", true},   // HashedMax (mainnet RC46 key)
-            {27,  ParsePubKey("0380f5bdf4f359c7daccfa8156d9569f8b48e36619feadb38adb5292a93c877563"), "oracle28.digidollar.org:12024", true},   // DennisPitallano (mainnet RC46 key)
-            {28,  ParsePubKey("03810ab54165a93b0d219494da9a7830ef245f49696662ddc49644d25b081c79d3"), "digihash.digibyte.io:12024", true},   // DigiHash Mining Pool (mainnet key)
-            {29,  ParsePubKey("021ff6510c5c34604fdde76b866656f40a966e04fbabf27589155b754033139d3d"), "oracle30.digidollar.org:12024", true},   // medgboracle3452 (mainnet RC46 key)
-            {30,  ParsePubKey("0317aaa874bc5d71a1f9f2e0b54ca9188cabd732fe9776530aa79e7ac2dc0f0b67"), "oracle31.digidollar.org:12024", true},   // DigibyteDaily (mainnet RC46 key)
-            {31,  ParsePubKey("03a59c6d65b529fe956704ea6199a55dc1363f4fd4b79d56903f2d1737c7b09284"), "oracle32.digidollar.org:12024", true},   // Peer2Peer / DigiRoos (mainnet RC46 key)
-            {32,  ParsePubKey("03451f9d309a35d1eeefdc2bdacadb0d3dd88c50c51dce54317de6ae6bceb49370"), "oracle33.digidollar.org:12024", true},   // 3DogsKanab (mainnet RC46 key)
-            {33,  ParsePubKey("032218c8607635c1f4d71d5497a9d395404fe3c01adf58f92432fbc84b3849534c"), "oracle34.digidollar.org:12024", true},   // LiberatedLark (mainnet RC46 key)
-            {34,  ParsePubKey("038e6bc5e7addbf15369c87cd194cc63590c710b8d5c9e592d52ea13ce03927446"), "oracle35.digidollar.org:12024", true}    // Manu_DGB_oracle (mainnet RC46 key)
+            {26,  ParsePubKey("0336031b96a287f671172106f2d62cbeec0e547d31b591169ebbe9ddef7277e5b9"), "oracle27.digidollar.org:12024", true, "HashedMax"},   // HashedMax (mainnet RC46 key)
+            {27,  ParsePubKey("0380f5bdf4f359c7daccfa8156d9569f8b48e36619feadb38adb5292a93c877563"), "oracle28.digidollar.org:12024", true, "DennisPitallano"},   // DennisPitallano (mainnet RC46 key)
+            {28,  ParsePubKey("03810ab54165a93b0d219494da9a7830ef245f49696662ddc49644d25b081c79d3"), "digihash.digibyte.io:12024", true, "DigiHash Mining Pool"},   // DigiHash Mining Pool (mainnet key)
+            {29,  ParsePubKey("021ff6510c5c34604fdde76b866656f40a966e04fbabf27589155b754033139d3d"), "oracle30.digidollar.org:12024", true, "medgboracle3452"},   // medgboracle3452 (mainnet RC46 key)
+            {30,  ParsePubKey("0317aaa874bc5d71a1f9f2e0b54ca9188cabd732fe9776530aa79e7ac2dc0f0b67"), "oracle31.digidollar.org:12024", true, "DigibyteDaily"},   // DigibyteDaily (mainnet RC46 key)
+            {31,  ParsePubKey("03a59c6d65b529fe956704ea6199a55dc1363f4fd4b79d56903f2d1737c7b09284"), "oracle32.digidollar.org:12024", true, "Peer2Peer"},   // Peer2Peer / DigiRoos (mainnet RC46 key)
+            {32,  ParsePubKey("03451f9d309a35d1eeefdc2bdacadb0d3dd88c50c51dce54317de6ae6bceb49370"), "oracle33.digidollar.org:12024", true, "3DogsKanab"},   // 3DogsKanab (mainnet RC46 key)
+            {33,  ParsePubKey("032218c8607635c1f4d71d5497a9d395404fe3c01adf58f92432fbc84b3849534c"), "oracle34.digidollar.org:12024", true, "LiberatedLark"},   // LiberatedLark (mainnet RC46 key)
+            {34,  ParsePubKey("038e6bc5e7addbf15369c87cd194cc63590c710b8d5c9e592d52ea13ce03927446"), "oracle35.digidollar.org:12024", true, "Manu_DGB_oracle"}    // Manu_DGB_oracle (mainnet RC46 key)
         };
     }
 };
@@ -531,6 +546,10 @@ public:
         consensus.TaprootHeight = 0;
         consensus.DigiDollarHeight = 600;
         consensus.AlgoLockHeight = 0;
+
+        // Thaw Day applies from this block, estimated before September 21 2026.
+        // The block height is the trigger; the calendar date is an estimate.
+        consensus.nDDThawDayHeight = 432100;
 
         consensus.nMinimumChainWork = uint256S("0x00");
         consensus.defaultAssumeValid = uint256S("0x00"); //1079274
@@ -692,6 +711,7 @@ public:
         if (options.easy_pow) {
             EnableLocalMiniTestnetMode();
         }
+        SetOracleCompressedPublicKeys(consensus, vOracleNodes);
 
         // Testnet-specific oracle and activation settings
         consensus.nDDOracleEpochBlocks = 40;       // Rotate oracle signing epochs every 40 blocks (~10 minutes)
@@ -789,41 +809,41 @@ private:
         //
         // Production testnet oracle nodes.
         vOracleNodes = {
-            { 0, ParsePubKey("03e1dce189a530c1fb39dcd9282cf5f9de0e4eb257344be9fd94ce27c06005e8c7"), "oracle1.digibyte.io:12033",  true},  // Jared
-            { 1, ParsePubKey("033dfb7a36ab40fa6fbc69b4b499eaa17bfa1958aa89ec248efc24b4c18694f990"), "oracle2.digibyte.io:12033",  true},  // Green Candle
-            { 2, ParsePubKey("03172755a320cec96c981d46c86d79a03578d73406a25e89d8edc616a8f361cb5c"), "oracle3.digibyte.io:12033",  true},  // Bastian
-            { 3, ParsePubKey("03546c07ee9d21640c4b4e96e6954bd49c3ab5bcf36c6a512603ebf75f8609da0c"), "oracle4.digibyte.io:12033",  true},  // DanGB
-            { 4, ParsePubKey("039cef021f841794c1afc4e84d678f3c70dbe3a972330b2b6329852898443deb4f"), "oracle5.digibyte.io:12033",  true},  // Shenger
-            { 5, ParsePubKey("0285016758856ed27388501a54031fa3a678df705bf811fb8bc9abd2d7cfb6d9f7"), "oracle6.digibyte.io:12033",  true},  // Ycagel
-            { 6, ParsePubKey("037a858e055099e4a9cf8273e9171da148d4fd00afd4376b60dc1cd09974731b51"), "oracle7.digibyte.io:12033",  true},  // Aussie
-            { 7, ParsePubKey("032d8c9f054d7087e263016c0800ad1c2f8106859e772766b9f8179042d1792a09"), "oracle8.digibyte.io:12033",  true},  // LookInto
-            { 8, ParsePubKey("0389d5c588c8e0d311028f2f7e0db6df1a9fb0319c5e3b2cfc32efaee86538d250"), "oracle9.digibyte.io:12033",  true},  // JohnnyLawDGB
-            { 9, ParsePubKey("02d2f9b0e00ed2fb0a93d04f12eb250b4adf2e4ac8335692c7942e4cba6e462484"), "129.212.182.152:12033",      true},  // Ogilvie
-            {10, ParsePubKey("02028a52c7a3e8f22c44e356dcda43a0e24ed5e8e284c53c902599f0947763113c"), "oracle11.digibyte.io:12033", true},  // ChopperBrian
-            {11, ParsePubKey("024ef063a67b35295e9eaaa9251bc7f0effbceaedc8e9bc92504b0da832744ca08"), "oracle12.digibyte.io:12033", true},  // hallvardo (key rotated for RC31)
-            {12, ParsePubKey("0375d7494b55ebc3874450954ac5caca402bbd068467a89d48fe877f3e2d09eda9"), "oracle13.digibyte.io:12033", true},  // DaPunzy (key rotated for RC31)
-            {13, ParsePubKey("024770d416e5f751ff310fa8e35cd48d9709ee539cbaa07c67dbf52503518cc573"), "oracle14.digibyte.io:12033", true},  // DigiByteForce (key rotated for RC31)
-            {14, ParsePubKey("03f3ab098eb0ceff8259c280cf5a3682e78b298dc300e26cdb4694d8efcd6a11a2"), "oracle15.digibyte.io:12033", true},  // Neel (RC30)
-            {15, ParsePubKey("03447153bcec341f2dad94541104f4e8c0a8b19e342dada1b2204ae56cf2b960a6"), "oracle16.digibyte.io:12033", true},  // DigiSwarm (RC30)
-            {16, ParsePubKey("0283b9c6d229a6347370517fc11329abebeae511055702b0408158f2205035adc7"), "oracle17.digibyte.io:12033", true},  // GTO90 (RC30)
-            {17, ParsePubKey("03649d750bcad5b42b3dd0f11c8d98d62ed5afd515cd986663f81c35f086e58d47"), "oracle18.digibyte.io:12033", true},  // digibyte-maxi (RC42)
-            {18, ParsePubKey("0345f8cb22dfde6aff8f18552c338256e0df551ca2df007f6449d6da1dbb7f4d89"), "oracle19.digibyte.io:12033", true},  // Anthony
-            {19, ParsePubKey("031758a6d7f1f87c95d1a4a38415608d41463a504ea28da7c6129e2a9d654add42"), "oracle20.digibyte.io:12033", true},  // mbah_jambon
-            {20, ParsePubKey("03018c81746d6ddc326c993d9f2e7f2015554e97a261f3b5fe637ac5098f421a4c"), "oracle21.digibyte.io:12033", true},  // Camden
-            {21, ParsePubKey("03d8165aa05b045de2a9b979b23a63cca1fec865784d12ab6f3f1bca8a90f3dd86"), "oracle22.digibyte.io:12033", true},  // Twoface123
-            {22, ParsePubKey("039241688b464c3f03f957cd85a3d1d6a760963be3707a16805b8064a8740e07ef"), "oracle23.digibyte.io:12033", true},  // LivingTheLife
-            {23, ParsePubKey("03b6302e3cc8ee6d474c3c0078c25b87ce708757e2a81e8f4f01975dc4b25e0f6d"), "oracle24.digibyte.io:12033", true},  // ChozenOne43
-            {24, ParsePubKey("03926ed40635d294a554ec046a96d3fa58587521385c7df58ff21ede12a31add0e"), "oracle25.digibyte.io:12033", true},  // ckunchained
-            {25, ParsePubKey("034103ed4168d11dcaafa96494d5b3dd37247fa6deefa08d47f7004568792b1672"), "oracle26.digibyte.io:12033", true},  // JMag
-            {26, ParsePubKey("038adf7df5fcd114178643f16aa0e3be8fa1e221ca421479e48c0bd04f2561d3a8"), "oracle27.digibyte.io:12033", true},   // HashedMax
-            {27, ParsePubKey("02557029e2419af54984f3f2fb600004c0a6f8573dac5730cfaab2048c80ba6894"), "oracle28.digibyte.io:12033", true},   // DennisPitallano
-            {28, ParsePubKey("03532efd6277226f38903401ec8317ba7cc8f13eb48dc8cb1e102fdc23488d7cef"), "oracle29.digibyte.io:12033", true},   // DigiHash Mining Pool
-            {29, ParsePubKey("03d566a244719aa577d828da31ad9863f94686f710ac1f0638914eff5692ec7d58"), "85.239.234.52:12033", true},           // Michael E / medgboracle3452
-            {30, ParsePubKey("03603a0175197a1fe28859c71c69fd0081710c5569fceceaa96ce7de386d3ebf61"), "oracle31.digibyte.io:12033", true},   // Scott K / DigibyteDaily
-            {31, ParsePubKey("02e96759ba5c67df6fc5cfc86977389d08fa31b4b297586f13d43bdd1569b459ba"), "oracle32.digibyte.io:12033", true},   // Peer2Peer / DigiRoos
-            {32, ParsePubKey("035878eb72be3710d8c3f9585e27374011a476378f5ea7f3ab2f2830ab052ec5f8"), "oracle33.digibyte.io:12033", true},   // 3DogsKanab
-            {33, ParsePubKey("035b3729a255bfbcff1bfd5b72fdb1a971b098545db7e874751179bc22c7f7f0b0"), "oracle34.digibyte.io:12033", true},   // LiberatedLark
-            {34, ParsePubKey("03d8fe0cd773604fa78fb1cef7d1e88a05c2473961178e40a4ac3c9aeeb4cbca87"), "oracle35.digibyte.io:12033", true},   // Manu_DGB_oracle
+            { 0, ParsePubKey("03e1dce189a530c1fb39dcd9282cf5f9de0e4eb257344be9fd94ce27c06005e8c7"), "oracle1.digibyte.io:12033",  true, "Jared"},  // Jared
+            { 1, ParsePubKey("033dfb7a36ab40fa6fbc69b4b499eaa17bfa1958aa89ec248efc24b4c18694f990"), "oracle2.digibyte.io:12033",  true, "Green Candle"},  // Green Candle
+            { 2, ParsePubKey("03172755a320cec96c981d46c86d79a03578d73406a25e89d8edc616a8f361cb5c"), "oracle3.digibyte.io:12033",  true, "Bastian"},  // Bastian
+            { 3, ParsePubKey("03546c07ee9d21640c4b4e96e6954bd49c3ab5bcf36c6a512603ebf75f8609da0c"), "oracle4.digibyte.io:12033",  true, "DanGB"},  // DanGB
+            { 4, ParsePubKey("039cef021f841794c1afc4e84d678f3c70dbe3a972330b2b6329852898443deb4f"), "oracle5.digibyte.io:12033",  true, "Shenger"},  // Shenger
+            { 5, ParsePubKey("0285016758856ed27388501a54031fa3a678df705bf811fb8bc9abd2d7cfb6d9f7"), "oracle6.digibyte.io:12033",  true, "Ycagel"},  // Ycagel
+            { 6, ParsePubKey("037a858e055099e4a9cf8273e9171da148d4fd00afd4376b60dc1cd09974731b51"), "oracle7.digibyte.io:12033",  true, "Aussie"},  // Aussie
+            { 7, ParsePubKey("032d8c9f054d7087e263016c0800ad1c2f8106859e772766b9f8179042d1792a09"), "oracle8.digibyte.io:12033",  true, "LookInto"},  // LookInto
+            { 8, ParsePubKey("0389d5c588c8e0d311028f2f7e0db6df1a9fb0319c5e3b2cfc32efaee86538d250"), "oracle9.digibyte.io:12033",  true, "JohnnyLawDGB"},  // JohnnyLawDGB
+            { 9, ParsePubKey("02d2f9b0e00ed2fb0a93d04f12eb250b4adf2e4ac8335692c7942e4cba6e462484"), "129.212.182.152:12033",      true, "Ogilvie"},  // Ogilvie
+            {10, ParsePubKey("02028a52c7a3e8f22c44e356dcda43a0e24ed5e8e284c53c902599f0947763113c"), "oracle11.digibyte.io:12033", true, "ChopperBrian"},  // ChopperBrian
+            {11, ParsePubKey("024ef063a67b35295e9eaaa9251bc7f0effbceaedc8e9bc92504b0da832744ca08"), "oracle12.digibyte.io:12033", true, "hallvardo"},  // hallvardo (key rotated for RC31)
+            {12, ParsePubKey("0375d7494b55ebc3874450954ac5caca402bbd068467a89d48fe877f3e2d09eda9"), "oracle13.digibyte.io:12033", true, "DaPunzy"},  // DaPunzy (key rotated for RC31)
+            {13, ParsePubKey("024770d416e5f751ff310fa8e35cd48d9709ee539cbaa07c67dbf52503518cc573"), "oracle14.digibyte.io:12033", true, "DigiByteForce"},  // DigiByteForce (key rotated for RC31)
+            {14, ParsePubKey("03f3ab098eb0ceff8259c280cf5a3682e78b298dc300e26cdb4694d8efcd6a11a2"), "oracle15.digibyte.io:12033", true, "Neel"},  // Neel (RC30)
+            {15, ParsePubKey("03447153bcec341f2dad94541104f4e8c0a8b19e342dada1b2204ae56cf2b960a6"), "oracle16.digibyte.io:12033", true, "DigiSwarm"},  // DigiSwarm (RC30)
+            {16, ParsePubKey("0283b9c6d229a6347370517fc11329abebeae511055702b0408158f2205035adc7"), "oracle17.digibyte.io:12033", true, "GTO90"},  // GTO90 (RC30)
+            {17, ParsePubKey("03649d750bcad5b42b3dd0f11c8d98d62ed5afd515cd986663f81c35f086e58d47"), "oracle18.digibyte.io:12033", true, "digibyte-maxi"},  // digibyte-maxi (RC42)
+            {18, ParsePubKey("0345f8cb22dfde6aff8f18552c338256e0df551ca2df007f6449d6da1dbb7f4d89"), "oracle19.digibyte.io:12033", true, "Anthony"},  // Anthony
+            {19, ParsePubKey("031758a6d7f1f87c95d1a4a38415608d41463a504ea28da7c6129e2a9d654add42"), "oracle20.digibyte.io:12033", true, "mbah_jambon"},  // mbah_jambon
+            {20, ParsePubKey("03018c81746d6ddc326c993d9f2e7f2015554e97a261f3b5fe637ac5098f421a4c"), "oracle21.digibyte.io:12033", true, "Camden"},  // Camden
+            {21, ParsePubKey("03d8165aa05b045de2a9b979b23a63cca1fec865784d12ab6f3f1bca8a90f3dd86"), "oracle22.digibyte.io:12033", true, "Twoface123"},  // Twoface123
+            {22, ParsePubKey("039241688b464c3f03f957cd85a3d1d6a760963be3707a16805b8064a8740e07ef"), "oracle23.digibyte.io:12033", true, "LivingTheLife"},  // LivingTheLife
+            {23, ParsePubKey("03b6302e3cc8ee6d474c3c0078c25b87ce708757e2a81e8f4f01975dc4b25e0f6d"), "oracle24.digibyte.io:12033", true, "ChozenOne43"},  // ChozenOne43
+            {24, ParsePubKey("03926ed40635d294a554ec046a96d3fa58587521385c7df58ff21ede12a31add0e"), "oracle25.digibyte.io:12033", true, "ckunchained"},  // ckunchained
+            {25, ParsePubKey("034103ed4168d11dcaafa96494d5b3dd37247fa6deefa08d47f7004568792b1672"), "oracle26.digibyte.io:12033", true, "JMag"},  // JMag
+            {26, ParsePubKey("038adf7df5fcd114178643f16aa0e3be8fa1e221ca421479e48c0bd04f2561d3a8"), "oracle27.digibyte.io:12033", true, "HashedMax"},   // HashedMax
+            {27, ParsePubKey("02557029e2419af54984f3f2fb600004c0a6f8573dac5730cfaab2048c80ba6894"), "oracle28.digibyte.io:12033", true, "DennisPitallano"},   // DennisPitallano
+            {28, ParsePubKey("03532efd6277226f38903401ec8317ba7cc8f13eb48dc8cb1e102fdc23488d7cef"), "oracle29.digibyte.io:12033", true, "DigiHash Mining Pool"},   // DigiHash Mining Pool
+            {29, ParsePubKey("03d566a244719aa577d828da31ad9863f94686f710ac1f0638914eff5692ec7d58"), "85.239.234.52:12033", true, "medgboracle3452"},           // Michael E / medgboracle3452
+            {30, ParsePubKey("03603a0175197a1fe28859c71c69fd0081710c5569fceceaa96ce7de386d3ebf61"), "oracle31.digibyte.io:12033", true, "DigibyteDaily"},   // Scott K / DigibyteDaily
+            {31, ParsePubKey("02e96759ba5c67df6fc5cfc86977389d08fa31b4b297586f13d43bdd1569b459ba"), "oracle32.digibyte.io:12033", true, "Peer2Peer"},   // Peer2Peer / DigiRoos
+            {32, ParsePubKey("035878eb72be3710d8c3f9585e27374011a476378f5ea7f3ab2f2830ab052ec5f8"), "oracle33.digibyte.io:12033", true, "3DogsKanab"},   // 3DogsKanab
+            {33, ParsePubKey("035b3729a255bfbcff1bfd5b72fdb1a971b098545db7e874751179bc22c7f7f0b0"), "oracle34.digibyte.io:12033", true, "LiberatedLark"},   // LiberatedLark
+            {34, ParsePubKey("03d8fe0cd773604fa78fb1cef7d1e88a05c2473961178e40a4ac3c9aeeb4cbca87"), "oracle35.digibyte.io:12033", true, "Manu_DGB_oracle"},   // Manu_DGB_oracle
         };
         //
         // LOCAL MINI-TESTNET TESTING (disabled; retained for future use).
@@ -977,6 +997,11 @@ public:
         consensus.TaprootHeight = 0;
         consensus.DigiDollarHeight = 0;
         consensus.AlgoLockHeight = 0;
+
+        // Thaw Day is not scheduled on signet. Set a height here only if a
+        // coordinated signet test is chosen; it must never be left to activate
+        // at height zero by accident.
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
 
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
@@ -1248,6 +1273,13 @@ public:
             // Takes precedence over -testactivationheight=digidollar@H.
             consensus.DigiDollarHeight = *opts.digidollar_activation_height;
         }
+        // Thaw Day is not scheduled on regtest unless -ddthawdayheight=N is
+        // given; then it is exactly N, independent of the DigiDollar height
+        // (DigiDollar::IsThawDayActive handles either order).
+        consensus.nDDThawDayHeight = std::numeric_limits<int>::max();
+        if (opts.dd_thaw_day_height) {
+            consensus.nDDThawDayHeight = *opts.dd_thaw_day_height;
+        }
         consensus.nOracleEpochLength = 40;         // 10 minutes (40 blocks * 15 seconds)
         consensus.nOracleRequiredMessages = 4;     // 4-of-7 off-chain price quorum (matches testnet)
         consensus.nOracleTotalOracles = 7;         // 7 active oracles (matches testnet)
@@ -1279,6 +1311,8 @@ public:
         consensus.vOraclePublicKeys.push_back("aa1ebe314382eb820a040acf604a6617db3d063e9ee0640780774650649aaf47");  // oracle 4
         consensus.vOraclePublicKeys.push_back("be6ad50e0bf26af3798af09a2824142fa79ff37f8730b7a54ba34c9fe6f1e8ec");  // oracle 5
         consensus.vOraclePublicKeys.push_back("584d30f3650d998b0b5f8be52f46164aee5f10d332421e63f070da8a38693a96");  // oracle 6
+
+        SetOracleCompressedPublicKeys(consensus, vOracleNodes);
 
         LogPrintf("Oracle: RegTest MuSig2 oracle bundles active at block %d, %d-of-%d quorum\n",
                  consensus.nDigiDollarMuSig2Height, consensus.nOracleConsensusRequired,

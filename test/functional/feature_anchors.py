@@ -50,12 +50,16 @@ class AnchorsTest(DigiByteTestFramework):
         # we store only the port to identify the peers
         block_relay_nodes_port = []
         inbound_nodes_port = []
+        # The file stores the port as two bytes, so it is always four hex
+        # characters. Format it the same way here. Writing it without the
+        # leading zero makes every port below 4096 impossible to find, and the
+        # test then fails for a reason that has nothing to do with the node.
         for p in self.nodes[0].getpeerinfo():
             addr_split = p["addr"].split(":")
             if p["connection_type"] == "block-relay-only":
-                block_relay_nodes_port.append(hex(int(addr_split[1]))[2:])
+                block_relay_nodes_port.append(format(int(addr_split[1]), "04x"))
             else:
-                inbound_nodes_port.append(hex(int(addr_split[1]))[2:])
+                inbound_nodes_port.append(format(int(addr_split[1]), "04x"))
 
         self.log.debug("Stop node")
         self.stop_node(0)

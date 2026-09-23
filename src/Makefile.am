@@ -157,8 +157,10 @@ DIGIBYTE_CORE_H = \
   cuckoocache.h \
   dandelion.h \
   dbwrapper.h \
+  dbwrapper_env.h \
   deploymentinfo.h \
   deploymentstatus.h \
+  digidollar/amount.h \
   digidollar/digidollar.h \
   digidollar/scripts.h \
   digidollar/txbuilder.h \
@@ -218,6 +220,7 @@ DIGIBYTE_CORE_H = \
   netgroup.h \
   netmessagemaker.h \
   node/abort.h \
+  node/blockheadercache.h \
   node/blockmanager_args.h \
   node/blockstorage.h \
   node/caches.h \
@@ -241,6 +244,7 @@ DIGIBYTE_CORE_H = \
   node/transaction.h \
   node/txreconciliation.h \
   node/utxo_snapshot.h \
+  node/warnings.h \
   node/validation_cache_args.h \
   noui.h \
   outputtype.h \
@@ -304,6 +308,7 @@ DIGIBYTE_CORE_H = \
   util/bytevectorhash.h \
   util/chaintype.h \
   util/check.h \
+  util/compact_work.h \
   util/epochguard.h \
   util/error.h \
   util/exception.h \
@@ -349,6 +354,7 @@ DIGIBYTE_CORE_H = \
   wallet/context.h \
   wallet/crypter.h \
   wallet/db.h \
+  wallet/digidollarmintcapability.h \
   wallet/digidollarwallet.h \
   wallet/ddcoincontrol.h \
   wallet/dump.h \
@@ -398,6 +404,7 @@ libdigibyte_node_a_SOURCES = \
   consensus/tx_verify.cpp \
   dandelion.cpp \
   dbwrapper.cpp \
+  dbwrapper_env.cpp \
   deploymentstatus.cpp \
   digidollar/health.cpp \
   flatfile.cpp \
@@ -423,6 +430,7 @@ libdigibyte_node_a_SOURCES = \
   net_processing.cpp \
   netgroup.cpp \
   node/abort.cpp \
+  node/blockheadercache.cpp \
   node/blockmanager_args.cpp \
   node/blockstorage.cpp \
   node/caches.cpp \
@@ -649,6 +657,7 @@ libdigibyte_consensus_a_SOURCES = \
   consensus/amount.h \
   consensus/digidollar.cpp \
   consensus/digidollar.h \
+  consensus/digidollar_state.h \
   consensus/digidollar_transaction_validation.cpp \
   consensus/digidollar_transaction_validation.h \
   consensus/digidollar_tx.cpp \
@@ -744,6 +753,7 @@ libdigibyte_common_a_SOURCES = \
   core_read.cpp \
   core_write.cpp \
   deploymentinfo.cpp \
+  digidollar/amount.cpp \
   digidollar/digidollar.cpp \
   digidollar/scripts.cpp \
   digidollar/txbuilder.cpp \
@@ -1027,6 +1037,7 @@ libdigibytekernel_la_SOURCES = \
   consensus/tx_verify.cpp \
   core_read.cpp \
   dbwrapper.cpp \
+  dbwrapper_env.cpp \
   deploymentinfo.cpp \
   deploymentstatus.cpp \
   flatfile.cpp \

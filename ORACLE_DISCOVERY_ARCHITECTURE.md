@@ -14,7 +14,7 @@ declares 7.
 
 The `endpoint` field is informational metadata for operator coordination (it shows up in `getoracles` and `listoracle` RPC output). DigiByte Core does **not** make outbound connections to those endpoints — oracle data flows over the standard P2P graph. Wallet/light nodes therefore do not need to discover oracle endpoints to use DigiDollar; they only need a working P2P link to any peer that has the latest MuSig2 bundle.
 
-The `getoracles` P2P message (`src/protocol.cpp:56`, handler in `src/net_processing.cpp:6262`) lets a node pull missing oracle price telemetry from a peer rather than waiting for it to be re-gossiped. It carries a request descriptor; the peer responds by re-pushing matching fresh `oracleprice` messages and recent signed `oraclehb` version heartbeats. It does not return on-chain bundles, MuSig2 nonces, context proposals, partial signatures, or endpoint records. There is no Layer-3 `oracleaddr` style endpoint announcement on the wire today.
+The `getoracles` P2P message (`src/protocol.cpp:56`, handler in `src/net_processing.cpp:6343`) lets a node pull missing oracle price telemetry from a peer rather than waiting for it to be re-gossiped. It carries a request descriptor; the peer responds by re-pushing matching fresh `oracleprice` messages and recent signed `oraclehb` version heartbeats. It does not return on-chain bundles, MuSig2 nonces, context proposals, partial signatures, or endpoint records. There is no Layer-3 `oracleaddr` style endpoint announcement on the wire today.
 
 Everything below this section is design intent for adding decentralized endpoint discovery on top of that baseline.
 
@@ -217,7 +217,7 @@ Payload:
 5. No duplicate from same oracle_id in last epoch
 6. Endpoint type and length are valid; no automatic outbound connection is made during validation
 
-**Rate limiting (proposed):** Max 1 message per oracle per epoch. Reject duplicates. (For comparison, the *implemented* `oracleprice` rate limiter is 3,600 novel messages per peer per hour — silent-drop, no misbehavior penalty — see `src/net_processing.cpp:5494-5511`.)
+**Rate limiting (proposed):** Max 1 message per oracle per epoch. Reject duplicates. (For comparison, the *implemented* `oracleprice` rate limiter is 3,600 novel messages per peer per hour — silent-drop, no misbehavior penalty — see `src/net_processing.cpp:5604-5632`.)
 
 ## Summary
 

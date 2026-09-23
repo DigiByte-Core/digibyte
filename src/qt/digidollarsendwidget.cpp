@@ -16,6 +16,8 @@
 #include <consensus/amount.h>
 #include <base58.h>
 #include <logging.h>
+#include <pubkey.h>
+#include <uint256.h>
 #include <kernel/chainparams.h>
 #include <oracle/mock_oracle.h>
 #include <interfaces/node.h>
@@ -47,6 +49,16 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+// What this form will let a user send in one DigiDollar transfer. The amount
+// box refuses to accept anything outside these, and the line under the box
+// says which limit was hit, so the user is never left with a red box and no
+// reason for it.
+constexpr double DD_SEND_MIN_DOLLARS = 1.00;
+constexpr double DD_SEND_MAX_DOLLARS = 100000.00;
+constexpr int DD_SEND_DECIMAL_PLACES = 2;
+} // namespace
+
 DigiDollarSendWidget::DigiDollarSendWidget(const PlatformStyle *platformStyle, QWidget *parent) :
     QWidget(parent),
     m_mainLayout(nullptr),
@@ -63,6 +75,7 @@ DigiDollarSendWidget::DigiDollarSendWidget(const PlatformStyle *platformStyle, Q
     m_amountEdit(nullptr),
     m_amountSuffix(nullptr),
     m_useAvailableBalanceButton(nullptr),
+    m_amountValidationLabel(nullptr),
     m_usdEquivalentLabel(nullptr),
     m_usdEquivalentValue(nullptr),
     m_availableBalanceLabel(nullptr),
@@ -97,6 +110,9 @@ DigiDollarSendWidget::DigiDollarSendWidget(const PlatformStyle *platformStyle, Q
 {
     setupUI();
     connectSignals();
+    // Put the starting words under the amount box, so the form says what it
+    // will take before anything has been typed.
+    updateAmountValidation();
     // REMOVED: applyTheme() - Let CSS handle all theming
 }
 
@@ -116,7 +132,8 @@ void DigiDollarSendWidget::setupUI()
     m_addressValidator = new DigiDollarAddressValidator(this);
     // DD amounts are in dollars with max 2 decimal places (cents precision)
     // Send limits: $1 minimum (dust threshold), $100,000 maximum
-    m_amountValidator = new AmountValidator(1.00, 100000.00, 2, this);
+    m_amountValidator = new AmountValidator(DD_SEND_MIN_DOLLARS, DD_SEND_MAX_DOLLARS,
+                                            DD_SEND_DECIMAL_PLACES, this);
 
     // Setup sections
     setupCoinControlSection();
@@ -252,10 +269,6 @@ void DigiDollarSendWidget::setupAmountSection()
     m_amountLabel->setToolTip(tr("Enter the amount of DigiDollar to send"));
     m_amountLabel->setBuddy(m_amountEdit);
 
-    // Create horizontal layout for amount input and buttons
-    QHBoxLayout* amountInputLayout = new QHBoxLayout();
-    amountInputLayout->setSpacing(8);
-
     m_amountEdit = new QLineEdit(this);
     m_amountEdit->setObjectName("amountEdit");
     m_amountEdit->setValidator(m_amountValidator);
@@ -271,11 +284,19 @@ void DigiDollarSendWidget::setupAmountSection()
     m_useAvailableBalanceButton->setObjectName("useAvailableBalanceButton");
     m_useAvailableBalanceButton->setToolTip(tr("Use the full available DigiDollar balance (fees are paid in DGB)"));
 
-    amountInputLayout->addWidget(m_amountEdit, 0);
-    amountInputLayout->addWidget(m_useAvailableBalanceButton, 1);
-
+    // Keep the input in the grid so its full themed height sets the row height.
     m_amountLayout->addWidget(m_amountLabel, 0, 0);
-    m_amountLayout->addLayout(amountInputLayout, 0, 1);
+    m_amountLayout->addWidget(m_amountEdit, 0, 1);
+    m_amountLayout->addWidget(m_useAvailableBalanceButton, 0, 2);
+
+    // The line that says what is wrong with the amount, under the box it is
+    // about. Without it a refused amount showed only a red border and the user
+    // had no way to tell whether it was too small, too large, or more than the
+    // balance.
+    m_amountValidationLabel = new QLabel(this);
+    m_amountValidationLabel->setObjectName("amountValidationLabel");
+    m_amountValidationLabel->setWordWrap(true);
+    m_amountLayout->addWidget(m_amountValidationLabel, 1, 1, 1, 2);
 
     // USD equivalent display
     m_usdEquivalentLabel = new QLabel(tr("$USD Equivalent:"), this);
@@ -286,8 +307,8 @@ void DigiDollarSendWidget::setupAmountSection()
     m_usdEquivalentValue->setFont(monospaceFont);
     m_usdEquivalentValue->setToolTip(tr("USD value updates in real-time as you type"));
 
-    m_amountLayout->addWidget(m_usdEquivalentLabel, 1, 0);
-    m_amountLayout->addWidget(m_usdEquivalentValue, 1, 1);
+    m_amountLayout->addWidget(m_usdEquivalentLabel, 2, 0);
+    m_amountLayout->addWidget(m_usdEquivalentValue, 2, 1, 1, 2);
 
     // Available balance display
     m_availableBalanceLabel = new QLabel(tr("Available:"), this);
@@ -298,13 +319,14 @@ void DigiDollarSendWidget::setupAmountSection()
     m_availableBalanceValue->setFont(monospaceFont);
     m_availableBalanceValue->setToolTip(tr("Your current spendable DigiDollar balance"));
 
-    m_amountLayout->addWidget(m_availableBalanceLabel, 2, 0);
-    m_amountLayout->addWidget(m_availableBalanceValue, 2, 1);
+    m_amountLayout->addWidget(m_availableBalanceLabel, 3, 0);
+    m_amountLayout->addWidget(m_availableBalanceValue, 3, 1, 1, 2);
 
     // Set column widths to prevent layout distortion on initial display
     m_amountLayout->setColumnMinimumWidth(0, 110);  // Label column
     m_amountLayout->setColumnStretch(0, 0);
-    m_amountLayout->setColumnStretch(1, 1);
+    m_amountLayout->setColumnStretch(1, 0);
+    m_amountLayout->setColumnStretch(2, 1);
 
     m_mainLayout->addWidget(m_amountFrame);
 }
@@ -911,11 +933,11 @@ bool DigiDollarSendWidget::showConfirmationDialog(const QString& address, double
     int result = confirmationDialog->exec();
 
     if (result == QMessageBox::Yes) {
-        LogPrintf("DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
                   amount, address.toStdString());
         return true;
     } else {
-        LogPrintf("DigiDollar: User cancelled transfer\n");
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: User cancelled transfer\n");
         return false;
     }
 }
@@ -1000,7 +1022,7 @@ void DigiDollarSendWidget::showSuccess(const QString& txid, double amount)
     msgBox.setStandardButtons(QMessageBox::Ok);
     msgBox.exec();
 
-    LogPrintf("DigiDollar: Transfer broadcast - txid: %s\n", txid.toStdString());
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Transfer broadcast - txid: %s\n", txid.toStdString());
 }
 
 // PHASE 7.3: Backend error message mapping
@@ -1115,13 +1137,12 @@ void DigiDollarSendWidget::showBackendError(int status, const QString& reasonFai
 void DigiDollarSendWidget::updateAddressValidation()
 {
     QString address = m_addressEdit->text();
-    QPalette palette = QApplication::palette();
-    QString midColor = palette.color(QPalette::Mid).name();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    QString midColor = palette.color(QPalette::WindowText).name();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
     if (address.isEmpty()) {
         m_addressValidationLabel->setText(tr("Enter a valid DigiDollar address for this network"));
@@ -1138,34 +1159,76 @@ void DigiDollarSendWidget::updateAddressValidation()
     }
 }
 
+QString DigiDollarSendWidget::amountProblem() const
+{
+    const QString amountText = m_amountEdit->text().trimmed();
+    if (amountText.isEmpty()) {
+        return QString();
+    }
+
+    bool parsed = false;
+    const double amount = amountText.toDouble(&parsed);
+    if (!parsed) {
+        return tr("Enter the amount in $DD, for example 25.00.");
+    }
+
+    const int decimalPoint = amountText.indexOf(QLatin1Char('.'));
+    if (decimalPoint >= 0 && amountText.length() - decimalPoint - 1 > DD_SEND_DECIMAL_PLACES) {
+        return tr("DigiDollar goes down to cents, so use at most two decimal places.");
+    }
+    if (amount < DD_SEND_MIN_DOLLARS) {
+        return tr("The smallest amount you can send is %1.").arg(formatDDAmount(DD_SEND_MIN_DOLLARS));
+    }
+    if (amount > DD_SEND_MAX_DOLLARS) {
+        return tr("The most you can send in one transfer is %1.").arg(formatDDAmount(DD_SEND_MAX_DOLLARS));
+    }
+    if (amount > m_availableBalance) {
+        // Privacy mode hides the balance everywhere else on this form, so it
+        // must stay hidden here too.
+        const QString available = m_privacy ? maskValue(formatDDAmount(0)) : formatDDAmount(m_availableBalance);
+        return tr("You only have %1 to send.").arg(available);
+    }
+    return QString();
+}
+
 void DigiDollarSendWidget::updateAmountValidation()
 {
     QString amountText = m_amountEdit->text();
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    QString midColor = palette.color(QPalette::WindowText).name();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
-    if (!amountText.isEmpty()) {
-        bool isValid = validateAmount();
-        bool hasBalance = validateBalance();
+    const QString problem = amountProblem();
 
-        if (!isValid) {
-            // Invalid format
-            m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-        } else if (!hasBalance) {
-            // Valid format but insufficient balance
-            m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
-        } else {
-            // Valid and sufficient balance
-            m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
-        }
-    } else {
+    if (amountText.trimmed().isEmpty()) {
+        // Nothing typed yet: say what the box will accept.
         m_amountEdit->setStyleSheet("");
+        m_amountValidationLabel->setText(tr("Enter an amount between %1 and %2")
+                                             .arg(formatDDAmount(DD_SEND_MIN_DOLLARS))
+                                             .arg(formatDDAmount(DD_SEND_MAX_DOLLARS)));
+        m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; }").arg(midColor));
+        return;
     }
+
+    if (problem.isEmpty()) {
+        m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
+        m_amountValidationLabel->setText(tr("✓ Amount can be sent"));
+        m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(successColor));
+        return;
+    }
+
+    // Too little, too much or badly written is a rule of the form itself, so it
+    // is shown as an error. Having less than you asked to send is shown as a
+    // warning, because the balance can change and then the same amount is fine.
+    const bool overBalance = validateAmount() && !validateBalance();
+    const QString colour = overBalance ? warningColor : errorColor;
+    m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(colour));
+    m_amountValidationLabel->setText(QStringLiteral("✗ ") + problem);
+    m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(colour));
 }
 
 // DDSendConfirmationDialog implementation
@@ -1223,6 +1286,40 @@ DigiDollarAddressValidator::DigiDollarAddressValidator(QObject* parent) :
 {
 }
 
+namespace {
+
+// How long a DigiDollar address is. Every one is the same length: two version
+// bytes and a 32 byte key, written in base58 with a four byte checksum. That
+// comes out the same on mainnet, testnet and regtest. Measure a real address
+// rather than writing the number down here, so this stays right if the address
+// format ever changes. Returns 0 if an address cannot be made, and then no
+// length limit is applied.
+int DigiDollarAddressLength()
+{
+    uint256 sampleKey;
+    sampleKey.SetHex("0101010101010101010101010101010101010101010101010101010101010101");
+    const std::string sample =
+        EncodeDigiDollarAddress(CTxDestination{WitnessV1Taproot(XOnlyPubKey(sampleKey))});
+    return static_cast<int>(sample.size());
+}
+
+// The first two letters say which network an address is for: DD for mainnet,
+// TD for testnet, RD for regtest. Text that does not start that way, or that
+// is not itself the start of one of those, can never become an address.
+bool CouldBeStartOfDigiDollarAddress(const QString& input)
+{
+    for (const QString& prefix : {QStringLiteral("DD"), QStringLiteral("TD"), QStringLiteral("RD")}) {
+        // Shorter than the prefix means the text is still being typed, so it
+        // only has to match as far as it goes.
+        const bool matches = input.length() < prefix.length() ? prefix.startsWith(input)
+                                                              : input.startsWith(prefix);
+        if (matches) return true;
+    }
+    return false;
+}
+
+} // namespace
+
 QValidator::State DigiDollarAddressValidator::validate(QString& input, int& pos) const
 {
     Q_UNUSED(pos)
@@ -1235,18 +1332,22 @@ QValidator::State DigiDollarAddressValidator::validate(QString& input, int& pos)
         return QValidator::Acceptable;
     }
 
-    // Check if it could become valid with more characters
-    if (input.length() < 3) {
-        if (input.startsWith("D") || input.startsWith("T") || input.startsWith("R")) {
-            return QValidator::Intermediate;
-        }
-    } else if (input.length() < 42) {
-        if (input.startsWith("DD") || input.startsWith("TD") || input.startsWith("RD")) {
-            return QValidator::Intermediate;
-        }
+    // The text is not an address for this network. Refuse the keystroke only
+    // when the text can never become one: it does not start the way an address
+    // starts, or it is longer than an address. Anything else is kept, so a
+    // whole address can be typed a character at a time and a mistake can be
+    // corrected in place. The form's own message says whether what is in the
+    // box is an address for this network, and the Send button stays off until
+    // it is.
+    const int fullLength = DigiDollarAddressLength();
+    if (fullLength > 0 && input.length() > fullLength) {
+        return QValidator::Invalid;
+    }
+    if (!CouldBeStartOfDigiDollarAddress(input)) {
+        return QValidator::Invalid;
     }
 
-    return QValidator::Invalid;
+    return QValidator::Intermediate;
 }
 
 bool DigiDollarAddressValidator::isValidDDAddress(const QString& address) const
@@ -1430,8 +1531,13 @@ QValidator::State AmountValidator::validate(QString& input, int& pos) const
         return QValidator::Intermediate;
     }
 
+    // An amount outside the allowed range is accepted into the box but never
+    // acceptable. Refusing the keystroke instead would silently drop it: typing
+    // 200000 would leave 20000 in the box, a tenth of what the user meant, with
+    // nothing on screen to say why. The form keeps the Send button disabled and
+    // the line under the box says which limit was passed.
     if (value > m_max) {
-        return QValidator::Invalid;
+        return QValidator::Intermediate;
     }
 
     if (value < m_min) {

@@ -10,6 +10,7 @@
 #include <net.h>
 #include <util/sock.h>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstring>
@@ -67,6 +68,23 @@ struct ConnmanTestMsg : public CConnman {
     {
         LOCK(m_nodes_mutex);
         vDandelionInbound.push_back(pnode);
+    }
+
+    bool DandelionRoutingEmpty() const
+    {
+        LOCK(m_nodes_mutex);
+        return localDandelionDestination == nullptr && mDandelionRoutes.empty() &&
+               vDandelionDestination.empty() && vDandelionInbound.empty() &&
+               vDandelionOutbound.empty();
+    }
+
+    void MoveTestNodeToDisconnected(CNode& node)
+    {
+        LOCK(m_nodes_mutex);
+        const auto it = std::find(m_nodes.begin(), m_nodes.end(), &node);
+        assert(it != m_nodes.end());
+        m_nodes.erase(it);
+        m_nodes_disconnected.push_back(&node);
     }
 
     void DandelionShuffleTest()

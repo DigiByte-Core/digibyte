@@ -156,14 +156,19 @@ void BlockAssembler::resetBlock()
     nFees = 0;
 }
 
-static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state, std::string_view what = {})
+static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state, bool thaw_active, std::string_view what = {})
 {
+    if (state.IsError() || what.find("state not ready") != std::string_view::npos) return false;
     const std::string& reject_reason = state.GetRejectReason();
     // DD-FA-FUNC-016: include bad-oracle-timestamp so a miner that assembled a
     // DD-touching block under a bundle that has just aged out of the
     // wall-clock freshness window can gracefully degrade to a non-DD block
     // (after RemoveDDTransactionsFromBlock + retry) instead of throwing.
-    if (reject_reason == "insufficient-collateral" ||
+    if ((thaw_active && reject_reason == "minting-blocked-during-err") ||
+        reject_reason == "minting-volatility-pause" ||
+        reject_reason == "insufficient-collateral" ||
+        reject_reason == "bad-collateral-release-partial-burn" ||
+        reject_reason == "redemption-err-active" ||
         reject_reason == "bad-oracle-price" ||
         reject_reason == "invalid-oracle-price" ||
         reject_reason == "bad-oracle-missing" ||
@@ -179,7 +184,8 @@ static bool IsRetryableDigiDollarBlockFailure(const BlockValidationState& state,
         return false;
     }
 
-    return what.find("insufficient-collateral") != std::string_view::npos ||
+    return (thaw_active && what.find("minting-blocked-during-err") != std::string_view::npos) ||
+           what.find("insufficient-collateral") != std::string_view::npos ||
            what.find("bad-oracle-price") != std::string_view::npos ||
            what.find("invalid-oracle-price") != std::string_view::npos ||
            what.find("bad-oracle-") != std::string_view::npos;
@@ -248,6 +254,7 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
         txLookup,
         m_mempool
     );
+    dd_probe.candidateParent = pindexPrev;
 
     if (!IsDDTransactionForMiner(tx) &&
         !DigiDollar::RequiresDigiDollarValidation(tx, dd_probe)) {
@@ -283,9 +290,11 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
             txLookup,
             m_mempool
         );
+        dd_context.candidateParent = pindexPrev;
 
         TxValidationState tx_state;
         if (!DigiDollar::ValidateDigiDollarTransaction(tx, dd_context, tx_state)) {
+            if (tx_state.IsError()) throw std::runtime_error(tx_state.ToString());
             LogPrint(BCLog::DIGIDOLLAR,
                      "CreateNewBlock(): skipping DD transfer %s during package selection: %s\n",
                      tx.GetHash().ToString(), tx_state.GetRejectReason());
@@ -294,7 +303,10 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
         return true;
     }
 
-    const int32_t epoch = GetCurrentEpoch(block_height);
+    const bool canonical_health = DigiDollar::IsThawDayActive(chainparams.GetConsensus(), block_height);
+    const int32_t epoch = canonical_health
+        ? block_height / (chainparams.GetConsensus().nDDOracleEpochBlocks > 0 ? chainparams.GetConsensus().nDDOracleEpochBlocks : 1440)
+        : GetCurrentEpoch(block_height);
     OracleBundleManager& oracle_manager = OracleBundleManager::GetInstance();
     COracleBundle block_bundle = oracle_manager.GetCurrentBundle(epoch);
     std::string oracle_error;
@@ -308,7 +320,7 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
     // is enough to build a valid DD block and will be embedded in the coinbase
     // later in CreateNewBlock(). Without this, DD mempool txs are skipped even
     // while AddOracleBundleToBlock() can stamp a valid v0x03 bundle.
-    if (!have_valid_bundle && oracle_manager.IsEnabled() && g_signing_orchestrator) {
+    if ((!have_valid_bundle || canonical_health) && oracle_manager.IsEnabled() && g_signing_orchestrator) {
         COracleBundle session_bundle(epoch);
         session_bundle.version = 3;
         uint64_t signed_price = 0;
@@ -369,9 +381,16 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
         txLookup,
         m_mempool
     );
+    dd_context.candidateParent = pindexPrev;
+
+    if (DigiDollar::IsThawDayActive(chainparams.GetConsensus(), block_height) &&
+        DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT) {
+        dd_context.mintReference = DigiDollar::GetMintVolatilityReference(pindexPrev, chainparams.GetConsensus(), m_chainstate.m_blockman);
+    }
 
     TxValidationState tx_state;
     if (!DigiDollar::ValidateDigiDollarTransaction(tx, dd_context, tx_state)) {
+        if (tx_state.IsError()) throw std::runtime_error(tx_state.ToString());
         LogPrint(BCLog::DIGIDOLLAR,
                  "CreateNewBlock(): skipping DD tx %s during package selection: %s\n",
                  tx.GetHash().ToString(), tx_state.GetRejectReason());
@@ -381,7 +400,7 @@ bool BlockAssembler::ValidateDDForBlockInclusion(const CTransaction& tx, const C
     return true;
 }
 
-bool BlockAssembler::RemoveDDTransactionsFromBlock(const CBlockIndex* pindexPrev)
+bool BlockAssembler::RemoveDDTransactionsFromBlock(const CBlockIndex* pindexPrev, bool mint_only)
 {
     CBlock& block = pblocktemplate->block;
     if (block.vtx.size() <= 1) {
@@ -401,8 +420,16 @@ bool BlockAssembler::RemoveDDTransactionsFromBlock(const CBlockIndex* pindexPrev
 
     CAmount kept_fee_total{0};
     size_t removed{0};
+    std::set<uint256> removed_txids;
     for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (TransactionNeedsOraclePriceForMiner(*block.vtx[i])) {
+        const CTransaction& tx = *block.vtx[i];
+        const bool remove_dd = mint_only ?
+            (DigiDollar::HasDigiDollarMarker(tx) && DigiDollar::GetDigiDollarTxType(tx) == DigiDollar::DD_TX_MINT) :
+            TransactionNeedsOraclePriceForMiner(tx);
+        const bool spends_removed = std::any_of(tx.vin.begin(), tx.vin.end(),
+            [&](const CTxIn& input) { return removed_txids.count(input.prevout.hash) != 0; });
+        if (remove_dd || spends_removed) {
+            removed_txids.insert(tx.GetHash());
             ++removed;
             continue;
         }
@@ -558,7 +585,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     BlockValidationState state;
     if (m_options.test_block_validity) {
         if (m_options.on_before_test_block_validity) {
-            m_options.on_before_test_block_validity();
+            m_options.on_before_test_block_validity(*pblock);
         }
 
         auto run_block_validity = [&](BlockValidationState& check_state) {
@@ -566,30 +593,44 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
                                      GetAdjustedTime, /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false);
         };
 
+        const bool thaw_active = DigiDollar::IsThawDayActive(chainparams.GetConsensus(), nHeight);
         bool needs_dd_retry{false};
+        bool err_exception{false};
         try {
             if (!run_block_validity(state)) {
-                needs_dd_retry = IsRetryableDigiDollarBlockFailure(state);
+                needs_dd_retry = IsRetryableDigiDollarBlockFailure(state, thaw_active);
                 if (!needs_dd_retry) {
                     throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
                 }
             }
         } catch (const std::exception& e) {
-            needs_dd_retry = IsRetryableDigiDollarBlockFailure(state, e.what());
+            needs_dd_retry = IsRetryableDigiDollarBlockFailure(state, thaw_active, e.what());
             if (!needs_dd_retry) {
                 throw;
             }
+            err_exception = thaw_active && std::string_view{e.what()}.find("minting-blocked-during-err") != std::string_view::npos;
         }
 
         if (needs_dd_retry) {
             LogPrintf("CreateNewBlock(): DD collateral failure detected, retrying block assembly without DD transactions at height %d\n", nHeight);
-            if (!RemoveDDTransactionsFromBlock(pindexPrev)) {
+            const bool mint_only = state.GetRejectReason() == "minting-volatility-pause" ||
+                (thaw_active && state.GetRejectReason() == "minting-blocked-during-err") || err_exception;
+            if (!RemoveDDTransactionsFromBlock(pindexPrev, mint_only)) {
                 throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
             }
 
+            // Reconnect the remaining candidate from its parent state. Removing mints
+            // can change the health seen by later redemptions in this template.
             BlockValidationState retry_state;
             if (!run_block_validity(retry_state)) {
-                throw std::runtime_error(strprintf("%s: TestBlockValidity failed after DD retry: %s", __func__, retry_state.ToString()));
+                if (!mint_only || !IsRetryableDigiDollarBlockFailure(retry_state, thaw_active) ||
+                    !RemoveDDTransactionsFromBlock(pindexPrev)) {
+                    throw std::runtime_error(strprintf("%s: TestBlockValidity failed after DD retry: %s", __func__, retry_state.ToString()));
+                }
+                BlockValidationState remaining_state;
+                if (!run_block_validity(remaining_state)) {
+                    throw std::runtime_error(strprintf("%s: TestBlockValidity failed after remaining DD re-evaluation: %s", __func__, remaining_state.ToString()));
+                }
             }
         }
     }

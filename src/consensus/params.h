@@ -128,6 +128,16 @@ struct Params {
      * blocks) becomes active. Buried BIP9 deployment (bit 0); enforcement is
      * OR'd with the static nGroestlDeactivationHeight backstop. */
     int AlgoLockHeight{std::numeric_limits<int>::max()};
+    /** Block height at which every consensus change of the DigiDollar
+     * "Thaw Day" release takes effect at once: the new mint-only volatility
+     * rule, open-vault health accounting, and canonical vault identity.
+     * The maximum int value means "not scheduled on this network". Blocks
+     * below this height keep the old rules for ever, including during a
+     * reindex and across reorgs: which rules a block gets depends only on
+     * that block's own height, never on where the node's tip is now.
+     * Read it through DigiDollar::IsThawDayActive(), and never add to it:
+     * the "not scheduled" value is the largest int and would overflow. */
+    int nDDThawDayHeight{std::numeric_limits<int>::max()};
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and segwit activations. */
     int MinBIP9WarningHeight;
@@ -210,6 +220,8 @@ struct Params {
     int nOracleRequiredMessages{1};             // Off-chain signed price messages required before MuSig2 aggregation
     int nOracleTotalOracles{1};                 // Total active oracle operators
     std::vector<std::string> vOraclePublicKeys; // Hardcoded oracle public keys (hex encoded XOnlyPubKey, sorted)
+    // Full compressed keys in oracle slot order, retaining point parity in parameter copies.
+    std::vector<std::vector<unsigned char>> vOracleCompressedPublicKeys;
     int nDigiDollarMuSig2Height{std::numeric_limits<int>::max()};  // Height when MuSig2 aggregate signatures are valid
 
     /** MuSig2 oracle configuration */

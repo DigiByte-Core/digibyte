@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <consensus/params.h>
 #include <deploymentstatus.h>
+#include <node/warnings.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
@@ -456,6 +457,135 @@ BOOST_AUTO_TEST_CASE(versionbits_computeblockversion)
         const auto chainParams = CreateChainParams(args, ChainType::REGTEST);
         check_computeblockversion(vbcache, chainParams->GetConsensus(), Consensus::DEPLOYMENT_TESTDUMMY);
     }
+}
+
+namespace {
+class WarningTestChain
+{
+public:
+    std::vector<CBlockIndex> blocks;
+
+    WarningTestChain(int count, CBlockIndex* parent, int bit, int signals) : blocks(count)
+    {
+        for (auto& block : blocks) {
+            block.pprev = parent;
+            block.nHeight = parent ? parent->nHeight + 1 : 0;
+            block.nTime = TestTime(block.nHeight);
+            block.nVersion = VERSIONBITS_TOP_BITS | 2;
+            if (block.nHeight % 16 < signals) block.nVersion |= uint32_t{1} << bit;
+            block.BuildSkip();
+            parent = &block;
+        }
+    }
+};
+
+class CountingWarningChecker : public WarningBitsConditionChecker
+{
+public:
+    using WarningBitsConditionChecker::WarningBitsConditionChecker;
+    mutable size_t calls_below_floor{0};
+    mutable size_t calls{0};
+
+    bool Condition(const CBlockIndex* block, const Consensus::Params& params) const override
+    {
+        ++calls;
+        if (block->nHeight < params.MinBIP9WarningHeight) ++calls_below_floor;
+        return WarningBitsConditionChecker::Condition(block, params);
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(warning_states_match_full_history, TestingSetup)
+{
+    auto params = m_node.chainman->GetConsensus();
+    params.nMinerConfirmationWindow = 16;
+    params.nRuleChangeActivationThreshold = 12;
+    params.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+    LOCK(cs_main);
+
+    for (const int floor : {0, 1, 15, 16, 17, 63, 64, 65, 129}) {
+        params.MinBIP9WarningHeight = floor;
+        for (int bit = 0; bit < VERSIONBITS_NUM_BITS; ++bit) {
+            WarningTestChain common{8, nullptr, bit, 16};
+            WarningTestChain branch_a{216, &common.blocks.back(), bit, 12};
+            WarningTestChain branch_b{216, &common.blocks.back(), bit, 11};
+            WarningBitsConditionChecker checker{*m_node.chainman, bit};
+            ThresholdConditionCache reference_cache;
+            ThresholdConditionCache shared_cache;
+
+            const auto compare = [&](const CBlockIndex* block) {
+                // The qualified call always runs the unchanged deployment state machine.
+                const auto expected = checker.AbstractThresholdConditionChecker::GetStateFor(block, params, reference_cache);
+                ThresholdConditionCache cold_cache;
+                const auto cold = checker.GetStateFor(block, params, cold_cache);
+                const auto warm = checker.GetStateFor(block, params, shared_cache);
+                BOOST_CHECK_MESSAGE(expected == cold && expected == warm,
+                    "Warning state differs at floor " << floor << ", bit " << bit
+                    << ", height " << (block ? block->nHeight : -1)
+                    << ": expected " << StateName(expected) << ", cold " << StateName(cold)
+                    << ", warm " << StateName(warm));
+            };
+
+            compare(nullptr);
+            for (auto& block : common.blocks) compare(&block);
+            for (auto& block : branch_a.blocks) compare(&block);
+            for (auto& block : branch_b.blocks) compare(&block);
+            // Revisit old states after both branches have populated the shared cache.
+            for (auto it = branch_a.blocks.rbegin(); it != branch_a.blocks.rend(); ++it) compare(&*it);
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(warning_thresholds_and_first_period, TestingSetup)
+{
+    auto params = m_node.chainman->GetConsensus();
+    params.nMinerConfirmationWindow = 16;
+    params.nRuleChangeActivationThreshold = 12;
+    params.MinBIP9WarningHeight = 65;
+    params.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+    WarningTestChain chain{128, nullptr, 27, 12};
+    WarningBitsConditionChecker checker{*m_node.chainman, 27};
+    LOCK(cs_main);
+
+    const auto check = [&](int height, ThresholdState expected) {
+        ThresholdConditionCache cache;
+        BOOST_CHECK(checker.GetStateFor(height < 0 ? nullptr : &chain.blocks[height], params, cache) == expected);
+    };
+    check(-1, ThresholdState::DEFINED);
+    check(14, ThresholdState::DEFINED);
+    check(15, ThresholdState::STARTED);
+    check(63, ThresholdState::STARTED);
+    // Only 11 eligible signals remain in the period that crosses the floor.
+    check(79, ThresholdState::STARTED);
+    check(94, ThresholdState::STARTED);
+    check(95, ThresholdState::LOCKED_IN);
+    check(110, ThresholdState::LOCKED_IN);
+    check(111, ThresholdState::ACTIVE);
+
+    // A zero threshold can lock in before the warning floor and cannot use the shortcut.
+    params.nRuleChangeActivationThreshold = 0;
+    check(31, ThresholdState::LOCKED_IN);
+    check(47, ThresholdState::ACTIVE);
+}
+
+BOOST_FIXTURE_TEST_CASE(warning_cold_cache_skips_ineligible_history, TestingSetup)
+{
+    auto params = m_node.chainman->GetConsensus();
+    params.nMinerConfirmationWindow = 16;
+    params.nRuleChangeActivationThreshold = 12;
+    params.MinBIP9WarningHeight = 8192;
+    params.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+    WarningTestChain chain{8240, nullptr, 27, 0};
+    CountingWarningChecker checker{*m_node.chainman, 27};
+    ThresholdConditionCache cache;
+    LOCK(cs_main);
+
+    BOOST_CHECK(checker.GetStateFor(&chain.blocks.back(), params, cache) == ThresholdState::STARTED);
+    BOOST_CHECK_EQUAL(checker.calls_below_floor, 0U);
+    BOOST_CHECK_LE(checker.calls, 48U);
+    const auto cold_calls = checker.calls;
+    BOOST_CHECK(checker.GetStateFor(&chain.blocks.back(), params, cache) == ThresholdState::STARTED);
+    BOOST_CHECK_EQUAL(checker.calls, cold_calls);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

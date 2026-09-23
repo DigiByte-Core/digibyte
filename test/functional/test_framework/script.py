@@ -756,6 +756,13 @@ def SegwitV0SignatureHash(*args, **kwargs):
     return hash256(SegwitV0SignatureMsg(*args, **kwargs))
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_digidollar_op_success_activation(self):
+        for opcode in range(0xbb, 0xc0):
+            with self.subTest(opcode=opcode):
+                self.assertTrue(is_op_success(opcode))
+                self.assertTrue(is_op_success(opcode, digidollar_active=False))
+                self.assertFalse(is_op_success(opcode, digidollar_active=True))
+
     def test_bn2vch(self):
         self.assertEqual(bn2vch(0), bytes([]))
         self.assertEqual(bn2vch(1), bytes([0x01]))
@@ -924,12 +931,9 @@ def taproot_construct(pubkey, scripts=None, treat_internal_as_infinity=False):
     leaves = dict((name, TaprootLeafInfo(script, version, merklebranch, leaf)) for name, version, script, merklebranch, leaf in ret)
     return TaprootInfo(CScript([OP_1, tweaked]), pubkey, negated + 0, tweak, leaves, h, tweaked)
 
-def is_op_success(o):
-    # CRITICAL: Exclude DigiDollar opcodes (0xbb-0xbf) from OP_SUCCESSx range
-    # These opcodes are used for DigiDollar redemption scripts and must be executed.
-    # Matches IsOpSuccess() in src/script/script.cpp — extended to include
-    # OP_ORACLE (0xbf) so a Tapscript leaf containing OP_ORACLE is not
-    # unconditionally spendable (see rh54 test and the W2-H-01 audit fix).
-    if o >= 0xbb and o <= 0xbf:
-        return False  # OP_DIGIDOLLAR=0xbb, OP_DDVERIFY=0xbc, OP_CHECKPRICE=0xbd, OP_CHECKCOLLATERAL=0xbe, OP_ORACLE=0xbf
+def is_op_success(o, *, digidollar_active=False):
+    # DigiDollar removes its opcodes from BIP342's OP_SUCCESS set only when
+    # SCRIPT_VERIFY_DIGIDOLLAR is active, matching IsOpSuccessForFlags in C++.
+    if digidollar_active and 0xbb <= o <= 0xbf:
+        return False
     return o == 0x50 or o == 0x62 or o == 0x89 or o == 0x8a or o == 0x8d or o == 0x8e or (o >= 0x7e and o <= 0x81) or (o >= 0x83 and o <= 0x86) or (o >= 0x95 and o <= 0x99) or (o >= 0xbb and o <= 0xfe)
