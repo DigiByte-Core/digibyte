@@ -297,6 +297,16 @@ bool CapacityContinuationMayProceed(const ProviderReadiness& readiness)
                        });
 }
 
+bool CapacityRequestMayProceed(const ProviderReadiness& readiness,
+                               bool have_stored_response)
+{
+    // Only an exact stored proof can continue without fresh capacity. Its
+    // signature, request indexes, expiry and reservation are checked again by
+    // ReserveAndBuildPaymasterCapacityProof before anything is returned.
+    return readiness.ready ||
+           (have_stored_response && CapacityContinuationMayProceed(readiness));
+}
+
 bool CheckPaymasterClientReadiness(CWallet& wallet, WalletContext& context,
                                    std::string& error)
 {

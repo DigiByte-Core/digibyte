@@ -557,6 +557,39 @@ BOOST_AUTO_TEST_CASE(check_dup_param_names)
     BOOST_CHECK_THROW(make_rpc({{"p1", POSITIONAL}, {"p2|p1", NAMED_ONLY}}), NonFatalCheckError);
 }
 
+BOOST_AUTO_TEST_CASE(help_nested_objects)
+{
+    using Type = RPCArg::Type;
+    using Optional = RPCArg::Optional;
+    for (const auto type : {Type::OBJ, Type::OBJ_NAMED_PARAMS, Type::OBJ_USER_KEYS}) {
+        const RPCArg policy{"policy", Type::OBJ, Optional::NO, "Policy", {
+            {"limits", type, Optional::NO, "Limits", {
+                {"fee", Type::NUM, Optional::NO, "Fee ceiling"},
+            }},
+        }};
+        const std::string suffix{type == Type::OBJ ? "}" : ",...}"};
+        BOOST_CHECK_EQUAL(policy.ToString(/*oneline=*/true),
+                          "{\"limits\":{\"fee\":n" + suffix + "}");
+        BOOST_CHECK_EQUAL(policy.ToStringObj(/*oneline=*/false),
+                          "\"policy\": {\"limits\": {\"fee\": n" + suffix + "}");
+    }
+
+    // Exercise both the compact synopsis and the recursive argument sections,
+    // as used by setpaymastersafetypolicy's nested funding-model limits.
+    const RPCHelpMan rpc{"nested_policy", "Set policy", {
+        {"policy", Type::OBJ, Optional::NO, "Policy", {
+            {"user_paid", Type::OBJ, Optional::NO, "Funding model", {
+                {"limits", Type::OBJ, Optional::NO, "Limits", {
+                    {"fee", Type::NUM, Optional::NO, "Fee ceiling"},
+                }},
+            }},
+        }},
+    }, RPCResults{}, RPCExamples{""}};
+    const std::string help{rpc.ToString()};
+    BOOST_CHECK(help.find("{\"user_paid\":{\"limits\":{\"fee\":n}}}") != std::string::npos);
+    BOOST_CHECK(help.find("Fee ceiling") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(help_example)
 {
     // test different argument types

@@ -18,6 +18,7 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <boost/test/unit_test.hpp>
 
@@ -38,6 +39,20 @@ public:
 
 private:
     const bool m_previous;
+};
+
+class RecordingSocks5Sock : public StaticContentsSock
+{
+public:
+    using StaticContentsSock::StaticContentsSock;
+
+    ssize_t Send(const void* data, size_t len, int) const override
+    {
+        writes.emplace_back(static_cast<const char*>(data), len);
+        return len;
+    }
+
+    mutable std::vector<std::string> writes;
 };
 
 std::string Socks5Response(bool authenticate, uint8_t reply = 0x00)
@@ -136,6 +151,73 @@ BOOST_AUTO_TEST_CASE(socks5_private_logging_redacts_destination_and_credentials)
     BOOST_CHECK(normal_log.find(destination) != std::string::npos);
     BOOST_CHECK(normal_log.find(credentials.username) == std::string::npos);
     BOOST_CHECK(normal_log.find(credentials.password) == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(socks5_required_auth_fails_closed_without_connect)
+{
+    Socks5InterruptGuard interrupt_guard{/*interrupt=*/false};
+    const std::string destination{"paymaster-private-test.onion"};
+    const ProxyCredentials credentials{"isolation-user", "isolation-password"};
+    const std::string required_greeting{"\x05\x01\x02", 3};
+
+    RecordingSocks5Sock noauth{Socks5Response(/*authenticate=*/false)};
+    BOOST_CHECK(!Socks5(destination, 12033, &credentials, noauth,
+                       ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH));
+    BOOST_REQUIRE_EQUAL(noauth.writes.size(), 1);
+    BOOST_CHECK_EQUAL(noauth.writes.front(), required_greeting);
+
+    RecordingSocks5Sock missing_credentials{Socks5Response(/*authenticate=*/true)};
+    BOOST_CHECK(!Socks5(destination, 12033, nullptr, missing_credentials,
+                       ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH));
+    BOOST_CHECK(missing_credentials.writes.empty());
+
+    RecordingSocks5Sock authenticated{Socks5Response(/*authenticate=*/true)};
+    BOOST_CHECK(Socks5(destination, 12033, &credentials, authenticated,
+                      ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH));
+    BOOST_REQUIRE_EQUAL(authenticated.writes.size(), 3);
+    BOOST_CHECK_EQUAL(authenticated.writes.front(), required_greeting);
+    BOOST_CHECK(authenticated.writes.back().find(destination) != std::string::npos);
+
+    RecordingSocks5Sock rejected{std::string{"\x05\x02\x01\x01", 4}};
+    BOOST_CHECK(!Socks5(destination, 12033, &credentials, rejected,
+                       ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH));
+    BOOST_REQUIRE_EQUAL(rejected.writes.size(), 2);
+    BOOST_CHECK_EQUAL(rejected.writes.front(), required_greeting);
+
+    // Ordinary proxy users retain backwards-compatible NOAUTH negotiation.
+    RecordingSocks5Sock compatible{Socks5Response(/*authenticate=*/false)};
+    BOOST_CHECK(Socks5(destination, 12033, &credentials, compatible));
+    BOOST_REQUIRE_EQUAL(compatible.writes.size(), 2);
+    BOOST_CHECK_EQUAL(compatible.writes.front(), (std::string{"\x05\x02\x00\x02", 4}));
+}
+
+BOOST_AUTO_TEST_CASE(socks5_required_auth_uses_fresh_isolation_tokens)
+{
+    Socks5InterruptGuard interrupt_guard{/*interrupt=*/false};
+    const Proxy proxy{CService{LookupHost("127.0.0.1", false).value(), 9050},
+                      /*randomize_credentials=*/true};
+    RecordingSocks5Sock first{Socks5Response(/*authenticate=*/true)};
+    RecordingSocks5Sock second{Socks5Response(/*authenticate=*/true)};
+    bool failed{false};
+    for (const auto* sock : {&first, &second}) {
+        BOOST_CHECK(ConnectThroughProxy(proxy, "paymaster-private-test.onion", 12033,
+                                       *sock, 100, failed, ProxyLogPolicy::REDACT_DESTINATION,
+                                       ProxyAuthPolicy::REQUIRE_AUTH));
+        BOOST_CHECK(!failed);
+        BOOST_REQUIRE_EQUAL(sock->writes.size(), 3);
+        // RFC1929 version, 64-byte username, 64-byte password (independent hashes).
+        BOOST_REQUIRE_EQUAL(sock->writes[1].size(), 131);
+        BOOST_CHECK_EQUAL(static_cast<unsigned char>(sock->writes[1][1]), 64);
+        BOOST_CHECK_EQUAL(static_cast<unsigned char>(sock->writes[1][66]), 64);
+    }
+    BOOST_CHECK_NE(first.writes[1], second.writes[1]);
+
+    RecordingSocks5Sock disabled{Socks5Response(/*authenticate=*/true)};
+    BOOST_CHECK(!ConnectThroughProxy(Proxy{proxy.proxy, /*randomize_credentials=*/false},
+                                    "paymaster-private-test.onion", 12033, disabled,
+                                    100, failed, ProxyLogPolicy::REDACT_DESTINATION,
+                                    ProxyAuthPolicy::REQUIRE_AUTH));
+    BOOST_CHECK(disabled.writes.empty());
 }
 
 static CSubNet ResolveSubNet(const std::string& subnet)

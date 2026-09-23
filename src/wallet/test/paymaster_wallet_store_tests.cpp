@@ -20,10 +20,13 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <util/time.h>
+#include <validationinterface.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
+#include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -38,6 +41,27 @@ using namespace DigiDollar::Paymaster;
 using namespace wallet;
 
 namespace {
+
+class ScopedRecoveryMockTime
+{
+public:
+    explicit ScopedRecoveryMockTime(int64_t now) : m_previous{GetMockTime()}
+    {
+        // Drain genesis/tip notifications before installing records with
+        // deliberately small synthetic timestamps.
+        SyncWithValidationInterfaceQueue();
+        SetMockTime(now);
+    }
+
+    ~ScopedRecoveryMockTime()
+    {
+        SyncWithValidationInterfaceQueue();
+        SetMockTime(m_previous);
+    }
+
+private:
+    const std::chrono::seconds m_previous;
+};
 
 template <typename T>
 std::vector<unsigned char> SerializePaymasterTestObject(const T& object)
@@ -419,6 +443,34 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(capacity_replay_readiness_requires_exact_stored_response)
+{
+    using namespace wallet::paymaster_rpc::internal;
+    ProviderReadiness readiness;
+    BOOST_CHECK(!CapacityRequestMayProceed(readiness, false));
+    BOOST_CHECK(!CapacityRequestMayProceed(readiness, true));
+    for (const auto* error : {"PAYMASTER_OPERATIONAL_SLOT_MISSING",
+                             "PAYMASTER_SAFETY_LIMIT_EXHAUSTED"}) {
+        readiness.errors = {error};
+        BOOST_CHECK(!CapacityRequestMayProceed(readiness, false));
+        BOOST_CHECK(CapacityRequestMayProceed(readiness, true));
+    }
+    readiness.errors = {"PAYMASTER_OPERATIONAL_SLOT_MISSING",
+                        "PAYMASTER_SAFETY_LIMIT_EXHAUSTED"};
+    BOOST_CHECK(CapacityRequestMayProceed(readiness, true));
+    for (const auto* error : {"PAYMASTER_REQUIRES_READY_TXINDEX",
+                             "PAYMASTER_POLICY_NOT_FOUND",
+                             "PAYMASTER_POOL_RECONCILIATION_FAILED",
+                             "UNKNOWN_READINESS_FAILURE"}) {
+        readiness.errors = {"PAYMASTER_OPERATIONAL_SLOT_MISSING", error};
+        BOOST_CHECK(!CapacityRequestMayProceed(readiness, true));
+    }
+    readiness.errors.clear();
+    readiness.ready = true;
+    BOOST_CHECK(CapacityRequestMayProceed(readiness, false));
+    BOOST_CHECK(CapacityRequestMayProceed(readiness, true));
+}
 
 BOOST_AUTO_TEST_CASE(provider_attempt_serialization_is_current_only)
 {
@@ -3212,6 +3264,7 @@ BOOST_AUTO_TEST_CASE(pending_capacity_pair_is_bound_and_phase_two_failure_is_fai
 
 BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_authorizing)
 {
+    ScopedRecoveryMockTime mock_time{104};
     PaymasterStore store{m_wallet};
     std::string error;
 

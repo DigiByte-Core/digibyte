@@ -480,6 +480,22 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         commit = provider.submitpaymasterdigidollar(psbt)
         assert_equal(len(commit["txid"]), 64)
         assert_equal(commit["broadcast"], True)
+
+        def check_public_transaction_metadata():
+            # Durable commit/recovery markers remain in the wallet database,
+            # but are neither public transaction fields nor documented RPC
+            # results. With -rpcdoccheck, exposing one also fails the RPC.
+            transaction = provider.gettransaction(commit["txid"])
+            assert_equal(transaction["txid"], commit["txid"])
+            listed = provider.listtransactions("*", 1000)
+            since = provider.listsinceblock()["transactions"]
+            for entries in ([transaction], listed, since):
+                assert any(entry["txid"] == commit["txid"] for entry in entries)
+                for entry in entries:
+                    assert "paymaster_durable_commit" not in entry
+                    assert "paymaster_retirement_provider" not in entry
+
+        check_public_transaction_metadata()
         after_commit = value_snapshot(
             self.nodes[0], provider, client, recipient_wallet)
         replay = provider.submitpaymasterdigidollar(psbt)
@@ -501,6 +517,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.wait_until(
             lambda: recipient_wallet.getdigidollarbalance()["total"] == 500)
         assert_equal(client.getdigidollarbalance()["total"], 905)
+        check_public_transaction_metadata()
 
         # A single sub-DD fee is intentionally below the minimum ordinary DD
         # output.  Recycle the successor once more so all_excess can prove its

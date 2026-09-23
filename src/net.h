@@ -1182,7 +1182,8 @@ public:
     void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure,
                                CSemaphoreGrant&& grant_outbound, const char* strDest,
                                ConnectionType conn_type, bool use_v2transport,
-                               ProxyLogPolicy proxy_log_policy) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+                               ProxyLogPolicy proxy_log_policy,
+                               ProxyAuthPolicy proxy_auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
 
     // alias for thread safety annotations only, not defined
@@ -1409,7 +1410,8 @@ private:
     bool AttemptToEvictConnection();
     CNode* ConnectNode(CAddress addrConnect, const char* pszDest, bool fCountFailure,
                        ConnectionType conn_type, bool use_v2transport,
-                       ProxyLogPolicy proxy_log_policy) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+                       ProxyLogPolicy proxy_log_policy,
+                       ProxyAuthPolicy proxy_auth_policy) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, const CNetAddr &addr) const;
 
     void DeleteNode(CNode* pnode);

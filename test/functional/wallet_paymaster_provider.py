@@ -628,9 +628,20 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             if extra_options is not None:
                 options.update(extra_options)
 
+            client_result = {}
+
             def resume_client_send():
-                return transfer_client.senddigidollar(
+                nonlocal client_result
+                response = transfer_client.senddigidollar(
                     transfer_recipient, amount_cents, "", 0, None, "cents", options)
+                # Any exact retry can consume the one unread signed result,
+                # including the policy-change check below. Later retries return
+                # durable session status, not another processed=True event.
+                # Retain the actual response for the full assertions below;
+                # never manufacture a result from MEMPOOL or a timeout.
+                if response.get("processed", False):
+                    client_result = response
+                return response
 
             initial_request = resume_client_send()
             assert_equal(initial_request["request_id"], request_id)
@@ -755,6 +766,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                         authorization.get("session_state") == "PENDING_PROVIDER"):
                     assert_equal(authorization["authorization_accepted"], True)
                     return True
+                if automatic_provider and authorization.get("processed", False):
+                    assert_equal(authorization["authorization_accepted"], True)
+                    assert_equal(authorization["session_state"], "MEMPOOL")
+                    return True
                 # A direct Paymaster connection is deliberately short-lived.
                 # Keep the manual provider service moving so an exact retry can
                 # receive the already durable signed quote on its new peer.
@@ -767,7 +782,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
             self.wait_until(authorize_and_submit)
             assert_equal(approval_bypass_checked, True)
-            assert_equal(authorization["session_state"], "PENDING_PROVIDER")
+            assert authorization["session_state"] in (
+                ("PENDING_PROVIDER", "MEMPOOL") if automatic_provider else
+                ("PENDING_PROVIDER",))
             if "psbt" in authorization:
                 observed_paymaster_psbts.append(authorization["psbt"])
             if stop_after_authorization:
@@ -822,10 +839,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 assert_equal(provider_commit["txid"], final_txid)
                 assert_equal(len(final_txid), 64)
 
-            client_result = {}
-
             def process_result():
                 nonlocal client_result
+                if client_result.get("processed", False):
+                    return True
                 # Automatic providers are consumed through the same durable
                 # high-level retry used by Qt.  This specifically protects the
                 # race where the provider has already spent its advertised

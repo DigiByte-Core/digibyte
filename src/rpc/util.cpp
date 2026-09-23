@@ -1182,8 +1182,9 @@ std::string RPCArg::ToStringObj(const bool oneline) const
     case Type::OBJ:
     case Type::OBJ_NAMED_PARAMS:
     case Type::OBJ_USER_KEYS:
-        // Currently unused, so avoid writing dead code
-        NONFATAL_UNREACHABLE();
+        // Nested objects use the same representation as top-level objects,
+        // including the ellipsis for named parameters and user-defined keys.
+        return res + ToString(oneline);
     } // no default case, so the compiler can warn about missing cases
     NONFATAL_UNREACHABLE();
 }

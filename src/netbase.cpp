@@ -7,8 +7,10 @@
 
 #include <compat/compat.h>
 #include <logging.h>
+#include <random.h>
 #include <sync.h>
 #include <tinyformat.h>
+#include <uint256.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/string.h>
@@ -334,9 +336,11 @@ static std::string Socks5ErrorString(uint8_t err)
 }
 
 bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
-            const Sock& sock, ProxyLogPolicy log_policy)
+            const Sock& sock, ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy)
 {
     IntrRecvError recvr;
+    const bool require_auth{auth_policy == ProxyAuthPolicy::REQUIRE_AUTH};
+    if (require_auth && !auth) return error("Proxy isolation requires authentication credentials");
     const bool redact_destination{log_policy == ProxyLogPolicy::REDACT_DESTINATION};
     if (redact_destination) {
         LogPrint(BCLog::NET, "SOCKS5 connecting to private destination\n");
@@ -350,8 +354,8 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     std::vector<uint8_t> vSocks5Init;
     vSocks5Init.push_back(SOCKSVersion::SOCKS5); // We want the SOCK5 protocol
     if (auth) {
-        vSocks5Init.push_back(0x02); // 2 method identifiers follow...
-        vSocks5Init.push_back(SOCKS5Method::NOAUTH);
+        vSocks5Init.push_back(require_auth ? 0x01 : 0x02);
+        if (!require_auth) vSocks5Init.push_back(SOCKS5Method::NOAUTH);
         vSocks5Init.push_back(SOCKS5Method::USER_PASS);
     } else {
         vSocks5Init.push_back(0x01); // 1 method identifier follows...
@@ -398,6 +402,9 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
             return error("Proxy authentication unsuccessful");
         }
     } else if (pchRet1[1] == SOCKS5Method::NOAUTH) {
+        // Do not disclose the destination (or begin the payment transport)
+        // after a proxy declines the required isolation credentials.
+        if (require_auth) return error("Proxy isolation requires authenticated SOCKS5");
         // Perform no authentication
     } else {
         return error("Proxy requested wrong authentication method %02x", pchRet1[1]);
@@ -648,8 +655,11 @@ bool IsProxy(const CNetAddr &addr) {
 
 bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
                          const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
-                         ProxyLogPolicy log_policy)
+                         ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy)
 {
+    if (auth_policy == ProxyAuthPolicy::REQUIRE_AUTH && !proxy.randomize_credentials) {
+        return error("Proxy isolation requires randomized authentication credentials");
+    }
     // first connect to proxy server
     if (!ConnectSocketDirectly(proxy.proxy, sock, nTimeout, true)) {
         outProxyConnectionFailed = true;
@@ -658,13 +668,20 @@ bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_
     // do socks negotiation
     if (proxy.randomize_credentials) {
         ProxyCredentials random_auth;
-        static std::atomic_int counter(0);
-        random_auth.username = random_auth.password = strprintf("%i", counter++);
-        if (!Socks5(strDest, port, &random_auth, sock, log_policy)) {
+        if (auth_policy == ProxyAuthPolicy::REQUIRE_AUTH) {
+            // A process-local counter repeats after restart and across nodes
+            // sharing a proxy. Independent random tokens avoid that reuse.
+            random_auth.username = GetRandHash().GetHex();
+            random_auth.password = GetRandHash().GetHex();
+        } else {
+            static std::atomic_int counter(0);
+            random_auth.username = random_auth.password = strprintf("%i", counter++);
+        }
+        if (!Socks5(strDest, port, &random_auth, sock, log_policy, auth_policy)) {
             return false;
         }
     } else {
-        if (!Socks5(strDest, port, nullptr, sock, log_policy)) {
+        if (!Socks5(strDest, port, nullptr, sock, log_policy, auth_policy)) {
             return false;
         }
     }

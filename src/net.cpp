@@ -391,7 +391,7 @@ static CAddress GetBindAddress(const Sock& sock)
 
 CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCountFailure,
                              ConnectionType conn_type, bool use_v2transport,
-                             ProxyLogPolicy proxy_log_policy)
+                             ProxyLogPolicy proxy_log_policy, ProxyAuthPolicy proxy_auth_policy)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -494,7 +494,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
             }
             connected = ConnectThroughProxy(proxy, addrConnect.ToStringAddr(), addrConnect.GetPort(),
                                             *sock, nConnectTimeout, proxyConnectionFailed,
-                                            proxy_log_policy);
+                                            proxy_log_policy, proxy_auth_policy);
         } else {
             // no proxy needed (none set for target network)
             sock = CreateSock(addrConnect);
@@ -519,7 +519,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
         SplitHostPort(std::string(pszDest), port, host);
         bool proxyConnectionFailed;
         connected = ConnectThroughProxy(proxy, host, port, *sock, nConnectTimeout,
-                                        proxyConnectionFailed, proxy_log_policy);
+                                        proxyConnectionFailed, proxy_log_policy, proxy_auth_policy);
     }
     if (!connected) {
         return nullptr;
@@ -1914,7 +1914,9 @@ bool CConnman::AddConnection(const std::string& address,
     OpenNetworkConnection(CAddress(), false, std::move(grant), address.c_str(), conn_type,
                           /*use_v2transport=*/conn_type == ConnectionType::PAYMASTER,
                           paymaster_high_privacy ? ProxyLogPolicy::REDACT_DESTINATION
-                                                 : ProxyLogPolicy::NORMAL);
+                                                 : ProxyLogPolicy::NORMAL,
+                          paymaster_high_privacy ? ProxyAuthPolicy::REQUIRE_AUTH
+                                                 : ProxyAuthPolicy::ALLOW_NOAUTH);
     return true;
 }
 
@@ -2916,7 +2918,7 @@ void CConnman::ThreadOpenAddedConnections()
 void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure,
                                      CSemaphoreGrant&& grant_outbound, const char* pszDest,
                                      ConnectionType conn_type, bool use_v2transport,
-                                     ProxyLogPolicy proxy_log_policy)
+                                     ProxyLogPolicy proxy_log_policy, ProxyAuthPolicy proxy_auth_policy)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -2939,7 +2941,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         return;
 
     CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type,
-                              use_v2transport, proxy_log_policy);
+                              use_v2transport, proxy_log_policy, proxy_auth_policy);
 
     if (!pnode)
         return;

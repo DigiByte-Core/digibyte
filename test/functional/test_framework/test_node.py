@@ -814,10 +814,10 @@ class TestNodeCLI():
         cli_stdout, cli_stderr = process.communicate(input=self.input)
         returncode = process.poll()
         if returncode:
-            match = re.match(r'error code: ([-0-9]+)\nerror message:\n(.*)', cli_stderr)
+            match = re.match(r'error code: ([-0-9]+)\nerror message:\n(.*)', cli_stderr, flags=re.DOTALL)
             if match:
                 code, message = match.groups()
-                raise JSONRPCException(dict(code=int(code), message=message))
+                raise JSONRPCException(dict(code=int(code), message=message.rstrip("\n")))
             # Ignore cli_stdout, raise with cli_stderr
             raise subprocess.CalledProcessError(returncode, self.binary, output=cli_stderr)
         try:

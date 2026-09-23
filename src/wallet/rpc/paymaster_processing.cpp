@@ -1061,7 +1061,17 @@ RPCHelpMan processpaymasterrequests()
                         throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
                                            "Provider wallet unlock is required for a capacity proof");
                     }
-                    if (!readiness.ready) {
+                    bool have_stored_response{false};
+                    if (!readiness.ready && CapacityContinuationMayProceed(readiness)) {
+                        // An exact retry can arrive after its own proof reserved
+                        // the last slot. Do not mistake it for fresh admission.
+                        LOCK(wallet->cs_wallet);
+                        WalletBatch batch{wallet->GetDatabase()};
+                        std::vector<unsigned char> stored_response;
+                        have_stored_response = batch.ReadPaymasterCapacityResponse(
+                            Hash(SerializeCapacityRequest(*capacity_request)), stored_response);
+                    }
+                    if (!CapacityRequestMayProceed(readiness, have_stored_response)) {
                         throw JSONRPCError(RPC_WALLET_ERROR,
                                            "PAYMASTER_PROVIDER_NOT_RUNNING");
                     }

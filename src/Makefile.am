@@ -1009,10 +1009,13 @@ digibyte_wallet_SOURCES += init/digibyte-wallet.cpp
 digibyte_wallet_CPPFLAGS = $(digibyte_bin_cppflags)
 digibyte_wallet_CXXFLAGS = $(digibyte_bin_cxxflags)
 digibyte_wallet_LDFLAGS = $(digibyte_bin_ldflags)
+# Wallet code needs node symbols, while node RPCs call wallet Paymaster helpers.
+# Rescan the wallet archive after the node archive introduces those references.
 digibyte_wallet_LDADD = \
   $(LIBDIGIBYTE_WALLET_TOOL) \
   $(LIBDIGIBYTE_WALLET) \
   $(LIBDIGIBYTE_NODE) \
+  $(LIBDIGIBYTE_WALLET) \
   $(LIBDIGIBYTE_COMMON) \
   $(LIBDIGIBYTE_UTIL) \
   $(LIBUNIVALUE) \

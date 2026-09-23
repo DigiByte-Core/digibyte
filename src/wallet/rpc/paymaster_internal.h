@@ -186,6 +186,8 @@ bool ReconcileProviderFinances(CWallet& wallet,
 bool AutomaticProviderStateIsSynchronized(CWallet& wallet);
 bool ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync);
 bool CapacityContinuationMayProceed(const ProviderReadiness& readiness);
+bool CapacityRequestMayProceed(const ProviderReadiness& readiness,
+                               bool have_stored_response);
 bool CheckPaymasterClientReadiness(CWallet& wallet,
                                    WalletContext& context,
                                    std::string& error);

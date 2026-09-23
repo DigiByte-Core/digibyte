@@ -71,6 +71,12 @@ enum class ProxyLogPolicy {
     REDACT_DESTINATION,
 };
 
+/** Require SOCKS authentication when credentials carry stream-isolation tokens. */
+enum class ProxyAuthPolicy {
+    ALLOW_NOAUTH,
+    REQUIRE_AUTH,
+};
+
 /**
  * List of reachable networks. Everything is reachable by default.
  */
@@ -277,12 +283,17 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
  *                 proxy to be established.
  * @param[out] outProxyConnectionFailed Whether or not the connection to the
  *                                      SOCKS5 proxy failed.
+ * @param log_policy Whether to redact the remote destination from diagnostics.
+ * @param auth_policy REQUIRE_AUTH forbids NOAUTH negotiation and requires
+ *                    fresh randomized credentials for stream isolation. The
+ *                    proxy must still be configured to isolate by credentials.
  *
  * @returns Whether or not the operation succeeded.
  */
 bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
                          const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
-                         ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL);
+                         ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL,
+                         ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH);
 
 /** Set the SOCKS receive interrupt flag and return its previous value. */
 bool InterruptSocks5(bool interrupt);
@@ -296,6 +307,9 @@ bool InterruptSocks5(bool interrupt);
  * @param auth The credentials with which to authenticate with the specified
  *             SOCKS5 proxy.
  * @param socket The SOCKS5 proxy socket.
+ * @param log_policy Whether to redact the remote destination from diagnostics.
+ * @param auth_policy REQUIRE_AUTH fails before CONNECT if USER_PASS is not
+ *                    selected or credentials are unavailable.
  *
  * @returns Whether or not the operation succeeded.
  *
@@ -306,7 +320,8 @@ bool InterruptSocks5(bool interrupt);
  *      Version 5</a>
  */
 bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
-            const Sock& socket, ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL);
+            const Sock& socket, ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL,
+            ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH);
 
 /**
  * Determine if a port is "bad" from the perspective of attempting to connect

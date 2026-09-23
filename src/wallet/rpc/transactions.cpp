@@ -55,8 +55,10 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
     entry.pushKV("bip125-replaceable", rbfStatus);
 
     for (const std::pair<const std::string, std::string>& item : wtx.mapValue) {
-        // Internal Paymaster finance recovery metadata is not a public RPC field.
-        if (item.first == "paymaster_retirement_provider") continue;
+        // Internal Paymaster recovery markers are durable wallet metadata,
+        // not public fields of gettransaction/listtransactions/listsinceblock.
+        if (item.first == "paymaster_retirement_provider" ||
+            item.first == "paymaster_durable_commit") continue;
         entry.pushKV(item.first, item.second);
     }
 }
