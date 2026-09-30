@@ -1061,7 +1061,7 @@ public:
     void ClearWalletData();
 
     // Coin selection and fee calculation helpers (public for testing and integration)
-    bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr) const;
+    bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr) const;
     bool SelectDDCoins(const CAmount& target_amount, const std::vector<COutPoint>& preset_inputs, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr) const;
     bool PlanDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr) const;
     bool SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts = nullptr, const std::vector<COutPoint>* exclude_utxos = nullptr) const;

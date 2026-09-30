@@ -200,6 +200,54 @@ BOOST_AUTO_TEST_CASE(w17_01b_select_ddcoins_picks_extra_utxo_to_avoid_dust_chang
     BOOST_CHECK_EQUAL(selected.size(), 2u);
 }
 
+BOOST_AUTO_TEST_CASE(transfer_planner_reports_automatic_change_and_insufficient_funds)
+{
+    DigiDollarWallet dd_wallet(nullptr);
+    const COutPoint first(RandHash(), 0);
+    dd_wallet.AddDDUTXO(first, 10000);
+    DDTransferPlan plan;
+    std::string error;
+    const auto address = MakeValidDDAddress();
+
+    BOOST_REQUIRE(dd_wallet.PlanDigiDollarTransfer({{address, 10000}}, plan, error));
+    BOOST_CHECK_EQUAL(plan.dd_change, 0);
+    BOOST_REQUIRE(dd_wallet.PlanDigiDollarTransfer({{address, 9900}}, plan, error));
+    BOOST_CHECK_EQUAL(plan.dd_change, 100);
+    for (CAmount change : {1, 50, 99}) {
+        BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer({{address, 10000 - change}}, plan, error));
+        BOOST_CHECK_MESSAGE(error.find("change is below minimum") != std::string::npos, error);
+    }
+    BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer({{address, 10100}}, plan, error));
+    BOOST_CHECK_MESSAGE(error.find("Insufficient confirmed DD balance") != std::string::npos, error);
+
+    dd_wallet.AddDDUTXO(COutPoint(RandHash(), 0), 20000);
+    BOOST_REQUIRE(dd_wallet.PlanDigiDollarTransfer({{address, 9950}}, plan, error));
+    BOOST_CHECK_EQUAL(plan.dd_change, 20050);
+    const std::vector<COutPoint> selected{first};
+    BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer({{address, 9950}}, plan, error, &selected));
+    BOOST_CHECK_MESSAGE(error.find("change is below minimum") != std::string::npos, error);
+}
+
+BOOST_AUTO_TEST_CASE(transfer_planner_distinguishes_unconfirmed_inputs)
+{
+    DigiDollarWallet dd_wallet(&m_wallet);
+    auto tx = MakeMintLikeTx();
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.AddToWallet(tx, TxStateInactive{});
+    }
+    const COutPoint outpoint(tx->GetHash(), 1);
+    dd_wallet.AddDDUTXO(outpoint, 10000);
+    DDTransferPlan plan;
+    std::string error;
+    const auto address = MakeValidDDAddress();
+    BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer({{address, 9950}}, plan, error));
+    BOOST_CHECK_MESSAGE(error.find("No spendable confirmed DD") != std::string::npos, error);
+    const std::vector<COutPoint> selected{outpoint};
+    BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer({{address, 9950}}, plan, error, &selected));
+    BOOST_CHECK_MESSAGE(error.find("unconfirmed") != std::string::npos, error);
+}
+
 BOOST_AUTO_TEST_CASE(w17_07_selected_dd_input_planner_accepts_owned_input_and_reports_change)
 {
     DigiDollarWallet dd_wallet(/*wallet=*/nullptr);

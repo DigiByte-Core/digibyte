@@ -2263,6 +2263,7 @@ RPCHelpMan mintdigidollar()
 RPCHelpMan senddigidollar()
 {
     return RPCHelpMan{"senddigidollar",
+                "Each recipient must receive at least 100 cents ($1.00). Change from the selected inputs must be zero or at least 100 cents ($1.00).\n"
                 "\nSend DigiDollar to another DigiDollar address.\n"
                 "Creates a transaction that transfers DigiDollar from your wallet to the specified address.\n"
                 "The sending wallet also needs spendable DGB to pay the transaction fee; DigiDollar cannot pay that fee.\n"
@@ -2466,6 +2467,7 @@ RPCHelpMan senddigidollar()
 RPCHelpMan sendmanydigidollar()
 {
     return RPCHelpMan{"sendmanydigidollar",
+                "Each recipient must receive at least 100 cents ($1.00). Change from the selected inputs must be zero or at least 100 cents ($1.00).\n"
                 "\nSend DigiDollar to multiple DigiDollar addresses in one transaction.\n"
                 "Every amount is a whole number of cents unless amount_unit says otherwise: 5000 is $50.00.\n"
                 "One amount_unit applies to every recipient in the request.\n",

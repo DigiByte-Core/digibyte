@@ -6857,15 +6857,17 @@ bool DigiDollarWallet::ValidateRedeemParams(const uint256& dd_timelock_id, const
     return true;
 }
 
-bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts) const {
+bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts, std::string* error) const {
     auto locks = LockDDWallet();
     // Reset output parameters
+    if (error) error->clear();
     selected_total = 0;
     selected_utxos.clear();
     if (amounts) amounts->clear();
 
     // Validate target amount
     if (target_amount <= 0) {
+        if (error) *error = "Amount must be positive";
         LogPrintf("DigiDollar: SelectDDCoins - Invalid target amount %lld\n", static_cast<long long>(target_amount));
         return false;
     }
@@ -6876,6 +6878,7 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount, std::vector<C
     std::vector<DDUtxo> available_utxos = GetDDUTXOs();
 
     if (available_utxos.empty()) {
+        if (error) *error = "No spendable confirmed DD UTXOs found. Please wait for prior DigiDollar transfer confirmation or confirm a mint before sending again.";
         LogPrintf("DigiDollar: SelectDDCoins - No DD UTXOs available\n");
         return false;
     }
@@ -6913,6 +6916,7 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount, std::vector<C
         // money type rather than let it wrap round to a negative number.
         if (selected_total > std::numeric_limits<CAmount>::max() - utxo.dd_amount) {
             LogPrintf("DigiDollar: SelectDDCoins - FAILED: the tracked DD amounts add up to more than a total can hold\n");
+            if (error) *error = "Tracked DD input amount overflow";
             selected_utxos.clear();
             selected_total = 0;
             if (amounts) amounts->clear();
@@ -6934,6 +6938,11 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount, std::vector<C
     bool success = selected_total >= target_amount && (change == 0 || change >= min_change);
 
     if (!success) {
+        if (error) {
+            *error = selected_total >= target_amount ? DDChangePolicyError(selected_total, target_amount) :
+                strprintf("Insufficient confirmed DD balance. Available: %lld cents, Required: %lld cents",
+                          static_cast<long long>(selected_total), static_cast<long long>(target_amount));
+        }
         LogPrintf("DigiDollar: SelectDDCoins - FAILED: need %lld, selected %lld, change %lld (minimum DD change is %lld unless exact)\n",
                   static_cast<long long>(target_amount), static_cast<long long>(selected_total),
                   static_cast<long long>(change), static_cast<long long>(min_change));
@@ -7066,8 +7075,7 @@ bool DigiDollarWallet::PlanDigiDollarTransfer(const std::vector<std::pair<CDigiD
 
     if (preset_dd_inputs) {
         if (!SelectDDCoins(plan.total_amount, *preset_dd_inputs, plan.dd_utxos, plan.selected_dd_total, &plan.dd_amounts, &error)) return false;
-    } else if (!SelectDDCoins(plan.total_amount, plan.dd_utxos, plan.selected_dd_total, &plan.dd_amounts)) {
-        error = "No spendable confirmed DD UTXOs found. Please wait for prior DigiDollar transfer confirmation or confirm a mint before sending again.";
+    } else if (!SelectDDCoins(plan.total_amount, plan.dd_utxos, plan.selected_dd_total, &plan.dd_amounts, &error)) {
         return false;
     }
 
