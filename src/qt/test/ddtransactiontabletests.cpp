@@ -34,10 +34,12 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSet>
 #include <QStringList>
+#include <QStandardItemModel>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QSettings>
@@ -504,6 +506,27 @@ void DDTransactionTableTests::sendFromOwnTokenShowsTheFeeOnItsOwnRow()
     }
     QVERIFY2(saw_dollar_row, "the dollars that left were not shown");
     QVERIFY2(saw_fee_row, "the fee was not shown on a row of its own");
+}
+
+void DDTransactionTableTests::csvDatesHaveSeconds()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QStandardItemModel model(1, 2);
+    const QDateTime date(QDate(2026, 9, 28), QTime(12, 34, 56), Qt::UTC);
+    model.setData(model.index(0, 0), date);
+    model.setData(model.index(0, 1), QString("Local note, \"quoted\""));
+    const QString path = dir.filePath("dates.csv");
+    CSVModelWriter writer(path);
+    writer.setModel(&model);
+    writer.addColumn("Date", 0, Qt::DisplayRole);
+    writer.addColumn("Note", 1, Qt::DisplayRole);
+    QVERIFY(writer.write());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    QCOMPARE(QString::fromUtf8(file.readAll()),
+             QString("\"Date\",\"Note\"\n\"2026-09-28 12:34:56\",\"Local note, \"\"quoted\"\"\"\n"));
+    QCOMPARE(model.index(0, 0).data().toDateTime(), date);
 }
 
 void DDTransactionTableTests::csvExportHasSeparateAmountColumns()

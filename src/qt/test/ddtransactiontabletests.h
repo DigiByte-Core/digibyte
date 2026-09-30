@@ -29,6 +29,7 @@ private Q_SLOTS:
     void amountColumnsAreSeparate();
     /** The exported CSV file carries both amount columns. */
     void csvExportHasSeparateAmountColumns();
+    void csvDatesHaveSeconds();
     /** A send that spends the wallet's own DigiDollar input puts its dollars on
         one row and its DigiByte fee on a row of its own. */
     void sendFromOwnTokenShowsTheFeeOnItsOwnRow();

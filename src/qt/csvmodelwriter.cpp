@@ -5,6 +5,7 @@
 #include <qt/csvmodelwriter.h>
 
 #include <QAbstractItemModel>
+#include <QDateTime>
 #include <QFile>
 #include <QTextStream>
 
@@ -80,7 +81,10 @@ bool CSVModelWriter::write()
                 writeSep(out);
             }
             QVariant data = model->index(j, columns[i].column).data(columns[i].role);
-            writeValue(out, data.toString());
+            const QString value = data.userType() == QMetaType::QDateTime
+                ? data.toDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                : data.toString();
+            writeValue(out, value);
         }
         writeNewline(out);
     }
