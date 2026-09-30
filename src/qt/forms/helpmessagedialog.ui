@@ -10,7 +10,7 @@
     <height>400</height>
    </rect>
   </property>
-  <layout class="QHBoxLayout" name="horizontalLayout_2">
+  <layout class="QHBoxLayout" name="horizontalLayout_2" stretch="0,1">
    <property name="spacing">
     <number>0</number>
    </property>
@@ -63,7 +63,7 @@
       </widget>
      </item>
      <item>
-      <widget class="QFrame" name="frame">
+      <widget class="QFrame" name="aboutLogoSpacer">
        <property name="frameShape">
         <enum>QFrame::NoFrame</enum>
        </property>
