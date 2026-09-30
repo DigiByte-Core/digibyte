@@ -5430,29 +5430,29 @@ DigiDollarPositionsWidget QTableWidget QScrollBar::handle:horizontal:hover {
 
 /* Transactions table in the dark theme. */
 DigiDollarTransactionsWidget QTableWidget {
-    background-color: #2a2a2a;
-    color: #e0e0e0;
-    gridline-color: #4a4a4a;
+    background-color: #113a29;
+    color: #ffffff;
+    gridline-color: #1f6846;
     selection-background-color: #16804f;
     selection-color: #ffffff;
-    border: 1px solid #4a4a4a;
+    border: 1px solid #1f6846;
     border-radius: 8px;
 }
 
 DigiDollarTransactionsWidget QTableWidget::item {
     padding: 8px 6px;
-    border-bottom: 1px solid #4a4a4a;
-    color: #e0e0e0;
-    background-color: #2a2a2a;
+    border-bottom: 1px solid #1f6846;
+    color: #ffffff;
+    background-color: #113a29;
 }
 
 DigiDollarTransactionsWidget QTableWidget::item:alternate {
-    background-color: #252525;
-    color: #e0e0e0;
+    background-color: #123827;
+    color: #ffffff;
 }
 
 DigiDollarTransactionsWidget QTableWidget::item:hover {
-    background-color: rgba(0, 102, 204, 0.3);
+    background-color: #1d5f3f;
     color: #ffffff;
 }
 
@@ -5467,8 +5467,8 @@ DigiDollarTransactionsWidget QHeaderView::section {
     color: #ffffff;
     padding: 10px 8px;
     border: none;
-    border-right: 1px solid #4a4a4a;
-    border-bottom: 2px solid #4a4a4a;
+    border-right: 1px solid #1f6846;
+    border-bottom: 2px solid #1f6846;
     font-weight: bold;
     font-size: 12px;
 }
@@ -5480,9 +5480,9 @@ DigiDollarTransactionsWidget QHeaderView::section:hover {
 
 /* Filter controls styling (Dark Theme) */
 DigiDollarTransactionsWidget .QComboBox {
-    background-color: #2a2a2a;
-    color: #e0e0e0;
-    border: 1px solid #4a4a4a;
+    background-color: #113a29;
+    color: #ffffff;
+    border: 1px solid #1f6846;
     border-radius: 4px;
     padding: 6px 10px;
 }
@@ -5501,21 +5501,21 @@ DigiDollarTransactionsWidget .QComboBox::down-arrow {
     height: 0;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 6px solid #e0e0e0;
+    border-top: 6px solid #ffffff;
 }
 
 /* ComboBox dropdown list styling (Dark Theme) */
 DigiDollarTransactionsWidget .QComboBox QAbstractItemView {
-    background-color: #2a2a2a;
-    color: #e0e0e0;
+    background-color: #113a29;
+    color: #ffffff;
     selection-background-color: #16804f;
     selection-color: #ffffff;
-    border: 1px solid #4a4a4a;
+    border: 1px solid #1f6846;
 }
 
 DigiDollarTransactionsWidget .QComboBox QAbstractItemView::item {
-    color: #e0e0e0;
-    background-color: #2a2a2a;
+    color: #ffffff;
+    background-color: #113a29;
     padding: 8px;
 }
 
@@ -5530,9 +5530,9 @@ DigiDollarTransactionsWidget .QComboBox QAbstractItemView::item:hover {
 }
 
 DigiDollarTransactionsWidget .QLineEdit {
-    background-color: #2a2a2a;
-    color: #e0e0e0;
-    border: 1px solid #4a4a4a;
+    background-color: #113a29;
+    color: #ffffff;
+    border: 1px solid #1f6846;
     border-radius: 4px;
     padding: 6px 10px;
 }

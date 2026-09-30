@@ -5687,7 +5687,7 @@ DigiDollarTransactionsWidget QTableWidget::item:alternate {
 }
 
 DigiDollarTransactionsWidget QTableWidget::item:hover {
-    background-color: rgba(0, 102, 204, 0.3);
+    background-color: #bfe7ce;
     color: #123f2b;
 }
 
