@@ -3,14 +3,14 @@
 set -euo pipefail
 TASK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 TASK_CLIENT="$TASK_ROOT/builds/thawday-client"
-TASK_BASE=e3ad0a4522410b77ebd46e1cf17c65d944fee25b
+TASK_BASE="$(git -C "$TASK_ROOT" rev-parse --verify "${1:-HEAD}^{commit}")"
 TASK_PATCH="$TASK_ROOT/contrib/thawday/client.patch"
 if [[ -e "$TASK_CLIENT" ]]; then
     echo "The test checkout already exists at $TASK_CLIENT."
     echo "Keep it and its evidence. Use the existing build, or review that checkout before rebuilding it."
     exit 1
 fi
-git -C "$TASK_ROOT" worktree add -b test/thawday-client-rc2 "$TASK_CLIENT" "$TASK_BASE"
+git -C "$TASK_ROOT" worktree add --detach "$TASK_CLIENT" "$TASK_BASE"
 git -C "$TASK_CLIENT" apply --check "$TASK_PATCH"
 git -C "$TASK_CLIENT" apply "$TASK_PATCH"
 cd "$TASK_CLIENT"

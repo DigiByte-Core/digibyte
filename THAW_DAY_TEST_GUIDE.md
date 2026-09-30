@@ -44,8 +44,8 @@ uses H=5,000 and DigiDollar activation at 600 in the existing `-easypow` test mo
 The release values remain mainnet **24,490,000** and testnet26 **432,100**.
 The lab's P2P network marker is `f9 dd a5 66`; it connects only to local peers.
 
-The separate client is in `builds/thawday-client`, built from the v9.26.6rc2
-commit. The rc1 lab client and its evidence are kept in `builds/thawday-client-rc1`.
+The separate client is in `builds/thawday-client`. The build uses the current
+release commit by default. Pass a commit or tag to test a specific candidate.
 Its patch changes lab network settings, startup guards/banner, and exchange URL routing. DigiDollar validation,
 accounting, C1/C2/C3, exchange parsers, aggregation, signing, and signature checks
 remain in place. There is no validation bypass. Easy test mining does not prove
@@ -77,6 +77,8 @@ Build the separate client only if its worktree does not already exist:
 
 ```sh
 ./thawDay.sh build
+# Or choose an exact candidate:
+./thawDay.sh build <commit-or-tag>
 ```
 
 This creates a **fresh** `builds/thawday-client`, applies
