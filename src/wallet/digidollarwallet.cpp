@@ -18,6 +18,7 @@
 #include <util/strencodings.h>
 #include <logging.h>
 #include <util/time.h>
+#include <util/moneystr.h>
 #include <kernel/chainparams.h>
 #include <chainparams.h>
 #include <crypto/common.h>
@@ -1642,8 +1643,8 @@ bool DigiDollarWallet::TransferDigiDollarMany(const std::vector<std::pair<CDigiD
             fee_amounts.clear();
             selectedFeeTotal = 0;
             if (!SelectFeeCoins(estimatedFee, params.feeUtxos, selectedFeeTotal, &fee_amounts, &exclude_dd_utxos)) {
-                error = strprintf("Insufficient DGB balance for transaction fees (need at least %lld sats based on projected %u vB transaction)",
-                                  static_cast<long long>(estimatedFee), static_cast<unsigned>(projected_vsize));
+                error = strprintf("This wallet needs at least %s DGB to pay the network fee for this DigiDollar send. Send DGB to this wallet and try again.",
+                                  FormatMoney(estimatedFee));
                 LogPrintf("DigiDollar: Transfer failed - no DGB UTXOs available for projected fee\n");
                 return false;
             }
