@@ -3685,7 +3685,8 @@ RPCHelpMan validateddaddress()
 {
     return RPCHelpMan{"validateddaddress",
                 "\nValidate a DigiDollar address format and return detailed information.\n"
-                "Checks if the address has the correct prefix, encoding, and checksum.\n",
+                "Checks if the address has the correct prefix for the current network, encoding, and checksum.\n"
+                "Use this wallet RPC for DD, TD and RD addresses; validateaddress handles DigiByte addresses.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "DigiDollar address to validate"}
                 },

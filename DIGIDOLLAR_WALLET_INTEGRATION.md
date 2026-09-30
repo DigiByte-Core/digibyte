@@ -69,6 +69,15 @@ digibyte-cli getdigidollaraddress
 # Returns a Base58Check DD/TD/RD address for the current network
 ```
 
+**Validate a customer's DD address:**
+```bash
+digibyte-cli -rpcwallet="your-wallet" validateddaddress "<DD, TD or RD address>"
+```
+
+Check `isvalid` before accepting the address. This wallet RPC checks the current
+network and checksum. The ordinary `validateaddress` RPC handles DGB addresses;
+use `validateddaddress` for DigiDollar.
+
 **List DD addresses in wallet:**
 ```bash
 digibyte-cli listdigidollaraddresses
