@@ -14,6 +14,8 @@ DD addresses use prefixes:
 Addresses are P2TR (Taproot) encoded in base58check format.
 """
 
+from datetime import datetime, timezone
+
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.messages import hash256
 from test_framework.util import (
@@ -108,6 +110,7 @@ class DigiDollarAddressTest(DigiByteTestFramework):
         self.test_get_address_does_not_create_dgb_receive_entry()
         self.test_list_addresses_with_balance()
         self.test_list_addresses_include_watchonly()
+        self.test_address_metadata()
 
         self.log.info("=== Bug #12 regression test ===")
         self.test_no_mock_addresses_bug12()
@@ -468,6 +471,51 @@ class DigiDollarAddressTest(DigiByteTestFramework):
         self.log.info(f"Total addresses listed: {len(result_all)}")
 
         self.log.info("Address list with balance test passed")
+
+    def test_address_metadata(self):
+        sender, receiver = self.nodes
+        label = "DD payments"
+        address = receiver.getdigidollaraddress(label)
+
+        def entry():
+            return next(row for row in receiver.listdigidollaraddresses(False, 0, True)
+                        if row["address"] == address)
+
+        empty = entry()
+        assert_equal(empty["label"], label)
+        assert_equal(empty["txcount"], 0)
+        assert_equal(empty["created_date"], "")
+        assert_equal(empty["last_used"], "")
+        assert address not in [row["address"] for row in receiver.listdigidollaraddresses()]
+        sender.sendtoaddress(receiver.getnewaddress(), 10)
+        transactions = []
+        for _ in range(2):
+            transactions.append(sender.senddigidollar(address, 2000)["txid"])
+            self.generate(sender, 1)
+            self.sync_all()
+        received = entry()
+        assert_equal(received["balance"], 4000)
+        assert_equal(received["txcount"], 2)
+        assert_equal(received["created_date"], "")
+        def latest_time():
+            timestamp = max(receiver.gettransaction(txid)["time"] for txid in transactions)
+            return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        assert_equal(received["last_used"], latest_time())
+
+        # Both inputs use the same address, but this is only one transaction.
+        transactions.append(receiver.senddigidollar(sender.getdigidollaraddress(), 4000)["txid"])
+        self.generate(sender, 1)
+        self.sync_all()
+        spent = entry()
+        assert_equal(spent["balance"], 0)
+        assert_equal(spent["txcount"], 3)
+        assert_equal(spent["label"], label)
+        assert_equal(spent["last_used"], latest_time())
+        assert address not in [row["address"] for row in receiver.listdigidollaraddresses()]
+        self.restart_node(1)
+        assert_equal(entry(), spent)
+        self.connect_nodes(0, 1)
 
     def test_list_addresses_include_watchonly(self):
         self.log.info("Testing listdigidollaraddresses with include_watchonly...")

@@ -470,6 +470,9 @@ class DigiDollarDescriptorTest(DigiByteTestFramework):
         for addr_info in watchonly_addresses:
             assert_equal(addr_info["ismine"], False)
             assert_equal(addr_info["iswatchonly"], True)
+            assert_greater_than(addr_info["txcount"], 0)
+            assert_equal(addr_info["created_date"], "")
+            assert addr_info["last_used"].endswith("Z")
             validation = watchonly_wallet.validateddaddress(addr_info["address"])
             assert_equal(validation["isvalid"], True)
             assert_equal(validation["ismine"], False)

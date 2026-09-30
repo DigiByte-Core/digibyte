@@ -3821,9 +3821,9 @@ RPCHelpMan listdigidollaraddresses()
                                 {RPCResult::Type::STR_AMOUNT, "balance", "DD balance (in cents)"},
                                 {RPCResult::Type::BOOL, "ismine", "Whether address is owned by wallet"},
                                 {RPCResult::Type::BOOL, "iswatchonly", "Whether address is watch-only"},
-                                {RPCResult::Type::NUM, "txcount", "Number of transactions involving this address"},
-                                {RPCResult::Type::STR, "created_date", "Date when address was created"},
-                                {RPCResult::Type::STR, "last_used", "Date of last transaction"}
+                                {RPCResult::Type::NUM, "txcount", "Number of distinct wallet DigiDollar transactions receiving to or spending from this address"},
+                                {RPCResult::Type::STR, "created_date", "Address creation date, or an empty string when not recorded"},
+                                {RPCResult::Type::STR, "last_used", "Latest wallet DigiDollar transaction time in ISO 8601 UTC, or an empty string if unused"}
                             }
                         }
                     }
@@ -3903,6 +3903,37 @@ RPCHelpMan listdigidollaraddresses()
                 addressBalances.try_emplace(addr, 0);
             }
 
+            struct AddressActivity {
+                int tx_count{0};
+                int64_t last_used{0};
+            };
+            std::map<std::string, AddressActivity> activity;
+            for (const auto& [txid, wtx] : pwallet->mapWallet) {
+                if (!wtx.tx || !IsDigiDollarTransaction(*wtx.tx)) continue;
+                std::set<std::string> involved;
+                auto record_output = [&](const CTxOut& output) {
+                    CTxDestination dest;
+                    if (output.nValue != 0 || !ExtractDestination(output.scriptPubKey, dest) ||
+                        !std::holds_alternative<WitnessV1Taproot>(dest)) return;
+                    const std::string address = EncodeDigiDollarAddress(dest);
+                    if (addressBalances.count(address)) involved.insert(address);
+                };
+                for (const auto& output : wtx.tx->vout) record_output(output);
+                for (const auto& input : wtx.tx->vin) {
+                    const auto* previous = pwallet->GetWalletTx(input.prevout.hash);
+                    if (previous && input.prevout.n < previous->tx->vout.size() &&
+                        IsDigiDollarTransaction(*previous->tx)) {
+                        record_output(previous->tx->vout[input.prevout.n]);
+                    }
+                }
+                // Multiple outputs or inputs at one address count only once.
+                for (const auto& address : involved) {
+                    auto& stats = activity[address];
+                    ++stats.tx_count;
+                    stats.last_used = std::max(stats.last_used, wtx.GetTxTime());
+                }
+            }
+
             for (const auto& [addr, balance] : addressBalances) {
                 if (balance < minBalance) continue;
                 // DD-FA-FUNC-024: hide zero-balance addresses by default.
@@ -3915,13 +3946,16 @@ RPCHelpMan listdigidollaraddresses()
 
                 UniValue addrInfo(UniValue::VOBJ);
                 addrInfo.pushKV("address", addr);
-                addrInfo.pushKV("label", "");
+                const auto* address_book = pwallet->FindAddressBookEntry(DecodeDigiDollarAddress(addr));
+                addrInfo.pushKV("label", address_book ? address_book->GetLabel() : "");
                 addrInfo.pushKV("balance", balance);
                 addrInfo.pushKV("ismine", isMine);
                 addrInfo.pushKV("iswatchonly", isWatchOnly);
-                addrInfo.pushKV("txcount", 0);
+                const auto& stats = activity[addr];
+                addrInfo.pushKV("txcount", stats.tx_count);
+                // Key birthdays and first receipts are not address creation dates.
                 addrInfo.pushKV("created_date", "");
-                addrInfo.pushKV("last_used", "");
+                addrInfo.pushKV("last_used", stats.last_used > 0 ? FormatISO8601DateTime(stats.last_used) : "");
 
                 result.push_back(addrInfo);
             }
