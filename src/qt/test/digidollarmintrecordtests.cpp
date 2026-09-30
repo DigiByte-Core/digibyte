@@ -32,6 +32,7 @@
 #include <validation.h>
 #include <validationinterface.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
@@ -387,5 +388,44 @@ void DigiDollarMintRecordTests::mintStoppedByANewBlockLeavesNothingBehind()
     QVERIFY2(result.status != WalletModel::OK, "the mint was expected to stop because a block arrived");
     CheckNothingIsLeftOfTheMint(*wallet, *Assert(test.m_node.mempool));
 
+    MockOracleManager::GetInstance().Reset();
+}
+
+void DigiDollarMintRecordTests::mintRespectsManuallyLockedCoins()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = PrepareMintableWallet(m_node, test);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    gui.walletModel->pollBalanceChanged();
+
+    std::vector<COutPoint> locked;
+    {
+        LOCK(wallet->cs_wallet);
+        for (const auto& coin : wallet::AvailableCoins(*wallet).All()) {
+            locked.push_back(coin.outpoint);
+            wallet->LockCoin(coin.outpoint);
+        }
+    }
+    QVERIFY(!locked.empty());
+    const auto refused = gui.walletModel->mintDigiDollar(10000, 0);
+    QVERIFY2(refused.status != WalletModel::OK, "Mint spent manually locked DGB coins");
+    QCOMPARE(CountLiveMintTransactions(*wallet), size_t{0});
+    QCOMPARE(wallet->GetDDWallet()->GetDDTimeLocks(false).size(), size_t{0});
+    QCOMPARE(Assert(test.m_node.mempool)->size(), size_t{0});
+    {
+        LOCK(wallet->cs_wallet);
+        for (const auto& outpoint : locked) {
+            QVERIFY(wallet->IsLockedCoin(outpoint));
+            QVERIFY(!wallet->IsSpent(outpoint));
+            wallet->UnlockCoin(outpoint);
+        }
+    }
+    // The same funded wallet can mint once its owner unlocks the coins.
+    const auto minted = gui.walletModel->mintDigiDollar(10000, 0);
+    QVERIFY2(minted.status == WalletModel::OK, qPrintable(minted.reasonFailed));
     MockOracleManager::GetInstance().Reset();
 }

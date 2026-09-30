@@ -882,28 +882,12 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         {
             LOCK(pWallet->cs_wallet);
 
-            // Get all available coins from wallet
-            auto coins = wallet().listCoins();
-            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: listCoins returned %d destinations\n", coins.size());
-
-            for (const auto& [dest, outputs] : coins) {
-                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Processing destination with %d outputs\n", outputs.size());
-                for (const auto& outpoint_txout : outputs) {
-                    const COutPoint& outpoint = std::get<0>(outpoint_txout);
-                    const interfaces::WalletTxOut& wtxout = std::get<1>(outpoint_txout);
-
-                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Checking UTXO %s:%d - Value: %d, Depth: %d, Spent: %s\n",
-                              outpoint.hash.GetHex(), outpoint.n, wtxout.txout.nValue,
-                              wtxout.depth_in_main_chain, wtxout.is_spent ? "YES" : "NO");
-
-                    // Only use confirmed, spendable UTXOs
-                    if (wtxout.depth_in_main_chain > 0 && !wtxout.is_spent) {
-                        availableUtxos.push_back(outpoint);
-                        utxoValues[outpoint] = wtxout.txout.nValue;
-                        totalAvailable += wtxout.txout.nValue;
-                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Added UTXO - Total now: %d sats\n", totalAvailable);
-                    }
-                }
+            // AvailableCoins excludes locked, immature and non-spendable coins.
+            for (const auto& coin : wallet::AvailableCoins(*pWallet).All()) {
+                if (coin.depth <= 0) continue;
+                availableUtxos.push_back(coin.outpoint);
+                utxoValues[coin.outpoint] = coin.txout.nValue;
+                totalAvailable += coin.txout.nValue;
             }
         }
 

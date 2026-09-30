@@ -26,6 +26,7 @@ public:
     Q_OBJECT
 
 private Q_SLOTS:
+    void mintRespectsManuallyLockedCoins();
     void mintSavesItsRecordBeforeSendingTheTransaction();
     void mintDoesNotSendWhenTheWalletCannotSaveIt();
     void mintStoppedByAChangedPriceLeavesNothingBehind();
