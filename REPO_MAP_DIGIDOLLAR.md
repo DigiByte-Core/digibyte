@@ -653,6 +653,9 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 ### src/wallet/digidollarmintcapability.h
 - `wallet::GetDigiDollarMintWalletError(wallet)` → checks mint wallet support without allocating keys or requiring unlock; descriptor/private-key/HD support, Taproot receiving and bech32 change descriptors are required. Actual owner-key derivation and signing must still succeed.
 
+### src/wallet/digidollarmintconsolidation.h
+- Shared Qt/RPC helper for combining confirmed DGB coins before a mint. Returns the merge transaction IDs and any partial failure. Existing wallet transaction metadata prevents repeated merges while confirmation is pending; known failed attempts use the normal abandonment path. It does not change transaction or consensus limits.
+
 ### src/wallet/digidollarwallet.h
 - `DDTransaction` (struct) → wallet-facing DD transaction: txid, amount, timestamp, confirmations, incoming, address, category (send/receive/mint/redeem), blockheight, blockhash, fee, comment, abandoned, lock_tier
 - `WalletDDBalance` (struct) → address → balance mapping with last_updated timestamp

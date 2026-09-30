@@ -34,6 +34,7 @@
 #include <univalue.h>
 #include <wallet/digidollarwallet.h> // for DigiDollarWallet
 #include <wallet/digidollarmintcapability.h>
+#include <wallet/digidollarmintconsolidation.h>
 #include <base58.h> // for CDigiDollarAddress
 #include <uint256.h>
 #include <hash.h>
@@ -890,6 +891,19 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         }
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Step 4 - Wallet pointer obtained\n");
 
+        auto pending_consolidation = [this](const wallet::MintConsolidationResult& consolidated) {
+            QString message = tr("Coins were merged. No DigiDollar was minted. Wait for confirmation, then retry the mint.");
+            message += "\n\n" + tr("Coin merge transaction IDs:");
+            for (const auto& txid : consolidated.txids) message += "\n" + QString::fromStdString(txid.GetHex());
+            if (!consolidated.error.empty()) message += "\n\n" + QString::fromStdString(consolidated.error);
+            return DigiDollarMintResult(ConsolidationPending, "", "", message);
+        };
+        const auto pending_merges = wallet::GetPendingDigiDollarMintConsolidations(*pWallet);
+        if (!pending_merges.txids.empty()) return pending_consolidation(pending_merges);
+        if (!pending_merges.error.empty()) {
+            return DigiDollarMintResult(TransactionCreationFailed, "", "", QString::fromStdString(pending_merges.error));
+        }
+
         // Step 5: Collect available UTXOs from wallet for collateral
         // Build UTXO map for value lookup
         std::map<COutPoint, CAmount> utxoValues;
@@ -912,7 +926,7 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
         if (availableUtxos.empty()) {
             LogPrintf("DigiDollar Qt: ERROR - No available UTXOs found\n");
             return DigiDollarMintResult(TransactionCreationFailed, "", "",
-                "No available UTXOs for collateral. Please ensure wallet has confirmed DGB balance.");
+                tr("No confirmed spendable coins for collateral. Wait for confirmation of pending transactions and retry."));
         }
 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Found %d available UTXOs totaling %d satoshis (%.8f DGB)\n",
@@ -989,121 +1003,17 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
 
         DigiDollar::TxBuilderResult result = builder.BuildMintTransaction(params);
 
-        // Auto-consolidate if mint failed due to UTXO fragmentation
-        // (mirrors the RPC mintdigidollar consolidation logic)
-        std::string consolidation_txid;
+        // Merged coins must confirm before they can fund a mint.
         if (!result.success && result.error.find("Too many small UTXOs") != std::string::npos) {
-            LogPrintf("DigiDollar Qt: UTXO fragmentation detected (%zu UTXOs). Auto-consolidating...\n",
-                      availableUtxos.size());
-
-            auto sort_available_utxos_by_value = [&]() {
-                std::sort(availableUtxos.begin(), availableUtxos.end(),
-                    [&](const COutPoint& a, const COutPoint& b) {
-                        const CAmount av = utxoValues.count(a) ? utxoValues.at(a) : 0;
-                        const CAmount bv = utxoValues.count(b) ? utxoValues.at(b) : 0;
-                        if (av != bv) return av > bv;
-                        return a < b;
-                    });
-            };
-
-            auto commit_consolidation = [&](const CTransactionRef& consolidation_tx) -> std::optional<QString> {
-                std::string commit_error;
-                bool commit_success = false;
-                LOCK(pWallet->cs_wallet);
-                commit_success = pWallet->CommitTransaction(consolidation_tx, {}, {}, &commit_error);
-                if (!commit_success) {
-                    return QString("Auto-consolidation transaction rejected by mempool: %1")
-                        .arg(QString::fromStdString(commit_error));
-                }
-                return std::nullopt;
-            };
-
-            sort_available_utxos_by_value();
-
-            CAmount minRequired = result.collateralRequired + 20000000; // collateral + 0.2 DGB margin
-            if (totalAvailable < minRequired) {
-                return DigiDollarMintResult(AmountExceedsBalance, "", "",
-                    QString("Insufficient funds for collateral. Need %1 DGB, have %2 DGB.")
-                        .arg(result.collateralRequired / 100000000.0, 0, 'f', 2)
-                        .arg(totalAvailable / 100000000.0, 0, 'f', 2));
+            const auto consolidated = wallet::ConsolidateDigiDollarMintCoins(
+                *pWallet, availableUtxos, utxoValues, result.collateralRequired + 20000000);
+            if (consolidated.txids.empty()) {
+                const auto status = consolidated.failure == wallet::MintConsolidationFailure::INSUFFICIENT_FUNDS
+                    ? AmountExceedsBalance : TransactionCreationFailed;
+                return DigiDollarMintResult(status, "", "", QString::fromStdString(consolidated.error));
             }
+            return pending_consolidation(consolidated);
 
-            CTxDestination consolidationDest;
-            {
-                LOCK(pWallet->cs_wallet);
-                auto op_dest = pWallet->GetNewChangeDestination(OutputType::BECH32);
-                if (!op_dest) {
-                    return DigiDollarMintResult(TransactionCreationFailed, "", "",
-                        "Failed to get consolidation address");
-                }
-                consolidationDest = *op_dest;
-            }
-
-            // Multi-pass consolidation: MAX_STANDARD_TX_WEIGHT is 400k WU.
-            // P2WPKH input ~271 WU. Conservative limit: 1400 inputs per pass.
-            static const size_t MAX_CONSOLIDATION_INPUTS = 1400;
-            static const int MAX_CONSOLIDATION_PASSES = 10;
-            int pass = 0;
-            std::vector<COutPoint> consolidatedUtxos;
-            std::map<COutPoint, CAmount> consolidatedValues;
-
-            for (size_t offset = 0; offset < availableUtxos.size() && pass < MAX_CONSOLIDATION_PASSES;) {
-                ++pass;
-                size_t batch_size = std::min(availableUtxos.size() - offset, MAX_CONSOLIDATION_INPUTS);
-                LogPrintf("DigiDollar Qt: Consolidation pass %d — sweeping %zu of %zu UTXOs\n",
-                          pass, batch_size, availableUtxos.size());
-
-                wallet::CCoinControl coin_control;
-                CAmount batchTotal = 0;
-                for (size_t i = 0; i < batch_size; ++i) {
-                    const COutPoint& utxo = availableUtxos[offset + i];
-                    coin_control.Select(utxo);
-                    batchTotal += utxoValues[utxo];
-                }
-                coin_control.m_allow_other_inputs = false;
-
-                wallet::CRecipient recipient{consolidationDest, batchTotal, /*subtract_fee=*/true};
-                std::vector<wallet::CRecipient> recipients = {recipient};
-
-                auto consolidation_result = wallet::CreateTransaction(*pWallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
-                if (!consolidation_result) {
-                    return DigiDollarMintResult(TransactionCreationFailed, "", "",
-                        QString("Auto-consolidation pass %1 failed: %2")
-                            .arg(pass)
-                            .arg(QString::fromStdString(util::ErrorString(consolidation_result).original)));
-                }
-
-                const CTransactionRef& consolidation_tx = consolidation_result->tx;
-                consolidation_txid = consolidation_tx->GetHash().GetHex();
-                if (auto error = commit_consolidation(consolidation_tx)) {
-                    return DigiDollarMintResult(TransactionCreationFailed, "", "", *error);
-                }
-
-                LogPrintf("DigiDollar Qt: Consolidation pass %d tx: %s (swept %.2f DGB from %zu inputs)\n",
-                          pass, consolidation_txid, batchTotal / 100000000.0, batch_size);
-
-                COutPoint consolidated_outpoint(consolidation_tx->GetHash(), 0);
-                consolidatedUtxos.push_back(consolidated_outpoint);
-                consolidatedValues[consolidated_outpoint] = consolidation_tx->vout[0].nValue;
-                offset += batch_size;
-            }
-
-            if (consolidatedUtxos.empty() || consolidatedUtxos.size() > MAX_CONSOLIDATION_PASSES) {
-                return DigiDollarMintResult(TransactionCreationFailed, "", "",
-                    "Auto-consolidation failed: too many fragmented UTXOs. Try manually consolidating UTXOs.");
-            }
-
-            availableUtxos = std::move(consolidatedUtxos);
-            utxoValues = std::move(consolidatedValues);
-
-            LogPrintf("DigiDollar Qt: After consolidation: %zu UTXOs available (passes: %d)\n",
-                      availableUtxos.size(), pass);
-
-            // Retry mint with consolidated UTXOs
-            QtMintTxBuilder retryBuilder(Params(), mintHeight, oraclePrice, utxoValues);
-            if (candidateHealth) retryBuilder.SetCandidateHealth(*candidateHealth);
-            params.utxos = availableUtxos;
-            result = retryBuilder.BuildMintTransaction(params);
         }
 
         if (!result.success) {

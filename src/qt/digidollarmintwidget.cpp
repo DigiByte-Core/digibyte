@@ -905,7 +905,10 @@ void DigiDollarMintWidget::onMintClicked()
         // Call the wallet model to mint DigiDollar
         WalletModel::DigiDollarMintResult result = m_walletModel->mintDigiDollar(ddAmountCents, m_selectedTier);
 
-        if (result.status == WalletModel::OK) {
+        if (result.status == WalletModel::ConsolidationPending) {
+            Q_EMIT message(tr("Waiting for coin merge confirmation"), result.reasonFailed, CClientUIInterface::MSG_INFORMATION);
+            updateBalance();
+        } else if (result.status == WalletModel::OK) {
             // Format collateral amount
             QString collateralStr = QString::number(result.collateralLocked / 100000000.0, 'f', 8) + " DGB";
             QString ddAmountStr = formatDDAmount(ddAmountCents / 100.0);

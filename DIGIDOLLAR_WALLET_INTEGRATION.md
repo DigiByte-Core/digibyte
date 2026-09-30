@@ -188,6 +188,32 @@ digibyte-cli mintdigidollar 10000 3
 }
 ```
 
+### When coins must be combined first
+
+If the wallet needs too many small DGB coins, `mintdigidollar` combines only
+enough coins for the requested mint and its fees. It then returns a different
+result:
+
+```json
+{
+  "status": "consolidation_pending",
+  "message": "Coins were merged. No DigiDollar was minted. Wait for confirmation, then retry the mint.",
+  "consolidation_txids": ["first-merge-transaction-id", "second-merge-transaction-id"]
+}
+```
+
+This result is **not a mint**. Do not credit DigiDollars or record a new vault.
+Wait for the listed transactions to confirm, then request the mint again.
+There is no fixed confirmation time. Repeated requests, including after a
+restart, report pending merges instead of paying for another set of merges.
+The normal successful mint response above is unchanged.
+
+An `error` field can accompany the transaction IDs if a later merge fails.
+Keep those IDs: earlier merges may already have been sent and paid fees.
+A wallet-file error must be resolved before retrying. The wallet releases
+failed local attempts through its existing transaction-abandonment path; it
+does not discard an accepted merge simply because it leaves the mempool.
+
 ### What Happens Under the Hood
 
 The mint transaction creates:

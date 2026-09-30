@@ -162,7 +162,7 @@ BOOST_AUTO_TEST_CASE(activated_mint_releases_chain_before_wallet_selection)
         try { mintdigidollar().HandleRequest(request); }
         catch (const UniValue& result) { error = result.find_value("message").get_str(); }
     });
-    BOOST_CHECK_EQUAL(error, "No available UTXOs for collateral");
+    BOOST_CHECK_EQUAL(error, "No spendable DGB coins for collateral. If a transaction is waiting for confirmation, retry after it confirms.");
 }
 
 BOOST_AUTO_TEST_CASE(activated_default_redemption_releases_chain_before_wallet_selection)

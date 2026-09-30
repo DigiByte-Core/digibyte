@@ -41,6 +41,8 @@ namespace wallet {
 RPCHelpMan importmulti();
 RPCHelpMan dumpwallet();
 RPCHelpMan importwallet();
+RPCHelpMan gettransaction();
+RPCHelpMan listtransactions();
 
 // Ensure that fee levels defined in the wallet are at least as high
 // as the default levels for node policy.
@@ -72,6 +74,50 @@ static void AddKey(CWallet& wallet, const CKey& key)
     assert(desc);
     WalletDescriptor w_desc(std::move(desc), 0, 0, 1, 1);
     if (!wallet.AddWalletDescriptor(w_desc, provider, "", false)) assert(false);
+}
+
+BOOST_FIXTURE_TEST_CASE(transaction_rpc_keeps_coin_merge_state_private, TestChain100Setup)
+{
+    m_args.ForceSetArg("-rpcdoccheck", "1");
+    std::shared_ptr<CWallet> wallet = CreateSyncedWallet(
+        *m_node.chain, m_node.chainman->ActiveChain(), coinbaseKey);
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    AddWallet(context, wallet);
+    const uint256 txid = m_coinbase_txns.back()->GetHash();
+
+    for (const std::string marker : {"1", "failed"}) {
+        {
+            LOCK(wallet->cs_wallet);
+            auto& metadata = wallet->mapWallet.at(txid).mapValue;
+            metadata["digidollar_mint_consolidation"] = marker;
+            metadata["comment"] = "Keep this transaction note";
+        }
+        JSONRPCRequest request;
+        request.context = &context;
+        request.strMethod = "gettransaction";
+        request.params = UniValue(UniValue::VARR);
+        request.params.push_back(txid.GetHex());
+        const auto transaction = gettransaction().HandleRequest(request);
+        BOOST_CHECK(!transaction.exists("digidollar_mint_consolidation"));
+        BOOST_CHECK_EQUAL(transaction["comment"].get_str(), "Keep this transaction note");
+
+        request.strMethod = "listtransactions";
+        request.params = UniValue(UniValue::VARR);
+        const auto transactions = listtransactions().HandleRequest(request);
+        bool found{false};
+        for (const auto& entry : transactions.getValues()) {
+            BOOST_CHECK(!entry.exists("digidollar_mint_consolidation"));
+            if (entry["txid"].get_str() != txid.GetHex()) continue;
+            found = true;
+            BOOST_CHECK_EQUAL(entry["comment"].get_str(), "Keep this transaction note");
+        }
+        BOOST_CHECK(found);
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.at(txid).mapValue.at("digidollar_mint_consolidation"), marker);
+    }
+    RemoveWallet(context, wallet, std::nullopt);
 }
 
 BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)

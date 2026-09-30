@@ -54,8 +54,11 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
     }
     entry.pushKV("bip125-replaceable", rbfStatus);
 
-    for (const std::pair<const std::string, std::string>& item : wtx.mapValue)
+    for (const std::pair<const std::string, std::string>& item : wtx.mapValue) {
+        // Coin merge state belongs to the wallet, not the public transaction response.
+        if (item.first == "digidollar_mint_consolidation") continue;
         entry.pushKV(item.first, item.second);
+    }
 }
 
 struct tallyitem

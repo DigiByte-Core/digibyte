@@ -355,6 +355,7 @@ DIGIBYTE_CORE_H = \
   wallet/crypter.h \
   wallet/db.h \
   wallet/digidollarmintcapability.h \
+  wallet/digidollarmintconsolidation.h \
   wallet/digidollarwallet.h \
   wallet/ddcoincontrol.h \
   wallet/dump.h \

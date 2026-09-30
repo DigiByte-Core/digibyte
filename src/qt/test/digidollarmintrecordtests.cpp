@@ -31,6 +31,7 @@
 #include <util/chaintype.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <wallet/coincontrol.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
@@ -38,6 +39,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <set>
 #include <string_view>
 #include <thread>
 
@@ -53,7 +55,8 @@ namespace {
 
 //! Mine a block that carries a valid mock oracle quote, so that a mint made
 //! straight afterwards has a price to work from.
-void CreateAndProcessOracleQuoteBlock(TestChain100Setup& test, CAmount price_micro_usd)
+void CreateAndProcessOracleQuoteBlock(TestChain100Setup& test, CAmount price_micro_usd,
+                                     const std::vector<CMutableTransaction>& transactions = {})
 {
     MockOracleManager& mock_oracle = MockOracleManager::GetInstance();
     mock_oracle.SetEnabled(true);
@@ -65,7 +68,7 @@ void CreateAndProcessOracleQuoteBlock(TestChain100Setup& test, CAmount price_mic
     Chainstate& chainstate = Assert(test.m_node.chainman)->ActiveChainstate();
     const int block_height = WITH_LOCK(cs_main, return chainstate.m_chain.Tip()->nHeight + 1);
     const CScript coinbase_script = GetScriptForRawPubKey(test.coinbaseKey.GetPubKey());
-    CBlock block = test.CreateBlock({}, coinbase_script, chainstate);
+    CBlock block = test.CreateBlock(transactions, coinbase_script, chainstate);
 
     COracleBundle bundle = mock_oracle.CreateMockMuSig2Bundle(block_height, block.GetBlockTime());
     std::string error;
@@ -427,5 +430,108 @@ void DigiDollarMintRecordTests::mintRespectsManuallyLockedCoins()
     // The same funded wallet can mint once its owner unlocks the coins.
     const auto minted = gui.walletModel->mintDigiDollar(10000, 0);
     QVERIFY2(minted.status == WalletModel::OK, qPrintable(minted.reasonFailed));
+    MockOracleManager::GetInstance().Reset();
+}
+
+void DigiDollarMintRecordTests::mintWaitsForCoinMergeConfirmation_data()
+{
+    QTest::addColumn<bool>("fail_second_save");
+    QTest::newRow("confirmed retry") << false;
+    QTest::newRow("later database failure") << true;
+}
+
+void DigiDollarMintRecordTests::mintWaitsForCoinMergeConfirmation()
+{
+    QFETCH(bool, fail_second_save);
+    TestChain100Setup test{ChainType::REGTEST, {"-dandelion=0"}};
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = PrepareMintableWallet(m_node, test);
+    // CreateSyncedWallet scans once; this test also needs later blocks to
+    // confirm the funding transaction and the coin merges in the wallet.
+    auto notifications = test.m_node.chain->handleNotifications(wallet);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+
+    CTransactionRef funding;
+    {
+        LOCK(wallet->cs_wallet);
+        const auto destination = wallet->GetNewChangeDestination(OutputType::BECH32);
+        QVERIFY(bool(destination));
+        const std::vector<wallet::CRecipient> recipients(2200, {*destination, 12 * COIN / 10, false});
+        wallet::CCoinControl control;
+        auto created = wallet::CreateTransaction(*wallet, recipients, -1, control);
+        QVERIFY(bool(created));
+        funding = created->tx;
+        QVERIFY(wallet->CommitTransaction(funding, {}, {}));
+    }
+    CreateAndProcessOracleQuoteBlock(test, 500000, {CMutableTransaction(*funding)});
+    SyncWithValidationInterfaceQueue();
+    // Exclude the large mining balance and the funding transaction's change.
+    {
+        LOCK(wallet->cs_wallet);
+        for (const auto& coin : wallet::AvailableCoins(*wallet).All()) {
+            if (coin.outpoint.hash != funding->GetHash() || coin.txout.nValue != 12 * COIN / 10) {
+                wallet->LockCoin(coin.outpoint);
+            }
+        }
+    }
+    {
+        LOCK(wallet->cs_wallet);
+        QVERIFY(wallet->GetWalletTx(funding->GetHash())->isConfirmed());
+        QCOMPARE(wallet::AvailableCoins(*wallet).Size(), size_t{2200});
+    }
+    gui.walletModel->pollBalanceChanged();
+    std::set<std::vector<std::byte>> written_transactions;
+    if (fail_second_save) {
+        GetMockableDatabase(*wallet).m_refuse_write = [&](Span<const std::byte> key) {
+            if (key.size() < 3 || key[0] != std::byte{2} || key[1] != std::byte{'t'} || key[2] != std::byte{'x'}) return false;
+            written_transactions.emplace(key.begin(), key.end());
+            return written_transactions.size() > 1;
+        };
+    }
+    const auto pending = gui.walletModel->mintDigiDollar(10000, 0);
+    GetMockableDatabase(*wallet).m_refuse_write = nullptr;
+    QVERIFY2(pending.status == WalletModel::ConsolidationPending, qPrintable(pending.reasonFailed));
+    QVERIFY(pending.txid.isEmpty());
+    QVERIFY(pending.positionId.isEmpty());
+    QCOMPARE(pending.collateralLocked, CAmount{0});
+    QCOMPARE(CountLiveMintTransactions(*wallet), size_t{0});
+    QCOMPARE(wallet->GetDDWallet()->GetDDTimeLocks(false).size(), size_t{0});
+    auto& mempool = *Assert(test.m_node.mempool);
+    std::vector<uint256> txids;
+    mempool.queryHashes(txids);
+    QCOMPARE(txids.size(), fail_second_save ? size_t{1} : size_t{2});
+    if (fail_second_save) {
+        QVERIFY(pending.reasonFailed.contains("Wallet db error"));
+        QVERIFY(pending.reasonFailed.contains(QString::fromStdString(txids[0].GetHex())));
+    }
+    std::vector<CMutableTransaction> merges;
+    for (const auto& txid : txids) {
+        QVERIFY(pending.reasonFailed.contains(QString::fromStdString(txid.GetHex())));
+        merges.emplace_back(*mempool.get(txid));
+    }
+    const auto retry = gui.walletModel->mintDigiDollar(10000, 0);
+    QCOMPARE(retry.status, WalletModel::ConsolidationPending);
+    for (const auto& txid : txids) QVERIFY(retry.reasonFailed.contains(QString::fromStdString(txid.GetHex())));
+    if (fail_second_save) {
+        LOCK(wallet->cs_wallet);
+        size_t abandoned_merges{0};
+        for (const auto& [txid, tx] : wallet->mapWallet) {
+            if (tx.mapValue.count("digidollar_mint_consolidation") && tx.isAbandoned()) ++abandoned_merges;
+        }
+        QCOMPARE(abandoned_merges, size_t{1});
+    }
+    QCOMPARE(mempool.size(), fail_second_save ? size_t{1} : size_t{2});
+    QCOMPARE(CountLiveMintTransactions(*wallet), size_t{0});
+
+    CreateAndProcessOracleQuoteBlock(test, 500000, merges);
+    SyncWithValidationInterfaceQueue();
+    gui.walletModel->pollBalanceChanged();
+    const auto minted = gui.walletModel->mintDigiDollar(10000, 0);
+    QVERIFY2(minted.status == WalletModel::OK, qPrintable(minted.reasonFailed));
+    QCOMPARE(mempool.size(), size_t{1});
+    QCOMPARE(wallet->GetDDWallet()->GetDDTimeLocks(false).size(), size_t{1});
     MockOracleManager::GetInstance().Reset();
 }

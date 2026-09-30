@@ -349,6 +349,7 @@ BASE_SCRIPTS = [
     'digidollar_wallet_restore_redeem.py',
     'digidollar_owner_key_recovery.py --descriptors',
     'digidollar_mint_persistence.py --descriptors',
+    'digidollar_mint_consolidation.py --descriptors',
     'digidollar_expired_mint.py --descriptors',
     'digidollar_balance_sync.py',
     'digidollar_watchonly_rescan.py',
