@@ -23,6 +23,8 @@
 #include <optional>
 
 #include <QApplication>
+#include <QDir>
+#include <QStandardPaths>
 #include <QComboBox>
 #include <QDateTimeEdit>
 #include <QDesktopServices>
@@ -381,7 +383,9 @@ void TransactionView::exportClicked()
 
     // CSV is currently the only supported format
     QString filename = GUIUtil::getSaveFileName(this,
-        tr("Export Transaction History"), QString(),
+        tr("Export Transaction History"),
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+            .filePath(QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")) + QStringLiteral("_Transactions.csv")),
         /*: Expanded name of the CSV file format.
             See: https://en.wikipedia.org/wiki/Comma-separated_values. */
         tr("Comma separated file") + QLatin1String(" (*.csv)"), nullptr);

@@ -19,6 +19,8 @@
 #include <QDateTime>
 #include <QClipboard>
 #include <QApplication>
+#include <QDir>
+#include <QStandardPaths>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QMessageBox>
@@ -34,7 +36,6 @@
 #include <QLabel>
 #include <QMenu>
 #include <QFile>
-#include <QFileDialog>
 #include <QTextStream>
 #include <QTimer>
 
@@ -824,10 +825,11 @@ QString DigiDollarTransactionsWidget::formatLockPeriodShort(int lockTier) const
 
 void DigiDollarTransactionsWidget::exportClicked()
 {
-    QString filename = QFileDialog::getSaveFileName(this,
+    QString filename = GUIUtil::getSaveFileName(this,
         tr("Export DigiDollar Transaction History"),
-        QString(),
-        tr("Comma separated file") + QLatin1String(" (*.csv)"));
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+            .filePath(QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")) + QStringLiteral("_DigiDollar_Transactions.csv")),
+        tr("Comma separated file") + QLatin1String(" (*.csv)"), nullptr);
 
     if (filename.isEmpty()) return;
 

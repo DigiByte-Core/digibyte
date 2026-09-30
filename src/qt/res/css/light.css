@@ -6342,3 +6342,9 @@ DigiDollarSendWidget .QLineEdit#noteEdit {
     color: #123f2b;
     border-color: #147a42;
 }
+
+/* Keep disabled export actions readable in the Qt file dialog. */
+QFileDialog QDialogButtonBox QPushButton:disabled {
+    background-color: #dbe3eb;
+    color: #536477;
+}
