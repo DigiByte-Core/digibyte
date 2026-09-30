@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <qt/transactiontablemodel.h>
 
+#include <digidollar/amount.h>
+
 #include <qt/addresstablemodel.h>
 #include <qt/digibyteunits.h>
 #include <qt/clientmodel.h>
@@ -796,7 +798,8 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         // Used for copy/export, so don't include separators
         return formatAmountDGB(rec, walletModel->getOptionsModel()->getDisplayUnit(), false, DigiByteUnits::SeparatorStyle::NEVER);
     case FormattedAmountDDRole:
-        return formatAmountDD(rec, false);
+        return rec->ddAmount == 0 ? QString()
+            : QString::fromStdString(DigiDollar::FormatDDAmountDollars(rec->ddAmount));
     case FormattedSingleAmountRole:
         // The pop-up that announces a new transaction and the short list on the
         // main overview have room for one figure. A DigiDollar row holds no
