@@ -214,7 +214,7 @@ void DigiDollarSendWidget::setupAddressSection()
     m_addressEdit = new QLineEdit(this);
     m_addressEdit->setObjectName("addressEdit");
     m_addressEdit->setValidator(m_addressValidator);
-    m_addressEdit->setPlaceholderText("DD1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+    m_addressEdit->setPlaceholderText(tr("Enter a DigiDollar address"));
     m_addressEdit->setToolTip(tr("The DigiDollar address to send the payment to.\n\nValid formats:\n• DD... (Mainnet)\n• TD... (Testnet)\n• RD... (Regtest)"));
     m_addressEdit->setFocusPolicy(Qt::StrongFocus);
     m_addressEdit->setAttribute(Qt::WA_InputMethodEnabled, true);
