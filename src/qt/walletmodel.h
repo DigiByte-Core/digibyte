@@ -189,6 +189,10 @@ public:
         QString reasonFailed;
     };
 
+    //! Check the actual DigiDollar input selection without creating or sending a transaction.
+    QString getDigiDollarTransferError(const QString& address, CAmount amount,
+                                     const std::vector<COutPoint>* preset_dd_inputs = nullptr) const;
+
     // Send DigiDollar to an address
     DigiDollarSendResult sendDigiDollar(const QString& address, CAmount amount, const QString& comment = "",
                                         const std::vector<COutPoint>* preset_dd_inputs = nullptr);

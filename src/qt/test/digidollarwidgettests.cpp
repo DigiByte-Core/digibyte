@@ -1133,6 +1133,29 @@ void DigiDollarWidgetTests::sendWidgetCoinControlDialogSelectionFeedsSend()
     const QString recipient = mini_gui.walletModel->getNewDigiDollarAddress(QStringLiteral("qt-selected-input-send"));
     QVERIFY(!recipient.isEmpty());
 
+    // Reject unusable selected inputs before offering confirmation or unlock.
+    auto* address_edit = sendWidget.findChild<QLineEdit*>("addressEdit");
+    auto* amount_edit = sendWidget.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(address_edit && amount_edit);
+    address_edit->setText(recipient);
+    amount_edit->setText(QStringLiteral("20.00"));
+    QString first_dialog_title;
+    QString first_dialog_text;
+    QTimer close_dialog;
+    connect(&close_dialog, &QTimer::timeout, [&] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            first_dialog_title = dialog->windowTitle();
+            first_dialog_text = dialog->text();
+            dialog->reject();
+        }
+    });
+    close_dialog.start(10);
+    QVERIFY(QMetaObject::invokeMethod(&sendWidget, "onSendClicked", Qt::DirectConnection));
+    close_dialog.stop();
+    QCOMPARE(first_dialog_title, QStringLiteral("Cannot Send DigiDollar"));
+    QVERIFY2(first_dialog_text.contains(QStringLiteral("Selected DD input is unknown or not owned")),
+             qPrintable(first_dialog_text));
+
     const WalletModel::DigiDollarSendResult result =
         sendWidget.sendDigiDollarForTesting(recipient, 2000);
     QCOMPARE(result.status, WalletModel::TransactionCreationFailed);

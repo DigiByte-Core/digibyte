@@ -672,6 +672,19 @@ void DigiDollarSendWidget::onSendClicked()
         return; // Error already displayed by checkWalletState()
     }
 
+    std::vector<COutPoint> selected_inputs;
+    const std::vector<COutPoint>* preset_inputs = nullptr;
+    if (m_coinControl && m_coinControl->HasSelected()) {
+        selected_inputs = m_coinControl->ListSelected();
+        preset_inputs = &selected_inputs;
+    }
+    const QString transfer_error = m_walletModel->getDigiDollarTransferError(
+        address, static_cast<CAmount>(std::llround(amount * 100)), preset_inputs);
+    if (!transfer_error.isEmpty()) {
+        showError(tr("Cannot Send DigiDollar"), transfer_error);
+        return;
+    }
+
     // PHASE 7.2: Enhanced confirmation dialog with fee display
     if (!showConfirmationDialog(address, amount)) {
         return; // User cancelled
@@ -1226,7 +1239,7 @@ void DigiDollarSendWidget::updateAmountValidation()
 
     if (problem.isEmpty()) {
         m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
-        m_amountValidationLabel->setText(tr("✓ Amount can be sent"));
+        m_amountValidationLabel->setText(tr("✓ Amount is within the send limits"));
         m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(successColor));
         return;
     }

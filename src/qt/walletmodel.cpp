@@ -651,6 +651,24 @@ CAmount WalletModel::getAvailableBalance(const CCoinControl* control)
 }
 
 // DigiDollar method implementations
+QString WalletModel::getDigiDollarTransferError(const QString& address, CAmount amount,
+                                               const std::vector<COutPoint>* preset_dd_inputs) const
+{
+    DigiDollarWallet* dd_wallet = getDigiDollarWallet();
+    if (!dd_wallet) return tr("DigiDollar wallet not initialized");
+    try {
+        DDTransferPlan plan;
+        std::string error;
+        if (!dd_wallet->PlanDigiDollarTransfer({{CDigiDollarAddress(address.toStdString()), amount}},
+                                             plan, error, preset_dd_inputs)) {
+            return QString::fromStdString(error);
+        }
+        return {};
+    } catch (const std::exception& e) {
+        return QString::fromStdString(e.what());
+    }
+}
+
 WalletModel::DigiDollarSendResult WalletModel::sendDigiDollar(const QString& address, CAmount amount, const QString& comment,
                                                               const std::vector<COutPoint>* preset_dd_inputs)
 {
