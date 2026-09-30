@@ -5162,7 +5162,7 @@ size_t DigiDollarWallet::RebuildDDUTXOs() {
                                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ScanForDDUTXOs - DD %s:%d owned via dd_owner_keys (verified, txType=%d)\n",
                                               txid.GetHex(), n, ddTxType);
                                 } else {
-                                    LogPrintf("DigiDollar: ScanForDDUTXOs - DD %s:%d has dd_owner_key but tweaked key doesn't match output\n",
+                                    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ScanForDDUTXOs - DD %s:%d has dd_owner_key but tweaked key doesn't match output\n",
                                               txid.GetHex(), n);
                                 }
                             }
