@@ -99,10 +99,12 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     hlayout->addWidget(typeWidget);
 
     search_widget = new QLineEdit(this);
+    search_widget->setObjectName(QStringLiteral("transactionSearchEdit"));
     search_widget->setPlaceholderText(tr("Enter address, transaction id, or label to search"));
     hlayout->addWidget(search_widget);
 
     amountWidget = new QLineEdit(this);
+    amountWidget->setObjectName(QStringLiteral("transactionAmountEdit"));
     amountWidget->setPlaceholderText(tr("Min amount"));
     amountWidget->setToolTip(tr("Show only rows whose DigiByte amount is at least this much. "
                                 "Rows that hold a DigiDollar amount are left alone."));

@@ -2398,24 +2398,11 @@ background-color:rgba(255, 255, 255, 0.15);
 
     /* TRANSACTIONS PAGE */
 
-    TransactionView QLineEdit { /* Filters */
+    TransactionView QLineEdit#transactionSearchEdit,
+    TransactionView QLineEdit#transactionAmountEdit { /* Filters */
     margin-bottom:2px;
     margin-right:1px;
     min-width:111px;
-    text-align:center;
-    }
-
-    TransactionView QLineEdit#addressWidget { /* Address Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    min-width:405px;
-    text-align:center;
-    }
-
-    TransactionView QLineEdit#amountWidget { /* Amount Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    max-width:100px;
     text-align:center;
     }
 
@@ -2922,7 +2909,8 @@ TransactionView QComboBox {
     min-height: 25px;
 }
 
-TransactionView QLineEdit {
+TransactionView QLineEdit#transactionSearchEdit,
+    TransactionView QLineEdit#transactionAmountEdit {
     background-color: rgba(255, 255, 255, 0.1);
     color: #ffffff;
     border: 2px solid rgba(255, 255, 255, 0.3);
@@ -6089,6 +6077,13 @@ DigiDollarSendWidget .QLineEdit#noteEdit {
 }
 
 /* Keep disabled export actions readable in the Qt file dialog. */
+QFileDialog QAbstractItemView QLineEdit {
+    background-color: #16365f;
+    color: #ffffff;
+    selection-background-color: #0066cc;
+    selection-color: #ffffff;
+}
+
 QFileDialog QDialogButtonBox QPushButton:disabled {
     background-color: #415366;
     color: #d9e3ed;

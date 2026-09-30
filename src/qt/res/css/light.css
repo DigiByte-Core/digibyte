@@ -2586,36 +2586,11 @@ background-color:rgba(255, 255, 255, 0.15);
 
     /* TRANSACTIONS PAGE */
 
-    TransactionView QLineEdit { /* Filters */
+    TransactionView QLineEdit#transactionSearchEdit,
+    TransactionView QLineEdit#transactionAmountEdit { /* Filters */
     margin-bottom:2px;
     margin-right:1px;
     min-width:111px;
-    text-align:center;
-    background-color: #ffffff;
-    color: #003366;
-    border: 2px solid #003366;
-    border-radius: 4px;
-    padding: 6px;
-    font-weight: bold;
-    }
-
-    TransactionView QLineEdit#addressWidget { /* Address Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    min-width:405px;
-    text-align:center;
-    background-color: #ffffff;
-    color: #003366;
-    border: 2px solid #003366;
-    border-radius: 4px;
-    padding: 6px;
-    font-weight: bold;
-    }
-
-    TransactionView QLineEdit#amountWidget { /* Amount Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    max-width:100px;
     text-align:center;
     background-color: #ffffff;
     color: #003366;
