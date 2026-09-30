@@ -5079,13 +5079,13 @@ DigiDollarSendWidget QPushButton#sendButton {
 }
 
 DigiDollarSendWidget QPushButton#sendButton:hover {
-    background-color: #147a42;
+    background-color: #198e4e;
     color: #ffffff !important;
 }
 
 DigiDollarSendWidget QPushButton#sendButton:pressed {
-    background-color: #147a42;
-    border: 1px solid #147a42;
+    background-color: #0e5a30;
+    border: 1px solid #0e5a30;
 }
 
 DigiDollarSendWidget QPushButton#sendButton:disabled {
@@ -5106,13 +5106,13 @@ DigiDollarSendWidget QPushButton#clearButton {
 }
 
 DigiDollarSendWidget QPushButton#clearButton:hover {
-    background-color: #147a42;
+    background-color: #198e4e;
     color: #ffffff !important;
 }
 
 DigiDollarSendWidget QPushButton#clearButton:pressed {
-    background-color: #147a42;
-    border: 1px solid #147a42;
+    background-color: #0e5a30;
+    border: 1px solid #0e5a30;
 }
 
 /* Use available balance button - secondary style */
@@ -5137,7 +5137,7 @@ DigiDollarSendWidget QPushButton#useAvailableBalanceButton:pressed {
 
 /* Paste address button - tool button styling */
 DigiDollarSendWidget QToolButton {
-    background-color: #ffffff;
+    background-color: #147a42;
     color: #123f2b;
     border: 2px solid #123f2b;
     border-left: none;
@@ -5148,11 +5148,11 @@ DigiDollarSendWidget QToolButton {
 }
 
 DigiDollarSendWidget QToolButton:hover {
-    background-color: #e6f7ec;
+    background-color: #198e4e;
 }
 
 DigiDollarSendWidget QToolButton:pressed {
-    background-color: #d7f0e0;
+    background-color: #0e5a30;
 }
 
 /* ============================= */
@@ -6225,8 +6225,6 @@ DigiDollarReceiveWidget QPushButton#showRequestButton:hover,
 DigiDollarReceiveWidget QPushButton#editRequestButton:hover,
 DigiDollarReceiveWidget QPushButton#removeRequestButton:hover,
 DigiDollarSendWidget QPushButton#coinControlButton:hover,
-DigiDollarSendWidget QPushButton#sendButton:hover,
-DigiDollarSendWidget QPushButton#clearButton:hover,
 DigiDollarMintWidget QPushButton#mintButton:hover,
 DigiDollarMintWidget QPushButton#clearButton:hover,
 DigiDollarRedeemWidget QPushButton#coinControlButton:hover,

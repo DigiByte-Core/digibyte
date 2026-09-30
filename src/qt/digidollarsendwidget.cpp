@@ -29,6 +29,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPainter>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -221,17 +222,26 @@ void DigiDollarSendWidget::setupAddressSection()
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     m_addressEdit->setFont(monospaceFont);
 
+    // White icons remain readable on the green buttons in both themes.
+    const auto buttonIcon = [](const QString& path) {
+        QPixmap pixmap = QIcon(path).pixmap(22, 22);
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), Qt::white);
+        painter.end();
+        return QIcon(pixmap);
+    };
     m_pasteAddressButton = new QToolButton(this);
     m_pasteAddressButton->setToolTip(tr("Paste address from clipboard (Alt+P)"));
     m_pasteAddressButton->setIconSize(QSize(22, 22));
     m_pasteAddressButton->setShortcut(QKeySequence("Alt+P"));
-    m_pasteAddressButton->setIcon(m_platformStyle->SingleColorIcon(":/icons/editpaste"));
+    m_pasteAddressButton->setIcon(buttonIcon(":/icons/editpaste"));
 
     m_addressBookButton = new QToolButton(this);
     m_addressBookButton->setToolTip(tr("Choose from address book (Alt+A)"));
     m_addressBookButton->setIconSize(QSize(22, 22));
     m_addressBookButton->setShortcut(QKeySequence("Alt+A"));
-    m_addressBookButton->setIcon(m_platformStyle->SingleColorIcon(":/icons/address-book"));
+    m_addressBookButton->setIcon(buttonIcon(":/icons/address-book"));
 
     addressInputLayout->addWidget(m_addressEdit);
     addressInputLayout->addWidget(m_addressBookButton);
