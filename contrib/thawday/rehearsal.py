@@ -392,8 +392,18 @@ class Lab:
                 self.note("Candidate price is ready", {"price_micro_usd": price, "signed_height": signed["height"],
                           "signers": signed["signers"], "miner_started_at": self.miner_started_at, "views": views})
                 return
-            if ceiling is None or self.nodes[0].rpc("getblockcount") < ceiling:
-                self.mine(1, ceiling=ceiling)
+            if ceiling is not None:
+                check(height < ceiling, f"Reached the height limit {ceiling} without a signed candidate quote")
+                if height + 1 == ceiling and height // 40 == (height + 1) // 40:
+                    # Keep the last block available until the signing round
+                    # finishes. An already-mined empty block cannot gain a bundle.
+                    # At an epoch boundary, this RPC still describes the old
+                    # round, so let the boundary block carry the new bundle.
+                    session = self.nodes[0].rpc("getdigidollardeploymentinfo")["musig2_session"]
+                    if session["state"] != "complete" or session["epoch"] != (height + 1) // 40:
+                        time.sleep(3)
+                        continue
+            self.mine(1, ceiling=ceiling)
             time.sleep(3)
         raise Failure(f"No signed candidate quote at {price} micro-USD before the deadline")
 
