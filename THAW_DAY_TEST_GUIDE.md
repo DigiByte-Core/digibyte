@@ -9,7 +9,7 @@ boundary while mint, send, receive, redeem, and wallet recovery still work.
 - Local price responses pass through real parsers, signing, bundles, and validation.
 - The lab activates Thaw Day at 5,000; the release's public heights stay unchanged.
 - Windows and the local price server stay open by default for inspection.
-- Execution results are PENDING in the table below; this guide claims no full-run PASS.
+- The execution section separates earlier RC2 results from final-release testing.
 
 ## How the test works
 
@@ -70,7 +70,7 @@ dependencies, and enough free memory/disk for the small nodes. Process checks us
 Linux `/proc`. Run these commands from the release checkout:
 
 ```sh
-cd /home/jared/Code/digibyte
+cd /path/to/digibyte
 ```
 
 Build the separate client only if its worktree does not already exist:
@@ -83,9 +83,22 @@ Build the separate client only if its worktree does not already exist:
 
 This creates a **fresh** `builds/thawday-client`, applies
 `contrib/thawday/client.patch`, and builds daemon, CLI, and Qt with `make -j8`.
-It refuses to overwrite an existing worktree. The delivered workspace may already
-contain the build; use it in that case. The build does not run the full test suites.
+It refuses to overwrite an existing worktree. Before using an existing build,
+check that `base_commit` in `builds/thawday-client/THAWDAY_BUILD.json` is the
+exact commit you intend to test. The runner checks the build against its own
+record; it does not require that record to match the current release checkout.
+After the run, verify the same commit in its `run.json`. Keep the source commit
+and hashes of the test helpers with the evidence. The build does not run the full test suites.
 Keep one heavy job at a time and leave existing builds/reindexes alone.
+
+Check the script's price-wait logic without starting any nodes:
+
+```sh
+python3 contrib/thawday/test_rehearsal.py
+```
+
+These seven small checks cover the last allowed block, changing oracle rounds,
+wrong prices, and a completed quote. They do not replace the full rehearsal.
 
 Start a new run:
 
@@ -97,7 +110,7 @@ The default is a new timestamp folder under `builds/thawday-runs/`. Save the exa
 path printed by the script. It refuses to reuse an existing folder. To choose one:
 
 ```sh
-./thawDay.sh run --run-dir /home/jared/Code/digibyte/builds/thawday-runs/my-new-run
+./thawDay.sh run --run-dir builds/thawday-runs/my-new-run
 ```
 
 The script checks its client build record, patch, source, and binary hashes before
@@ -115,8 +128,8 @@ after a failed check. To close only this run's processes automatically, use:
 From another terminal, inspect or stop the run using its actual path:
 
 ```sh
-./thawDay.sh status --run-dir /home/jared/Code/digibyte/builds/thawday-runs/20260914-143000
-./thawDay.sh stop --run-dir /home/jared/Code/digibyte/builds/thawday-runs/20260914-143000
+./thawDay.sh status --run-dir builds/thawday-runs/20260914-143000
+./thawDay.sh stop --run-dir builds/thawday-runs/20260914-143000
 ```
 
 Replace the example timestamp. `status` prints saved `run.json`; it does not run
@@ -181,8 +194,19 @@ The price starts at $0.030000 per DGB, then rises to $0.045000. Prices are store
 in micro-USD, one millionth of a dollar: 30,000 and 45,000. The script checks that
 a fresh signed quote still hits the old freeze, then mines signed ancestor samples.
 At tip H-2 the next block is still pre-H. At tip H-1 the next block is H and uses
-new rules. At H the script checks the 15-sample reference and cleared old freeze.
-The after-H core group must then actually confirm its eligible mints.
+new rules. At H the script checks that activation is selected. It then waits
+for a fresh signed quote before checking the 15-sample reference and cleared
+old freeze. That wait can advance the chain beyond H. The after-H core group
+must then actually confirm its eligible mints. Exact-boundary transaction
+checks also run in the separate `digidollar_thawday_reference_reorg.py` test.
+
+When a price wait has a height limit, the script keeps the last block available
+until that round finishes signing. At an oracle-round boundary, the status RPC
+still describes the old round, so the script allows the new boundary block.
+Signing status alone never proves success: the mined block must carry the
+expected signed price and all test nodes must accept it. If the height limit is
+already exhausted without that proof, the script fails instead of waiting for
+an already-mined block to change.
 
 A reorg replaces part of the active chain with another branch. The boundary test
 rewinds a follower below H, restarts it, and reconnects the original blocks. It checks
@@ -191,6 +215,9 @@ a short replacement branch with more work and submits its real block bytes to
 the other nodes through normal validation. Nodes must choose the replacement
 branch and agree on accounting. This short reorg does **not** replace the older
 price-sample ancestors and does not prove deep sample-changing reorg behavior.
+It runs before the after-H transaction group, so it also does not undo that
+group's mints, transfers, or redemptions. The separate Thaw Day functional
+tests cover ancestor-changing reorgs and undoing transaction accounting.
 
 With the reference held at 45,000 micro-USD, the price checks use 54,000 and
 36,000: exactly 20% above and below. Mints must reject at both edges, while an
@@ -204,14 +231,26 @@ starting nodes have the DD stats index on/off. This is not every index/pruning m
 
 ## Execution status
 
-Run `rc2-rehearsal-09` completed the whole integrated harness with no failed
-check. It used the test client built from the v9.26.6rc2 commit `e3ad0a4522`
-(daemon sha256 `16e127189d75`), reached final height **5,658** with tip hash
-`0000073bc7d85ac72c80328c6e17ba26aabd9cc2d4f907c94cba6c4113e5856c`, and recorded
-143 checks with zero failures. The evidence is under
-`builds/thawday-runs/rc2-rehearsal-09/`. A pass here is the lab exercise only; it
-does not replace the separate audit, public testnet activation and observation,
-the older-binary comparison, or the full mainnet history reindex.
+The final-release run `thaw-final-03` passed on October 1, 2026. It used source
+commit `86c81769024a47f332228700a1ff7c9203c8a1ef` with the recorded lab patch.
+It finished at height **5,686**, with all nine nodes on block
+`0000040c0d0dcbd4be1b05dee7c9ea36ad2204d99a9b64382abb921b9b789e6b`.
+The run recorded **144 checkpoints**, no failed check, and a successful process
+exit. All private test processes then stopped normally.
+
+The evidence is in `builds/final-verification/thaw-final-03/`. The adjacent
+`thaw-final-03-build.json` and `thaw-final-03-helpers.json` record the client and
+helper hashes. The production source matches the separately tested source at
+`a96e6b10b6`; the later commit changes only the rehearsal wait and its tests.
+
+The previous final run, `thaw-final-02`, stopped because the script consumed its
+last permitted block before a signed price was ready. Its logs are preserved.
+The corrected script passed seven regression checks and independent review
+before this fresh full run. A failed or incomplete run is not counted as a pass.
+
+The table below describes the completed final-release run. It does not replace
+public-network observation, an older-binary comparison, a full mainnet history
+reindex, or native Windows/macOS package checks.
 
 | Check | Before H | At/after H |
 | --- | --- | --- |
@@ -227,6 +266,15 @@ the older-binary comparison, or the full mainnet history reindex.
 | Both exact 20% mint rejections; send/redeem stay usable | Not a pre-H C1 rule | PASS |
 | Actual mints just inside both price edges | Not a pre-H C1 rule | PASS |
 | Lab reindex and fresh sync to the same hash | Separate end-of-run check | PASS |
+
+For historical comparison, run `rc2-rehearsal-09` completed the whole integrated harness with no failed
+check. It used the test client built from the v9.26.6rc2 commit `e3ad0a4522`
+(daemon sha256 `16e127189d75`), reached final height **5,658** with tip hash
+`0000073bc7d85ac72c80328c6e17ba26aabd9cc2d4f907c94cba6c4113e5856c`, and recorded
+143 recorded checkpoints with zero failures. The evidence is under
+`builds/thawday-runs/rc2-rehearsal-09/`. A pass here is the lab exercise only; it
+does not replace the separate audit, public testnet activation and observation,
+the older-binary comparison, or the full mainnet history reindex.
 
 ## Qt inspection, evidence, and limits
 

@@ -1,5 +1,163 @@
 # DigiByte Core v9.26.6 release notes
 
+## Final v9.26.6 release
+
+v9.26.6 includes RC1, RC2 and the final wallet improvements listed below.
+The final changes improve minting from wallets with many small coins, explain
+send errors, and make the wallet easier to read. **They do not change RC2's
+consensus rules, oracle requirements or Thaw Day heights.** Consensus means
+the rules nodes use to agree on valid blocks.
+
+**All full-node and mining operators must upgrade before mainnet block
+24,490,000, including operators who do not use DigiDollar.** Older software
+can disagree about valid blocks after that height. Testnet26 activated Thaw
+Day at block **432,100**. Mainnet activation is controlled by its block
+height, not a calendar date.
+
+### What to do
+
+1. Back up your wallets and configuration. Keep the backups private.
+2. Download the final release for your system and verify its signed checksums.
+3. Stop the old wallet or daemon normally, replace the program, and restart it.
+4. Check that the version is v9.26.6 and that the node finishes synchronizing.
+
+A normal upgrade from a working RC2 node does not require a reindex. Keep the
+required DigiDollar block history. If the old node stopped on a rejected block,
+use the reviewed recovery instructions for that failure.
+
+Installing this release enables its wallet and display improvements immediately.
+The scheduled mainnet rule changes begin at block 24,490,000. Minting still
+requires an eligible price, sufficient collateral and the other existing checks.
+
+### Changes added after RC2
+
+Each entry is one change group. Supporting tests count with their fix.
+The version number, wallet version image and release-note edits are not extra fixes.
+
+| Release stage | Change groups added |
+| --- | ---: |
+| RC1 | 83 |
+| RC2 | 24 |
+| Final release | 18 |
+| **Total for v9.26.6** | **125** |
+
+#### Minting and sending
+
+1. **Change:** Large mints wait for coin-merge transactions to confirm before building the mint, and show the merge transaction IDs. Repeated requests reuse that pending status, including after restart.\
+   **Why:** Spending several large, unconfirmed merges at once can exceed the existing transaction-chain limit. The wallet must explain the wait without recording a failed mint or starting unnecessary extra merges.
+
+2. **Change:** The Qt mint form respects manually locked DGB coins and uses the wallet's normal spendable-coin checks.\
+   **Why:** Coins the user has locked must stay out of automatic collateral selection.
+
+3. **Change:** DigiDollar sends report the actual coin-selection error and check the selected inputs before asking for confirmation.\
+   **Why:** Change below $1 needs a different amount or input selection. Waiting for confirmations will not fix that error. The $1 output minimum is unchanged.
+
+4. **Change:** Oversized DGB sends explain that too many coins are needed and suggest a smaller send or combining small coins first.\
+   **Why:** The existing transaction-size limit remains necessary, but users need a useful next step.
+
+5. **Change:** A DigiDollar send that lacks fee funds shows the estimated fee in DGB.\
+   **Why:** Users should not have to convert an internal unit or assume every send costs the same amount.
+
+#### Wallet screens and CSV exports
+
+6. **Change:** The Send DigiDollar address field says "Enter a DigiDollar address."\
+   **Why:** Example text should not look like an address already entered by the user.
+
+7. **Change:** DigiDollar paste and address-book icons have readable contrast, and Send and Clear buttons visibly respond to hovering and clicking.\
+   **Why:** The controls should be recognizable and show when they are being used in both themes.
+
+8. **Change:** DigiDollar transaction rows, filters and dropdowns use the DigiDollar green theme consistently.\
+   **Why:** Mixed background and text colours made the page harder to read.
+
+9. **Change:** Main Transactions CSV dates include hours, minutes and seconds without an unnecessary ".000" ending.\
+   **Why:** Exports should contain clear, consistent dates. Dates shown inside the wallet still follow the computer's regional settings.
+
+10. **Change:** The main Transactions page exports DigiDollar amounts as plain decimal numbers without a currency suffix.\
+    **Why:** Spreadsheets need numeric cells for calculations. This completes the CSV amount repair started in RC2.
+
+11. **Change:** Transaction exports suggest a dated filename and make the disabled Save button readable.\
+    **Why:** Users should have a useful starting filename and understand when saving is unavailable.
+
+12. **Change:** New folder names remain readable while editing them in the dark-theme export dialog.\
+    **Why:** The old styling could put white text on a white background.
+
+13. **Change:** The About window gives its text enough room, keeps links readable, and points to the current DigiByte website and source repository.\
+    **Why:** Users need to find their version and the project's current information without a cramped text column.
+
+#### RPC, logging and test tools
+
+14. **Change:** `listdigidollaraddresses` returns saved labels, transaction counts and last-used times from the wallet.\
+    **Why:** These fields previously returned empty or zero values. An unknown address creation date remains empty rather than being guessed.
+
+15. **Change:** `validateaddress` help and wallet integration instructions direct DigiDollar users to `validateddaddress`.\
+    **Why:** DigiByte and DigiDollar use different address formats. The existing DigiDollar command checks DD, TD and RD addresses without changing ordinary DigiByte address validation.
+
+16. **Change:** Expected nonmatching DigiDollar key checks appear only when DigiDollar debug logging is enabled.\
+    **Why:** Routine wallet scanning should not fill the normal log with misleading messages.
+
+17. **Change:** The isolated Thaw Day test builds the current release candidate by default and also accepts an exact commit or tag.\
+    **Why:** Each rehearsal must exercise the intended candidate rather than an older, fixed commit.
+
+18. **Change:** The Thaw Day test leaves its last permitted block available while oracle signatures finish.\
+    **Why:** A block mined without a price bundle cannot gain one later. The test must wait before mining that block and still check the actual signed bundle afterward.
+
+### Integration notes and limits
+
+When a mint needs coin merging, `mintdigidollar` can return
+`status: "consolidation_pending"` and `consolidation_txids`. This means that
+**no DigiDollar has been minted yet**. Wait for those transactions to confirm,
+then retry. Check any accompanying `error` if a later merge failed. The normal
+successful mint response is unchanged. Coin merges are ordinary DGB
+transactions and pay the normal network fees.
+
+`listdigidollaraddresses` counts distinct DigiDollar transactions known to the
+wallet. `last_used` is the latest wallet transaction time, in UTC. These fields
+describe this wallet's records, not a complete public address history.
+
+This release does not add a general "combine coins" button or DigiDollar
+watch-only import support. An oracle pause remains a restriction, not permission
+to bypass missing signatures or price checks. A reported Windows-only blank
+progress popup was not reproduced in the Linux checks; no speculative change
+was made for it.
+
+### Final verification
+
+The Linux test runs checked the production source at `a96e6b10b6`. The later
+rehearsal correction changes only the test script and its regression tests;
+the production source is identical.
+
+| Check | Result |
+| --- | --- |
+| Core unit tests | 3,759 cases passed; two existing cases have partial-fixture warnings |
+| Extended functional tests | 405 passed, 17 skipped, none failed |
+| Qt tests | All 11 suites passed: 178 reported rows, including setup and cleanup |
+| Fuzz tests | All 256 targets completed with memory and undefined-behavior checks |
+| Cryptography and supporting library tests | All six test programs passed |
+| Utility and RPC authentication tests | Passed |
+| Rehearsal script regression tests | All seven passed |
+| Full private Thaw Day rehearsal | Passed before and after activation, including price limits, recovery, reindex and fresh sync |
+
+The functional skips require older binaries, tracing support, special network
+interfaces, or unsupported Signet features. Fuzz checks replayed the saved
+test inputs; the two targets without saved inputs each generated new inputs
+for ten seconds. This was a bounded test run, not an exhaustive search.
+
+Linux visual checks covered all seven DigiDollar tabs, the changed controls
+and export dialogs, and the About window in light and dark themes. Native
+Windows and macOS checks are still needed on their release packages.
+
+The private rehearsal used commit `86c8176902` with the isolated lab patch.
+All nine nodes finished on the same block at height 5,686. The lab changes
+its own network settings and activation height; it does not replace a full
+mainnet history reindex or native release-package checks.
+
+The RC1 and RC2 results below describe those earlier candidates. Release
+packages must be built from the reviewed final tag and checked before
+publication. These source tests do not verify packages that have not yet
+been built.
+
+---
+
 ## RC2 — second release candidate
 
 RC2 adds the changes below to RC1. The code change list covers source through
@@ -30,7 +188,7 @@ validation also applies when checking blocks below Thaw Day.
 | --- | ---: | ---: | ---: | ---: |
 | RC1 | 53 | 23 | 7 | **83** |
 | RC2 | 12 | 9 | 3 | **24** |
-| Combined release | 65 | 32 | 10 | **107** |
+| RC1 + RC2 subtotal | 65 | 32 | 10 | **107** |
 
 Each numbered entry counts one distinct change group. Related repairs are
 grouped, and a repair's supporting tests are included with that repair. A
