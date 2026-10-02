@@ -134,7 +134,14 @@ class DigiDollarThawDayNodeMatrixTest(DigiByteTestFramework):
             self.mine(blocks)
 
     def mine(self, count):
-        return self.generate(self.nodes[CONTINUOUS], count, sync_fun=self.no_op)
+        # Finish block downloads before tick() advances the mock clock. A
+        # clock jump can otherwise time out a follower that is still syncing.
+        # The fresh-sync node must stay at genesis until the matrix check.
+        return self.generate(
+            self.nodes[CONTINUOUS], count,
+            sync_fun=lambda: self.sync_blocks(
+                [self.nodes[i] for i in (CONTINUOUS, RESTARTED, REINDEXED, PRUNED)]),
+        )
 
     def mine_to(self, height):
         count = height - self.nodes[CONTINUOUS].getblockcount()
