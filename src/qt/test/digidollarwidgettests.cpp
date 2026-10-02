@@ -4401,6 +4401,118 @@ void DigiDollarWidgetTests::ddReceiveHidesCrossNetworkRequests()
     QCOMPARE(table->item(0, 3)->data(Qt::UserRole).toString(), currentAddress);
 }
 
+void DigiDollarWidgetTests::ddAddressListIncludesUnusedQtAddresses()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    wallet_loader->registerRpcs();
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    WalletContext& context = *m_node.walletLoader().context();
+    AddWallet(context, wallet);
+    struct RemoveTestWallet {
+        WalletContext& context;
+        const std::shared_ptr<wallet::CWallet>& wallet;
+        ~RemoveTestWallet() { RemoveWallet(context, wallet, std::nullopt); }
+    } remove_wallet{context, wallet};
+
+    const QString label = QStringLiteral("Unused Qt receive address");
+    const QString dd_address = mini_gui.walletModel->getNewDigiDollarAddress(label);
+    QVERIFY(!dd_address.isEmpty());
+
+    // Ordinary Taproot receive addresses and foreign DD contacts must not
+    // become wallet DD addresses just because they are in the address book.
+    const auto dgb_destination = mini_gui.walletModel->wallet().getNewDestination(
+        OutputType::BECH32M, "Ordinary DGB receive address");
+    QVERIFY(dgb_destination.has_value());
+    CKey foreign_key;
+    foreign_key.MakeNewKey(true);
+    const CTxDestination foreign_destination = WitnessV1Taproot(XOnlyPubKey(foreign_key.GetPubKey()));
+    QVERIFY(mini_gui.walletModel->wallet().setAddressBook(
+        foreign_destination, "Foreign DD contact", wallet::AddressPurpose::DIGIDOLLAR));
+
+    UniValue addresses;
+    try {
+        const UniValue default_params(UniValue::VARR);
+        QVERIFY(mini_gui.walletModel->executeRpc("listdigidollaraddresses", default_params).empty());
+
+        UniValue include_empty(UniValue::VARR);
+        include_empty.push_back(false);
+        include_empty.push_back(0);
+        include_empty.push_back(true);
+        addresses = mini_gui.walletModel->executeRpc("listdigidollaraddresses", include_empty);
+    } catch (const UniValue& error) {
+        QFAIL(error.write().c_str());
+    }
+    QCOMPARE(addresses.size(), size_t{1});
+    QCOMPARE(QString::fromStdString(addresses[0]["address"].get_str()), dd_address);
+    QCOMPARE(QString::fromStdString(addresses[0]["label"].get_str()), label);
+    QCOMPARE(addresses[0]["balance"].getInt<int64_t>(), int64_t{0});
+    QCOMPARE(addresses[0]["txcount"].getInt<int>(), 0);
+    QVERIFY(addresses[0]["ismine"].get_bool());
+    QVERIFY(!addresses[0]["iswatchonly"].get_bool());
+    QVERIFY(addresses[0]["last_used"].get_str().empty());
+}
+
+void DigiDollarWidgetTests::ddAddressListDoesNotClaimLegacyWatchOnlyAddress()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    wallet_loader->registerRpcs();
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const auto wallet = std::make_shared<wallet::CWallet>(
+        test.m_node.chain.get(), "legacy-watch", CreateMockableWalletDatabase());
+    wallet->LoadWallet();
+    wallet->SetupLegacyScriptPubKeyMan();
+    const auto* tip = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip());
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    }
+    wallet->EnsureDDWallet();
+    SyncUpWallet(wallet, m_node);
+
+    CKey foreign_key;
+    foreign_key.MakeNewKey(true);
+    const CTxDestination destination = WitnessV1Taproot(XOnlyPubKey(foreign_key.GetPubKey()));
+    auto* manager = wallet->GetLegacyScriptPubKeyMan();
+    QVERIFY(manager);
+    {
+        LOCK2(wallet->cs_wallet, manager->cs_KeyStore);
+        QVERIFY(manager->AddWatchOnly(GetScriptForDestination(destination), 0));
+        QVERIFY(wallet->SetAddressBook(destination, "Watched DD contact", wallet::AddressPurpose::DIGIDOLLAR));
+        QCOMPARE(wallet->IsMine(destination), wallet::ISMINE_WATCH_ONLY);
+        QVERIFY(!wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS));
+    }
+
+    WalletContext& context = *wallet_loader->context();
+    AddWallet(context, wallet);
+    struct RemoveTestWallet {
+        WalletContext& context;
+        const std::shared_ptr<wallet::CWallet>& wallet;
+        ~RemoveTestWallet() { RemoveWallet(context, wallet, std::nullopt); }
+    } remove_wallet{context, wallet};
+    UniValue params(UniValue::VARR);
+    params.push_back(false);
+    params.push_back(0);
+    params.push_back(true);
+    try {
+        QVERIFY(m_node.executeRpc("listdigidollaraddresses", params, "").empty());
+    } catch (const UniValue& error) {
+        QFAIL(error.write().c_str());
+    }
+}
+
 void DigiDollarWidgetTests::ddReceiveEditPersistsAndKeepsDgbSeparated()
 {
 #ifdef Q_OS_MACOS

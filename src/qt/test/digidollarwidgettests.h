@@ -44,6 +44,8 @@ private Q_SLOTS:
     void positionsWidgetTests();
     void positionsWidgetHiddenDoesNotPollWallet();
     void addressBookTests();
+    void ddAddressListIncludesUnusedQtAddresses();
+    void ddAddressListDoesNotClaimLegacyWatchOnlyAddress();
     void transactionsWidgetTests();
     void transactionsWidgetExportTests();
     void datesFollowComputerLocale();

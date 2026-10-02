@@ -3818,6 +3818,18 @@ RPCHelpMan listdigidollaraddresses()
             for (const std::string& addr : dd_wallet->GetKnownDDAddresses()) {
                 addressBalances.try_emplace(addr, 0);
             }
+            if (includeEmpty) {
+                // Qt records DD receive addresses in the address book. Include
+                // those owned destinations without exposing unused keypool keys
+                // or treating foreign contacts as wallet addresses.
+                pwallet->ForEachAddrBookEntry([&](const CTxDestination& dest, const std::string&,
+                                                 bool is_change, const std::optional<wallet::AddressPurpose>& purpose) {
+                    if (is_change || purpose != wallet::AddressPurpose::DIGIDOLLAR ||
+                        !(pwallet->IsMine(dest) & wallet::ISMINE_SPENDABLE)) return;
+                    const std::string addr = EncodeDigiDollarAddress(dest);
+                    if (!addr.empty()) addressBalances.try_emplace(addr, 0);
+                });
+            }
 
             struct AddressActivity {
                 int tx_count{0};
