@@ -52,6 +52,7 @@ EOF
 ${DIGIBYTED} --help \
     | sed '1,/Print this help message and exit/d' \
     | sed -E 's/^[[:space:]]{2}\-/#/' \
+    | sed -E 's/^[[:space:]]{2}([^[:space:]])/# \1/' \
     | sed -E 's/^[[:space:]]{7}/# /' \
     | sed -E '/[=[:space:]]/!s/#.*$/&=1/' \
     | awk '/^#[a-z]/{x=$0;next}{if (NF==0) print x"\n",x="";else print}' \

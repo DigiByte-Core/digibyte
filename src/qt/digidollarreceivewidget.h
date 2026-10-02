@@ -15,6 +15,7 @@ class QRImageWidget;
 class RecentRequestEntry;
 
 QT_BEGIN_NAMESPACE
+class QDateTime;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -109,7 +110,7 @@ private:
     void clearFields();
     void generateNewAddress();
     void populateRecentRequests();
-    void addRequestToTable(const QString& date, const QString& label,
+    void addRequestToTable(const QDateTime& date, const QString& label,
                           const QString& amount, const QString& address, qint64 id = 0);
 
     QString formatDDAmount(double amount) const;

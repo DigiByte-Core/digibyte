@@ -105,6 +105,9 @@ public:
      */
     static int ApplyDCA(int baseRatio, int systemHealth);
 
+    /** Apply the same integer formula to an already verified candidate health. */
+    static int ApplyDCAForHealth(int baseRatio, int systemHealth);
+
     /**
      * Get current health tier information.
      *

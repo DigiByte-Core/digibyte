@@ -6,6 +6,7 @@
 
 #include <key.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <uint256.h>
 #include <util/strencodings.h>
 #include <wallet/digidollarwallet.h>
@@ -13,33 +14,14 @@
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
 
-#include <fstream>
-#include <iterator>
 #include <string>
-#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_wallet_hd_tests, wallet::WalletTestingSetup)
 
-namespace {
-
-std::string ReadRepoFile(const std::vector<std::string>& candidates)
-{
-    for (const std::string& path : candidates) {
-        std::ifstream in(path);
-        if (in) {
-            return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-    }
-    BOOST_FAIL("could not read repository source file for Qt/RPC wallet-path test");
-    return {};
-}
-
-} // namespace
-
 BOOST_AUTO_TEST_CASE(wave1_qt_and_rpc_mint_paths_use_hd_owner_derivation)
 {
-    const std::string qt_source = ReadRepoFile({"src/qt/walletmodel.cpp", "qt/walletmodel.cpp"});
-    const std::string rpc_source = ReadRepoFile({"src/rpc/digidollar.cpp", "rpc/digidollar.cpp"});
+    const std::string qt_source = ReadRepositoryFile("src/qt/walletmodel.cpp");
+    const std::string rpc_source = ReadRepositoryFile("src/rpc/digidollar.cpp");
 
     BOOST_CHECK_NE(qt_source.find("GetHDKeyForDigiDollar(\"dd-owner\")"), std::string::npos);
     BOOST_CHECK_NE(rpc_source.find("GetHDKeyForDigiDollar(\"dd-owner\")"), std::string::npos);
@@ -47,7 +29,13 @@ BOOST_AUTO_TEST_CASE(wave1_qt_and_rpc_mint_paths_use_hd_owner_derivation)
 
 BOOST_AUTO_TEST_CASE(wave1_qt_persists_owner_key_before_broadcast)
 {
-    const std::string qt_source = ReadRepoFile({"src/qt/walletmodel.cpp", "qt/walletmodel.cpp"});
+    // The mint in the wallet window has to write the owner key and the
+    // position record before it sends the transaction. RecordPendingMint
+    // writes both and reports which one failed; what this check guards is
+    // that it is still called before the send. The behaviour itself is tested
+    // in the Qt suite, which can run a real mint
+    // (qt/test/digidollarmintrecordtests.cpp).
+    const std::string qt_source = ReadRepositoryFile("src/qt/walletmodel.cpp");
 
     const size_t mint_pos = qt_source.find("WalletModel::mintDigiDollar");
     BOOST_REQUIRE_NE(mint_pos, std::string::npos);
@@ -57,12 +45,12 @@ BOOST_AUTO_TEST_CASE(wave1_qt_persists_owner_key_before_broadcast)
         : qt_source.substr(mint_pos, next_method_pos - mint_pos);
 
     const size_t commit_pos = mint_source.find("CommitTransaction(txRef");
-    const size_t store_pos = mint_source.find("StoreOwnerKey(positionId, ownerKey)");
+    const size_t store_pos = mint_source.find("RecordPendingMint(");
 
     BOOST_REQUIRE_NE(commit_pos, std::string::npos);
     BOOST_REQUIRE_NE(store_pos, std::string::npos);
     BOOST_CHECK_MESSAGE(store_pos < commit_pos,
-        "Qt mint path stores DD owner key after broadcast; StoreOwnerKey offset="
+        "Qt mint path saves the DD owner key and position after broadcast; RecordPendingMint offset="
         << store_pos << " commitTransaction offset=" << commit_pos);
 }
 
@@ -84,7 +72,7 @@ BOOST_AUTO_TEST_CASE(wave1_non_hd_wallet_fails_clearly_for_dd_owner_key)
 
 BOOST_AUTO_TEST_CASE(wave1_legacy_wallet_dd_owner_derivation_is_unreachable)
 {
-    const std::string wallet_source = ReadRepoFile({"src/wallet/wallet.cpp", "wallet/wallet.cpp"});
+    const std::string wallet_source = ReadRepositoryFile("src/wallet/wallet.cpp");
     const size_t helper_pos = wallet_source.find("CKey CWallet::GetHDKeyForDigiDollar");
     BOOST_REQUIRE_NE(helper_pos, std::string::npos);
     const size_t helper_end = wallet_source.find("\n}", helper_pos);
@@ -122,6 +110,32 @@ BOOST_AUTO_TEST_CASE(wave1_persisted_qt_minted_owner_key_recovers_after_wallet_r
     CKey recovered_key;
     BOOST_REQUIRE(restored_dd_wallet->GetOwnerKey(position_id, recovered_key));
     BOOST_CHECK(recovered_key.GetPubKey() == owner_key.GetPubKey());
+}
+
+BOOST_AUTO_TEST_CASE(dd_address_key_is_not_cached_when_the_database_refuses_it)
+{
+    // getdigidollaraddress may only hand out an address whose key reached the
+    // wallet file. A key kept in memory after a refused write looks usable
+    // until the next restart, and anything sent to that address would then be
+    // unspendable, so the write has to report the failure and leave nothing
+    // behind.
+    m_wallet.EnsureDDWallet();
+    DigiDollarWallet* dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet != nullptr);
+
+    CKey address_key;
+    address_key.MakeNewKey(true);
+    const XOnlyPubKey output_key(address_key.GetPubKey());
+
+    wallet::GetMockableDatabase(m_wallet).m_pass = false;
+    BOOST_CHECK(!dd_wallet->StoreAddressKey(output_key, address_key));
+    CKey reloaded;
+    BOOST_CHECK(!dd_wallet->GetAddressKey(output_key, reloaded));
+
+    wallet::GetMockableDatabase(m_wallet).m_pass = true;
+    BOOST_CHECK(dd_wallet->StoreAddressKey(output_key, address_key));
+    BOOST_REQUIRE(dd_wallet->GetAddressKey(output_key, reloaded));
+    BOOST_CHECK(reloaded.GetPubKey() == address_key.GetPubKey());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

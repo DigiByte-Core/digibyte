@@ -57,6 +57,9 @@ class DigiDollarRedeemTest(DigiByteTestFramework):
         self.test_collateral_return_calculations()
         self.test_redemption_validation()
         self.test_redemption_edge_cases()
+        # Last, because it mines several hundred blocks to mature its own
+        # position and every case above expects its positions still locked.
+        self.test_fragmented_fee_inputs_redemption()
 
     def publish_musig2_quote(self, node, price_micro_usd=None):
         """Publish a fresh regtest MuSig2 oracle quote for this node's current epoch."""
@@ -163,6 +166,122 @@ class DigiDollarRedeemTest(DigiByteTestFramework):
         # The change must still be accounted as spendable DD after confirmation.
         balance = self.nodes[0].getdigidollarbalance()
         assert_equal(balance["total"], 125000)
+
+    def test_fragmented_fee_inputs_redemption(self):
+        """A wallet whose DGB sits in many small coins must still be able to redeem.
+
+        Redemption used to pick its DGB fee coins once, against a fixed
+        400-byte size guess (0.21 DGB with a 50% margin), and then build the
+        real transaction. With only 0.05 DGB coins that single selection
+        returns five coins (0.25 DGB), but a transaction with seven inputs
+        costs more than that, so the build failed with "Insufficient fee
+        inputs for DD redemption fee" and never tried again. The fee coins
+        must now be chosen from the size of the transaction they produce, so
+        the redemption goes through and spends more of the small coins than
+        the old one-shot selection would have.
+
+        The second half of this test covers a different risk in the same
+        transaction: when the caller names a DGB address for the returned
+        collateral, only the collateral may go there. The DGB left over after
+        the fee must stay in the redeeming wallet.
+        """
+        self.log.info("Testing redemption from a wallet whose DGB is fragmented into small coins...")
+        node = self.nodes[2]
+        funder = self.nodes[0]
+        node.createwallet(wallet_name="fragmented")
+        wallet = node.get_wallet_rpc("fragmented")
+
+        # One large coin to lock as collateral, then the mint.
+        funder.sendtoaddress(wallet.getnewaddress(), 200000)
+        self.generate(funder, 1)
+        self.publish_musig2_quote(node)
+        mint_cents = 50000  # $500, tier 0
+        position_id = wallet.mintdigidollar(mint_cents, 0)["position_id"]
+        self.generate(node, 1)
+        self.publish_musig2_quote(node)
+        # A second position, redeemed at the end to a DGB address this wallet
+        # does not own.
+        away_position_id = wallet.mintdigidollar(mint_cents, 0)["position_id"]
+        self.generate(node, 1)
+
+        # Now the DGB the wallet can pay fees with: forty coins of 0.05 DGB
+        # (plus the large mint change, which smallest-first selection reaches
+        # only after every small coin). Funded after the mint so the mint
+        # cannot sweep them.
+        fragment_value = Decimal("0.05")
+        fragments = {wallet.getnewaddress(): fragment_value for _ in range(40)}
+        funder.sendmany("", fragments)
+        self.generate(funder, 1)
+        fragment_outpoints = {
+            (utxo["txid"], utxo["vout"])
+            for utxo in wallet.listunspent()
+            if Decimal(utxo["amount"]) == fragment_value
+        }
+        assert_equal(len(fragment_outpoints), 40)
+
+        # Mature the tier-0 lock (240 blocks) past the 100-block mint window.
+        self.generate(node, 350)
+        self.publish_musig2_quote(node)
+        info = wallet.getredemptioninfo(position_id)
+        assert info["can_redeem"], info
+
+        dgb_before = wallet.getbalance()
+        result = wallet.redeemdigidollar(position_id, mint_cents)
+        redeem_txid = result["txid"]
+        assert redeem_txid in node.getrawmempool()
+        assert_equal(result["position_id"], position_id)
+        assert result["position_closed"]
+
+        decoded = node.getrawtransaction(redeem_txid, True)
+        fee_inputs = [
+            (vin["txid"], vin["vout"]) for vin in decoded["vin"]
+            if (vin["txid"], vin["vout"]) in fragment_outpoints
+        ]
+        # Five coins is what the old fixed 0.21 DGB target selected; the fee of
+        # the transaction those five produce is above 0.25 DGB, so a working
+        # selection must have taken more of them.
+        assert_greater_than(len(fee_inputs), 5)
+        assert_greater_than_or_equal(Decimal(result["fee_paid"]), Decimal("0.1"))
+        assert_greater_than_or_equal(len(fee_inputs) * fragment_value, Decimal(result["fee_paid"]))
+        self.log.info(f"Redemption used {len(fee_inputs)} small fee coins, fee {result['fee_paid']} DGB")
+
+        self.generate(node, 1)
+        active_ids = [p["position_id"] for p in wallet.listdigidollarpositions()]
+        assert position_id not in active_ids, "Position should be closed after redemption"
+        assert_greater_than(wallet.getbalance(), dgb_before)
+        self.log.info("✓ Fragmented-wallet redemption succeeded")
+
+        # A redemption address given by the caller may belong to someone else,
+        # for example an exchange deposit address. The collateral goes there
+        # because that is what was asked for, but the DGB left over after the
+        # fee must stay in this wallet.
+        self.log.info("Testing that leftover DGB does not follow a redemption address the caller supplied...")
+        self.publish_musig2_quote(node)
+        elsewhere = funder.getnewaddress()
+        assert not wallet.getaddressinfo(elsewhere)["ismine"]
+        away = wallet.redeemdigidollar(away_position_id, mint_cents, elsewhere)
+        assert_equal(away["unlock_address"], elsewhere)
+
+        away_decoded = node.getrawtransaction(away["txid"], True)
+        to_elsewhere = [
+            out for out in away_decoded["vout"]
+            if out["scriptPubKey"].get("address") == elsewhere
+        ]
+        assert_equal(len(to_elsewhere), 1)  # the returned collateral, nothing else
+        for out in away_decoded["vout"]:
+            address = out["scriptPubKey"].get("address")
+            if address is None or address == elsewhere:
+                continue
+            if out["value"] == 0:
+                continue  # DigiDollar token outputs carry no DGB
+            assert wallet.getaddressinfo(address)["ismine"], \
+                f"DGB left over after the fee went to {address}, which this wallet does not own"
+        self.generate(node, 1)
+        self.log.info("✓ Leftover DGB stayed in the redeeming wallet")
+
+        # Leave the node with one wallet again, so a plain RPC call to it does
+        # not have to say which wallet it means.
+        node.unloadwallet("fragmented")
 
     def test_normal_redemption(self):
         """Test normal EXACT-AMOUNT redemption process."""

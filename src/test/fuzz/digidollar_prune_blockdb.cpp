@@ -476,8 +476,27 @@ FUZZ_TARGET(dd_prune_coin_gating, .init = initialize_dd_prune_gating_main)
     const bool requires_dd = DigiDollar::RequiresDigiDollarValidation(tx, ctx);
     assert(requires_dd == (DigiDollar::HasDigiDollarMarker(tx) || vault1));
 
-    // Without a coins view the vault check fails closed to "not a vault spend".
-    const DigiDollar::ValidationContext ctx_nocoins(tip_height, price, 15000, chainparams,
-                                                    nullptr, true, lookup, nullptr, 0);
-    assert(!DigiDollar::SpendsDigiDollarCollateralVault(tx, ctx_nocoins));
+    // Mainnet activates DigiDollar before Thaw Day. Missing coins keep the
+    // legacy routing below Thaw Day; from Thaw Day on they require full
+    // validation, which reports unavailable state instead of accepting them.
+    const int thaw_height = cp.nDDThawDayHeight;
+    assert(thaw_height > cp.DigiDollarHeight);
+    assert(thaw_height < std::numeric_limits<int>::max());
+    const auto check_missing_coins = [&](int candidate_height, bool must_validate) {
+        const DigiDollar::ValidationContext ctx_nocoins(candidate_height, price, 15000, chainparams,
+                                                        nullptr, true, lookup, nullptr, 0);
+        assert(DigiDollar::SpendsDigiDollarCollateralVault(tx, ctx_nocoins) == must_validate);
+        assert(DigiDollar::RequiresDigiDollarValidation(tx, ctx_nocoins) ==
+               (DigiDollar::HasDigiDollarMarker(tx) || must_validate));
+        if (must_validate) {
+            TxValidationState state;
+            assert(!DigiDollar::ValidateDigiDollarTransaction(tx, ctx_nocoins, state));
+            assert(state.IsError());
+        }
+    };
+
+    check_missing_coins(tip_height, tip_height >= thaw_height);
+    check_missing_coins(thaw_height - 1, false);
+    check_missing_coins(thaw_height, true);
+    check_missing_coins(thaw_height + 1, true);
 }

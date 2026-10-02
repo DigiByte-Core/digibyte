@@ -265,29 +265,19 @@ SendCoinsDialog::~SendCoinsDialog()
 bool SendCoinsDialog::PrepareSendText(QString& question_string, QString& informative_text, QString& detailed_text)
 {
     QList<SendCoinsRecipient> recipients;
-    bool valid = true;
-
-    for(int i = 0; i < ui->entries->count(); ++i)
-    {
-        SendCoinsEntry *entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
-        if(entry)
-        {
-            if(entry->validate(model->node()))
-            {
-                recipients.append(entry->getValue());
-            }
-            else if (valid)
-            {
-                ui->scrollArea->ensureWidgetVisible(entry);
-                valid = false;
-            }
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        auto* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+        if (!entry) continue;
+        QString error;
+        if (!entry->validate(model->node(), error)) {
+            ui->scrollArea->ensureWidgetVisible(entry);
+            Q_EMIT message(tr("Send Coins"), error, CClientUIInterface::MSG_WARNING);
+            return false;
         }
+        recipients.append(entry->getValue());
     }
 
-    if(!valid || recipients.isEmpty())
-    {
-        return false;
-    }
+    if (recipients.isEmpty()) return false;
 
     fNewRecipientAllowed = false;
     WalletModel::UnlockContext ctx(model->requestUnlock());

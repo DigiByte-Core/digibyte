@@ -63,8 +63,6 @@ FUZZ_TARGET(fuzz_multishield_v4_phase2a, .init = initialize_multishield_v4)
     chain.back().nBits = pow_limit.GetCompact();
     chain.back().nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SHA256D;
     chain.back().pprev = nullptr;
-    for (int a = 0; a < NUM_ALGOS_IMPL; ++a) chain.back().lastAlgoBlocks[a] = nullptr;
-    chain.back().lastAlgoBlocks[chain.back().GetAlgo()] = &chain.back();
 
     for (int i = 1; i <= blocks && fdp.remaining_bytes() >= 3; ++i) {
         chain.emplace_back();
@@ -94,9 +92,6 @@ FUZZ_TARGET(fuzz_multishield_v4_phase2a, .init = initialize_multishield_v4)
         } else {
             cur.nBits = pow_limit.GetCompact();
         }
-
-        for (int a = 0; a < NUM_ALGOS_IMPL; ++a) cur.lastAlgoBlocks[a] = prev.lastAlgoBlocks[a];
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL) cur.lastAlgoBlocks[algo] = &cur;
     }
 
     if (chain.size() < 2) return;

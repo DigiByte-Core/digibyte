@@ -266,7 +266,7 @@ class DigiDollarMintTest(DigiByteTestFramework):
 
         assert_raises_rpc_error(
             -6,
-            "No available UTXOs for collateral",
+            "No spendable DGB coins for collateral",
             insufficient_balance_node.mintdigidollar,
             100000,
             4,

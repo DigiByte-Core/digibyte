@@ -46,7 +46,9 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
         QString licenseInfoHTML = QString::fromStdString(LicenseInfo());
         // Make URLs clickable
         QRegularExpression uri(QStringLiteral("<(.*)>"), QRegularExpression::InvertedGreedinessOption);
-        licenseInfoHTML.replace(uri, QStringLiteral("<a href=\"\\1\">\\1</a>"));
+        ensurePolished();
+        const QString linkColor = palette().color(QPalette::WindowText).name();
+        licenseInfoHTML.replace(uri, QStringLiteral("<a href=\"\\1\" style=\"color: %1;\">\\1</a>").arg(linkColor));
         // Replace newlines with HTML breaks
         licenseInfoHTML.replace("\n", "<br>");
 
@@ -105,11 +107,11 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
         ui->helpMessage->moveCursor(QTextCursor::Start);
         ui->scrollArea->setVisible(false);
         ui->aboutLogo->setVisible(false);
-        ui->frame->setVisible(false);
+        ui->aboutLogoSpacer->setVisible(false);
         // Collapse the left logo layout so help text uses full width
         ui->verticalLayoutLogo->setContentsMargins(0, 0, 0, 0);
         ui->aboutLogo->setMaximumSize(0, 0);
-        ui->frame->setMaximumSize(0, 0);
+        ui->aboutLogoSpacer->setMaximumSize(0, 0);
     }
 
     GUIUtil::handleCloseWindowShortcut(this);

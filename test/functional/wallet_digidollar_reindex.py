@@ -6,7 +6,7 @@
 Test DigiDollar wallet state across -reindex.
 
 A confirmed, unredeemed mint must remain an active position after the wallet
-replays the chain. Reindex/rescan code must not interpret the mint collateral
+reindexes the chain. Reindex and rescan code must not interpret the mint collateral
 as spent unless a real redeem/transfer path spends it on the active chain.
 """
 

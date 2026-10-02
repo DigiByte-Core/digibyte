@@ -177,10 +177,12 @@ struct OracleNodeInfo
     CPubKey pubkey;
     std::string endpoint;
     bool is_active{false};
+    //! Local roster metadata; excluded from serialization and node identity.
+    std::string display_name;
 
     //! Constructors
     OracleNodeInfo() = default;
-    OracleNodeInfo(uint32_t id_in, const CPubKey& pubkey_in, const std::string& endpoint_in, bool is_active_in);
+    OracleNodeInfo(uint32_t id_in, const CPubKey& pubkey_in, const std::string& endpoint_in, bool is_active_in, const std::string& display_name_in = {});
 
     //! Serialization
     SERIALIZE_METHODS(OracleNodeInfo, obj)

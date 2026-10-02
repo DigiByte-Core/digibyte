@@ -324,7 +324,7 @@ class DigiDollarMempoolMinerParityTest(DigiByteTestFramework):
         node0, node1 = self.nodes
 
         # Build a fresh DD mint on node 0 so we have a raw tx body to
-        # replay onto node 1.
+        # submit onto node 1.
         self.publish_quote_on([0])
         mint = node0.mintdigidollar(100_000, 0)
         dd_txid = mint["txid"]

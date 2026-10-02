@@ -44,6 +44,7 @@ class DigiDollarBasicTest(DigiByteTestFramework):
         self.test_address_generation()
         self.test_address_validation()
         self.test_basic_mint_cycle()
+        self.test_decode_raw_transaction()
         self.test_balance_tracking()
         self.test_multi_node_sync()
 
@@ -120,6 +121,8 @@ class DigiDollarBasicTest(DigiByteTestFramework):
         assert 'dgb_collateral' in mint_result, "Mint should return DGB collateral"
 
         mint_txid = mint_result['txid']
+        # Kept so the decode test below has a real mint to look at.
+        self.mint_txid = mint_txid
 
         # Mine blocks to confirm the transaction
         self.nodes[0].generate(2)
@@ -146,6 +149,8 @@ class DigiDollarBasicTest(DigiByteTestFramework):
         # Perform transfer
         transfer_result = self.nodes[0].senddigidollar(receiver_address, transfer_amount)
         assert 'txid' in transfer_result, "Transfer should return transaction ID"
+        # Kept so the decode test below has a real transfer to look at.
+        self.transfer_txid = transfer_result['txid']
 
         # Mine blocks to confirm
         self.nodes[0].generate(2)
@@ -160,6 +165,49 @@ class DigiDollarBasicTest(DigiByteTestFramework):
         assert_equal(receiver_final, receiver_initial + transfer_amount)
 
         self.log.info("Cross-node transfer test passed")
+
+    def test_decode_raw_transaction(self):
+        """decoderawtransaction must describe a DigiDollar transaction and keep its help honest.
+
+        Test nodes run with -rpcdoccheck, so the node compares what an RPC
+        returns against what its help says it returns. If the decoded form
+        carries a field the help does not list, the call fails instead of
+        answering. That makes this a real check of the help text, not just of
+        the values.
+        """
+        self.log.info("Testing decoderawtransaction on DigiDollar transactions...")
+
+        expected = [
+            (self.mint_txid, "MINT", 1),
+            (self.transfer_txid, "TRANSFER", 2),
+        ]
+        for txid, expected_type, expected_type_id in expected:
+            raw = self.nodes[0].getrawtransaction(txid)
+            decoded = self.nodes[0].decoderawtransaction(raw)
+            assert "digidollar" in decoded, f"{txid} should decode with a digidollar object"
+            digidollar = decoded["digidollar"]
+            assert_equal(digidollar["type"], expected_type)
+            assert_equal(digidollar["type_id"], expected_type_id)
+            assert_equal(digidollar["flags"], 0)
+            assert_equal(digidollar["flags_hex"], "0x00")
+
+            # getrawtransaction in JSON form returns the same object.
+            verbose = self.nodes[0].getrawtransaction(txid, True)
+            assert_equal(verbose["digidollar"], digidollar)
+
+        # An ordinary DGB payment has no DigiDollar marker, so the object must
+        # be absent rather than empty.
+        plain_txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        plain_decoded = self.nodes[0].decoderawtransaction(
+            self.nodes[0].getrawtransaction(plain_txid))
+        assert "digidollar" not in plain_decoded, "plain DGB transactions carry no digidollar object"
+
+        # The help has to name the field, otherwise wallet authors cannot find it.
+        help_text = self.nodes[0].help("decoderawtransaction")
+        for field in ("digidollar", "type_id", "flags_hex"):
+            assert field in help_text, f"decoderawtransaction help should mention {field}"
+
+        self.log.info("decoderawtransaction DigiDollar test passed")
 
     def test_balance_tracking(self):
         """Test DigiDollar balance tracking and position management."""

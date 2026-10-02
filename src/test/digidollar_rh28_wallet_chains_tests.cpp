@@ -127,26 +127,30 @@ BOOST_AUTO_TEST_CASE(rh28_01b_select_dd_coins_negative_amount_utxo)
     BOOST_CHECK_GE(total, 0);
 }
 
-BOOST_AUTO_TEST_CASE(rh28_01c_select_dd_coins_overflow_amount)
+BOOST_AUTO_TEST_CASE(rh28_01c_select_dd_coins_refuses_a_total_that_cannot_fit)
 {
-    // ATTACK: Insert DD UTXOs whose sum overflows int64_t.
-    // If CAmount wraps around, attacker could satisfy any target.
+    // ATTACK: put DigiDollar outputs in the wallet whose amounts together are
+    // more than a money amount can hold. If coin selection added them up and
+    // let the total wrap round, an attacker could satisfy any target with
+    // outputs that are not really worth that much.
+    //
+    // Coin selection must stop before the addition, refuse, and leave nothing
+    // selected.
     DigiDollarWallet ddw;
 
     COutPoint utxo1(MakeTestHash(20), 1);
     ddw.AddDDUTXO(utxo1, std::numeric_limits<CAmount>::max());
 
     COutPoint utxo2(MakeTestHash(21), 1);
-    ddw.AddDDUTXO(utxo2, 1); // Adding 1 to max should overflow
+    ddw.AddDDUTXO(utxo2, 1);
 
     std::vector<COutPoint> selected;
     CAmount total = 0;
-    bool ok = ddw.SelectDDCoins(100, selected, total);
+    const bool ok = ddw.SelectDDCoins(100, selected, total);
 
-    // If it succeeds, total must not have wrapped negative
-    if (ok) {
-        BOOST_CHECK(total > 0);
-    }
+    BOOST_CHECK(!ok);
+    BOOST_CHECK(selected.empty());
+    BOOST_CHECK_EQUAL(total, 0);
 }
 
 // =============================================================================

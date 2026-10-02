@@ -8,6 +8,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 // =====================================
@@ -79,32 +80,36 @@ CCollateralPosition::CCollateralPosition(const COutPoint& outpointIn, CAmount dg
 
 CAmount CCollateralPosition::GetCurrentCollateralRatio(CAmount currentPrice) const
 {
-    // Handle edge case: no DD minted
-    if (ddMinted == 0) {
-        return 0; // Could return MAX value instead
+    // dgbLocked is in satoshis. currentPrice is cents per DGB, so 100 means
+    // $1.00 per DGB. ddMinted is in cents. The answer is a percentage, so 200
+    // means the locked DGB is worth twice the DigiDollar minted against it.
+
+    // With nothing minted there is no ratio to report. A negative amount or a
+    // negative price can only come from damaged data, and there is no honest
+    // ratio for those either, so report nothing rather than a made-up number.
+    if (ddMinted <= 0 || dgbLocked <= 0 || currentPrice <= 0) {
+        return 0;
     }
 
-    // Calculate: (dgbLocked * currentPrice * 100) / ddMinted
-    // dgbLocked is in satoshis, currentPrice is in cents (100 = $1.00 DGB price)
-    // ddMinted is in cents (100 = $1.00 USD)
-    // Result is percentage * 100 (e.g., 200 for 200%)
-
-    // Calculate DGB value in cents: (satoshis * price_cents) / COIN
-    CAmount dgbValueCents = (dgbLocked * currentPrice) / COIN;
-
-    // Avoid division by zero
-    if (dgbValueCents > 0 && ddMinted > 0) {
-        // Check for potential overflow
-        if (dgbValueCents > (std::numeric_limits<CAmount>::max() / 100)) {
-            // Handle overflow case - return a very large ratio
-            return std::numeric_limits<CAmount>::max();
-        }
-
-        CAmount ratio = (dgbValueCents * 100) / ddMinted;
-        return ratio;
+    // Work out what the locked DGB is worth, then the ratio. Both steps are
+    // done in a 128-bit type on purpose. A large position at a high price does
+    // not fit in a 64-bit money amount, and in 64 bits the multiply would wrap
+    // round and report a small or negative ratio for a position that is in
+    // fact hugely over-collateralised.
+    const __int128 valueInCents = (static_cast<__int128>(dgbLocked) * currentPrice) / COIN;
+    if (valueInCents <= 0) {
+        return 0;
     }
 
-    return 0;
+    // When the true ratio is larger than a money amount can hold, report the
+    // largest amount. That is a ceiling, not the exact figure, and it is the
+    // closest true statement available: the position is over-collateralised
+    // beyond anything this type can express.
+    const __int128 ratio = (valueInCents * 100) / ddMinted;
+    if (ratio > std::numeric_limits<CAmount>::max()) {
+        return std::numeric_limits<CAmount>::max();
+    }
+    return static_cast<CAmount>(ratio);
 }
 
 bool CCollateralPosition::IsHealthy(CAmount currentPrice) const
@@ -185,6 +190,30 @@ bool IsDigiDollarEnabled(const CBlockIndex* pindexPrev, const Consensus::Params&
     // DeploymentActiveAfter semantics in deploymentstatus.h exactly.
     return (pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1) >=
            params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR);
+}
+
+bool IsThawDayScheduled(const Consensus::Params& params)
+{
+    return params.nDDThawDayHeight != std::numeric_limits<int>::max();
+}
+
+bool IsThawDayActive(const Consensus::Params& params, int candidate_height)
+{
+    // Only ever compare against the configured height; never add to it,
+    // because the "not scheduled" value is the largest int and would overflow.
+    if (candidate_height < 0) return false;
+    if (!IsThawDayScheduled(params)) return false;
+    // A network with the DigiDollar deployment switched off can never have
+    // Thaw Day rules, at any height. Checking this explicitly keeps the
+    // predicate false even at the largest int height, where a bare height
+    // compare against the "disabled" value (also the largest int) would
+    // otherwise read as active.
+    if (!DeploymentEnabled(params, Consensus::DEPLOYMENT_DIGIDOLLAR)) return false;
+    // The Thaw Day rules are DigiDollar rules, so they cannot apply to a block
+    // where DigiDollar itself is not yet active. This is the same buried
+    // height that IsDigiDollarEnabled() compares against.
+    if (candidate_height < params.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR)) return false;
+    return candidate_height >= params.nDDThawDayHeight;
 }
 
 } // namespace DigiDollar

@@ -53,19 +53,6 @@ std::array<unsigned char, 32> TestnetOracleSecret(uint8_t oracle_id)
     std::array<unsigned char, 32> secret{};
     std::memcpy(secret.data(), hash.begin(), secret.size());
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-    secp256k1_pubkey pubkey;
-    if (ctx && secp256k1_ec_pubkey_create(ctx, &pubkey, secret.data())) {
-        unsigned char serialized[33];
-        size_t serialized_len = sizeof(serialized);
-        if (secp256k1_ec_pubkey_serialize(ctx, serialized, &serialized_len, &pubkey,
-                                          SECP256K1_EC_COMPRESSED) &&
-            serialized_len == sizeof(serialized) && serialized[0] == 0x03) {
-            const int negated = secp256k1_ec_seckey_negate(ctx, secret.data());
-            BOOST_REQUIRE(negated == 1);
-        }
-    }
-    if (ctx) secp256k1_context_destroy(ctx);
     return secret;
 }
 

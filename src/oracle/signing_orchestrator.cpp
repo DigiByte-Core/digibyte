@@ -217,6 +217,9 @@ void OracleSigningOrchestrator::Clear()
     m_epoch_selection_seeds.clear();
     m_epoch_attempts.clear();
     m_nonce_evidence.clear();
+    m_unsent_nonces.clear();
+    m_unsent_contexts.clear();
+    m_unsent_partialsigs.clear();
     m_aggregator.reset();
     m_cached_oracle_key.reset();
     m_cached_oracle_id = 255;
@@ -271,7 +274,7 @@ void OracleSigningOrchestrator::IngestRemoteNonce(const OracleMusigNonceMsg& msg
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on remote nonce arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on remote nonce arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     }
     if (it == m_signing_sessions.end() || !it->second) return;
@@ -279,7 +282,7 @@ void OracleSigningOrchestrator::IngestRemoteNonce(const OracleMusigNonceMsg& msg
 
     if (AddNonceEvidenceToSession(msg, *it->second)) {
         m_nonce_evidence[msg.epoch][msg.oracle_id] = msg;
-        LogPrintf("Oracle: Ingested remote nonce for epoch %d attempt %u from oracle %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Ingested remote nonce for epoch %d attempt %u from oracle %d\n",
                  msg.epoch, msg.attempt_id, msg.oracle_id);
     }
 }
@@ -357,7 +360,7 @@ void OracleSigningOrchestrator::IngestRemoteContext(const OracleMusigContextMsg&
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on context proposal arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on context proposal arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     } else if (have_local_seed) {
         it->second->SetEpochSelectionSeed(seed_it->second);
@@ -432,21 +435,21 @@ void OracleSigningOrchestrator::IngestRemotePartialSig(const OracleMusigPartialS
         }
         session->SetCreationHeight(GetEpochStartHeight(msg.epoch));
         session->SetTimeoutBlocks(100);
-        LogPrintf("Oracle: Lazily created MuSig2 session for epoch %d on remote partial sig arrival\n", msg.epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Lazily created MuSig2 session for epoch %d on remote partial sig arrival\n", msg.epoch);
         it = m_signing_sessions.emplace(msg.epoch, std::move(session)).first;
     }
     if (it == m_signing_sessions.end() || !it->second) return;
     if (it->second->GetAttemptId() != msg.attempt_id) return;
 
     if (TryApplyRemotePartialSig(msg, *it->second)) {
-        LogPrintf("Oracle: Ingested remote partial sig for epoch %d from oracle %d\n",
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Ingested remote partial sig for epoch %d from oracle %d\n",
                  msg.epoch, msg.oracle_id);
 
         // Auto-aggregate if threshold met
         if (it->second->HasEnoughPartialSigs()) {
             std::vector<unsigned char> final_sig;
             if (it->second->AggregateSignature(final_sig)) {
-                LogPrintf("Oracle: MuSig2 auto-aggregated for epoch %d after remote partial sig, sig size=%zu\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 auto-aggregated for epoch %d after remote partial sig, sig size=%zu\n",
                          msg.epoch, final_sig.size());
             }
         }
@@ -577,7 +580,7 @@ size_t OracleSigningOrchestrator::DrainPendingPartialSigsForEpoch(int32_t epoch,
     }
 
     if (accepted > 0) {
-        LogPrintf("Oracle: Replayed %zu pending partial sigs for epoch %d\n", accepted, epoch);
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Replayed %zu pending partial sigs for epoch %d\n", accepted, epoch);
     }
     return accepted;
 }
@@ -831,17 +834,34 @@ OracleSigningOrchestrator& OracleSigningOrchestrator::GetInstance()
     return *g_signing_orchestrator;
 }
 
-void OracleSigningOrchestrator::Initialize()
+void OracleSigningOrchestrator::Initialize(CConnman* connman)
 {
     assert(!g_signing_orchestrator);
-    g_signing_orchestrator = std::make_unique<OracleSigningOrchestrator>();
+
+    // Build it and give it everything it needs before anyone can see it. The
+    // global is read without a lock from the peer message handler, block
+    // validation, mining, the command server and bundle assembly, so it must
+    // never be visible half configured. Registering for block notifications is
+    // last, because that is the moment something can call into it.
+    auto orchestrator = std::make_unique<OracleSigningOrchestrator>();
+    orchestrator->SetConnman(connman);
+    g_signing_orchestrator = std::move(orchestrator);
     g_signing_orchestrator->Start();
     LogPrintf("Oracle: MuSig2 signing orchestrator initialized and started\n");
+}
+
+void OracleSigningOrchestrator::StopBlockNotifications()
+{
+    if (g_signing_orchestrator) {
+        g_signing_orchestrator->Stop();
+    }
 }
 
 void OracleSigningOrchestrator::Shutdown()
 {
     if (g_signing_orchestrator) {
+        // Stop() is normally already done by StopBlockNotifications(). Repeat it
+        // here so a caller that only calls Shutdown() still unsubscribes first.
         g_signing_orchestrator->Stop();
         g_signing_orchestrator.reset();
     }
@@ -853,7 +873,7 @@ void OracleSigningOrchestrator::Shutdown()
 
 bool OracleSigningOrchestrator::IsOracleNode() const
 {
-    if (!g_oracle_manager) return false;
+    if (!OracleManager::IsBuilt()) return false;
     OracleManager& om = OracleManager::GetInstance();
     return om.GetActiveOracleCount() > 0;
 }
@@ -865,7 +885,7 @@ const CKey* OracleSigningOrchestrator::GetOracleSigningKey() const
     }
 
     m_oracle_key_cached = true;
-    if (!g_oracle_manager) {
+    if (!OracleManager::IsBuilt()) {
         m_cached_oracle_key.reset();
         return nullptr;
     }
@@ -930,7 +950,7 @@ MuSig2SigningSession* OracleSigningOrchestrator::GetOrCreateSigningSession(int32
     MuSig2SigningSession* ptr = session.get();
     m_signing_sessions[epoch] = std::move(session);
 
-    LogPrintf("Oracle: Created MuSig2 signing session for epoch %d (creation_height=%d)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Created MuSig2 signing session for epoch %d (creation_height=%d)\n",
              epoch, block_height);
     return ptr;
 }
@@ -960,6 +980,9 @@ bool OracleSigningOrchestrator::RestartEpochAttemptIfNeeded(int32_t epoch,
     m_pending_contexts.erase(epoch);
     m_pending_partialsigs.erase(epoch);
     m_nonce_evidence.erase(epoch);
+    m_unsent_nonces.erase(epoch);
+    m_unsent_contexts.erase(epoch);
+    m_unsent_partialsigs.erase(epoch);
     m_epoch_attempts[epoch] = next_attempt;
 
     const Consensus::Params& consensus = Params().GetConsensus();
@@ -1045,6 +1068,15 @@ void OracleSigningOrchestrator::CleanupOldSessions(int32_t current_epoch)
     for (auto it = m_nonce_evidence.begin(); it != m_nonce_evidence.end(); ) {
         it = (it->first < current_epoch - 2) ? m_nonce_evidence.erase(it) : std::next(it);
     }
+    for (auto it = m_unsent_nonces.begin(); it != m_unsent_nonces.end(); ) {
+        it = (it->first < current_epoch - 2) ? m_unsent_nonces.erase(it) : std::next(it);
+    }
+    for (auto it = m_unsent_contexts.begin(); it != m_unsent_contexts.end(); ) {
+        it = (it->first < current_epoch - 2) ? m_unsent_contexts.erase(it) : std::next(it);
+    }
+    for (auto it = m_unsent_partialsigs.begin(); it != m_unsent_partialsigs.end(); ) {
+        it = (it->first < current_epoch - 2) ? m_unsent_partialsigs.erase(it) : std::next(it);
+    }
 }
 
 // ============================================================================
@@ -1109,6 +1141,17 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
     RestartEpochAttemptIfNeeded(epoch, block_height, session);
     if (!session) return;
 
+    // Send again any nonce of ours that reached no peer. This runs before the
+    // steps below, and whatever state the session is in, because Step 1 stops
+    // generating nonces once the session has all the ones it needs, and a
+    // nonce nobody received still has to get out.
+    ResendUnsentNonces(epoch);
+    // Same reason as the nonces above: the steps below stop offering a proposal once
+    // the proposer is marked, and stop making signatures once the session has them,
+    // so anything that reached nobody has to be sent from here.
+    ResendUnsentContexts(epoch);
+    ResendUnsentPartialSigs(epoch);
+
     const int32_t current_epoch = GetCurrentEpoch(block_height);
     if (HasSelectionSeedForEpoch(epoch)) {
         session->SetEpochSelectionSeed(GetSelectionSeedForEpoch(epoch));
@@ -1144,9 +1187,16 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
 
             for (uint32_t oid : local_ids) {
                 uint8_t oid8 = static_cast<uint8_t>(oid);
-                // Skip if already generated nonce for this oracle
-                if (m_nonce_broadcast_tracker[epoch].count(oid8)) {
-                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Skipping oracle %d epoch %d - already broadcast\n", oid8, epoch);
+                // One nonce per oracle per epoch. The session will not make a
+                // second one anyway. Getting an already made nonce out to a
+                // peer is ResendUnsentNonces()'s job, which ran above.
+                bool already_generated = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                    already_generated = m_nonce_broadcast_tracker[epoch].count(oid8) > 0;
+                }
+                if (already_generated) {
+                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Skipping oracle %d epoch %d - nonce already generated\n", oid8, epoch);
                     continue;
                 }
 
@@ -1191,12 +1241,32 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                             continue;
                         }
 
-                        BroadcastMusigNonce(nonce_msg);
-                        m_nonce_broadcast_tracker[epoch].insert(oid8);
-                        m_nonce_evidence[epoch][oid8] = nonce_msg;
+                        // Keep the nonce first, then send it. The session
+                        // will not make another one for this oracle, so the
+                        // message stored here is the only copy that can still
+                        // go out. It is listed as unsent until a peer has it,
+                        // and a later pass sends it again from that list.
+                        {
+                            std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                            m_nonce_broadcast_tracker[epoch].insert(oid8);
+                            m_nonce_evidence[epoch][oid8] = nonce_msg;
+                            m_unsent_nonces[epoch].insert(oid8);
+                        }
 
-                        LogPrintf("Oracle: Generated and broadcast nonce for epoch %d attempt %u (oracle_id=%d)\n",
-                                 epoch, nonce_msg.attempt_id, oid8);
+                        const size_t peers = BroadcastMusigNonce(nonce_msg);
+                        if (peers == 0) {
+                            LogPrint(BCLog::DIGIDOLLAR,
+                                     "Oracle: MuSig2 nonce for oracle=%d epoch=%d reached no peer; holding it to send again\n",
+                                     oid8, epoch);
+                            continue;
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                            m_unsent_nonces[epoch].erase(oid8);
+                        }
+
+                        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Generated and broadcast nonce for epoch %d attempt %u (oracle_id=%d) to %zu peers\n",
+                                 epoch, nonce_msg.attempt_id, oid8, peers);
                     }
                 } else {
                     LogPrintf("Oracle: GenerateNonce FAILED for oracle %d epoch %d\n", oid8, epoch);
@@ -1241,10 +1311,23 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                 std::optional<OracleMusigContextMsg> local_context =
                     BuildLocalContextProposal(epoch, block_height, *session);
                 if (local_context) {
-                    BroadcastMusigContext(*local_context);
-                    LogPrintf("Oracle: Broadcast MuSig2 context proposal epoch=%d proposer=%u context=%s\n",
+                    const size_t peers = BroadcastMusigContext(*local_context);
+                    {
+                        std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                        if (peers == 0) {
+                            m_unsent_contexts[epoch] = local_context->session_context_id;
+                        } else {
+                            m_unsent_contexts.erase(epoch);
+                        }
+                    }
+                    if (peers == 0) {
+                        LogPrint(BCLog::DIGIDOLLAR,
+                                 "Oracle: MuSig2 context proposal epoch=%d proposer=%u reached no peer\n",
+                                 epoch, local_context->proposer_id);
+                    }
+                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcast MuSig2 context proposal epoch=%d proposer=%u context=%s peers=%zu\n",
                              epoch, local_context->proposer_id,
-                             local_context->session_context_id.ToString());
+                             local_context->session_context_id.ToString(), peers);
                     return;
                 }
             }
@@ -1279,13 +1362,13 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                          epoch, participant_ids.size());
             } else {
                 session->SetKeyAggCache(part_cache);
-                LogPrintf("Oracle: Step 2 - recomputed keyagg for %zu participants (epoch %d)\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Step 2 - recomputed keyagg for %zu participants (epoch %d)\n",
                          participant_ids.size(), epoch);
             }
 
             if (session->AggregateNonces(msg32)) {
                 const uint256 session_context = session->GetSessionContextId();
-                LogPrintf("Oracle: Nonces aggregated for epoch %d, SIGNING context=%s\n",
+                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Nonces aggregated for epoch %d, SIGNING context=%s\n",
                          epoch, session_context.ToString());
                 if (session_context.IsNull()) {
                     LogPrintf("Oracle: Step 2 - refusing to broadcast partial sigs for epoch %d with null context\n",
@@ -1294,7 +1377,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                 }
 
                 if (!is_oracle) {
-                    LogPrintf("Oracle: Passive MuSig2 context selected for epoch %d context=%s\n",
+                    LogPrint(BCLog::DIGIDOLLAR, "Oracle: Passive MuSig2 context selected for epoch %d context=%s\n",
                              epoch, session_context.ToString());
                 } else {
                     OracleManager& om = OracleManager::GetInstance();
@@ -1303,7 +1386,12 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
 
                     for (uint32_t oid : local_ids) {
                         uint8_t oid8 = static_cast<uint8_t>(oid);
-                        if (m_partialsig_broadcast_tracker[epoch].count(oid8)) continue;
+                        bool already_sent = false;
+                        {
+                            std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                            already_sent = m_partialsig_broadcast_tracker[epoch].count(oid8) > 0;
+                        }
+                        if (already_sent) continue;
 
                         OracleNode* onode = om.GetOracleNode(oid);
                         if (!onode) continue;
@@ -1336,11 +1424,28 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
                                     continue;
                                 }
 
-                                BroadcastMusigPartialSig(psig_msg);
-                                m_partialsig_broadcast_tracker[epoch].insert(oid8);
+                                const size_t peers = BroadcastMusigPartialSig(psig_msg);
+                                if (peers == 0) {
+                                    LogPrint(BCLog::DIGIDOLLAR,
+                                             "Oracle: MuSig2 partial sig for oracle=%d epoch=%d reached no peer\n",
+                                             oid8, epoch);
+                                }
+                                {
+                                    std::lock_guard<std::mutex> lock(m_sessions_mutex);
+                                    m_partialsig_broadcast_tracker[epoch].insert(oid8);
+                                    if (peers == 0) {
+                                        m_unsent_partialsigs[epoch][oid8] = psig_msg;
+                                    } else {
+                                        auto unsent_it = m_unsent_partialsigs.find(epoch);
+                                        if (unsent_it != m_unsent_partialsigs.end()) {
+                                            unsent_it->second.erase(oid8);
+                                            if (unsent_it->second.empty()) m_unsent_partialsigs.erase(unsent_it);
+                                        }
+                                    }
+                                }
 
-                                LogPrintf("Oracle: Broadcast partial sig for epoch %d (oracle_id=%d)\n",
-                                         epoch, oid8);
+                                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Broadcast partial sig for epoch %d (oracle_id=%d) to %zu peers\n",
+                                         epoch, oid8, peers);
                                 continue;
                             }
                         }
@@ -1360,7 +1465,7 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
     if (state == MuSig2SessionState::SIGNING && session->HasEnoughPartialSigs()) {
         std::vector<unsigned char> final_sig;
         if (session->AggregateSignature(final_sig)) {
-            LogPrintf("Oracle: MuSig2 COMPLETE for epoch %d, sig size=%zu\n",
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 COMPLETE for epoch %d, sig size=%zu\n",
                      epoch, final_sig.size());
         }
     }
@@ -1373,52 +1478,204 @@ void OracleSigningOrchestrator::TickEpochSession(int32_t epoch, int32_t block_he
 // P2P broadcast
 // ============================================================================
 
-bool OracleSigningOrchestrator::BroadcastMusigNonce(const OracleMusigNonceMsg& msg)
+void OracleSigningOrchestrator::ResendUnsentNonces(int32_t epoch)
+{
+    // Copy out what still has to go, so the sending below runs with no lock
+    // held. Sending takes the connection manager's locks, and this file never
+    // holds the session lock while it does that.
+    std::vector<OracleMusigNonceMsg> to_send;
+    {
+        std::lock_guard<std::mutex> lock(m_sessions_mutex);
+        const auto unsent_it = m_unsent_nonces.find(epoch);
+        if (unsent_it == m_unsent_nonces.end() || unsent_it->second.empty()) return;
+
+        const auto evidence_it = m_nonce_evidence.find(epoch);
+        if (evidence_it == m_nonce_evidence.end()) {
+            m_unsent_nonces.erase(unsent_it);
+            return;
+        }
+
+        const auto attempt_it = m_epoch_attempts.find(epoch);
+        const uint8_t current_attempt =
+            attempt_it == m_epoch_attempts.end() ? 0 : attempt_it->second;
+
+        for (auto it = unsent_it->second.begin(); it != unsent_it->second.end(); ) {
+            const auto stored = evidence_it->second.find(*it);
+            // Either the message is gone, or it belongs to an attempt this
+            // epoch has left behind. No peer would take it now, so stop
+            // holding it.
+            if (stored == evidence_it->second.end() ||
+                stored->second.attempt_id != current_attempt) {
+                it = unsent_it->second.erase(it);
+                continue;
+            }
+            to_send.push_back(stored->second);
+            ++it;
+        }
+        if (unsent_it->second.empty()) m_unsent_nonces.erase(unsent_it);
+    }
+
+    for (const OracleMusigNonceMsg& msg : to_send) {
+        const size_t peers = BroadcastMusigNonce(msg);
+        if (peers == 0) {
+            // Still nobody to send to. It stays on the list, so this costs one
+            // attempt per block and cannot reach a peer often enough to be a
+            // nuisance: there is no peer.
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: MuSig2 nonce for oracle=%d epoch=%d still has no peer to go to\n",
+                     msg.oracle_id, epoch);
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_sessions_mutex);
+            const auto unsent_it = m_unsent_nonces.find(epoch);
+            if (unsent_it != m_unsent_nonces.end()) {
+                unsent_it->second.erase(msg.oracle_id);
+                if (unsent_it->second.empty()) m_unsent_nonces.erase(unsent_it);
+            }
+        }
+        LogPrintf("Oracle: Sent the held MuSig2 nonce for oracle=%d epoch=%d to %zu peers\n",
+                  msg.oracle_id, epoch, peers);
+    }
+}
+
+void OracleSigningOrchestrator::ResendUnsentContexts(int32_t epoch)
+{
+    std::optional<OracleMusigContextMsg> to_send;
+    {
+        std::lock_guard<std::mutex> lock(m_sessions_mutex);
+        const auto unsent_it = m_unsent_contexts.find(epoch);
+        if (unsent_it == m_unsent_contexts.end()) return;
+
+        const auto epoch_it = m_pending_contexts.find(epoch);
+        if (epoch_it == m_pending_contexts.end()) { m_unsent_contexts.erase(unsent_it); return; }
+        const auto ctx_it = epoch_it->second.find(unsent_it->second);
+        if (ctx_it == epoch_it->second.end()) { m_unsent_contexts.erase(unsent_it); return; }
+
+        const auto attempt_it = m_epoch_attempts.find(epoch);
+        const uint8_t current_attempt =
+            attempt_it == m_epoch_attempts.end() ? 0 : attempt_it->second;
+        // Belongs to an attempt this epoch has left behind. No peer would take it now.
+        if (ctx_it->second.attempt_id != current_attempt) {
+            m_unsent_contexts.erase(unsent_it);
+            return;
+        }
+        to_send = ctx_it->second;
+    }
+
+    const size_t peers = BroadcastMusigContext(*to_send);
+    if (peers == 0) {
+        LogPrint(BCLog::DIGIDOLLAR,
+                 "Oracle: MuSig2 context proposal epoch=%d proposer=%u still has no peer to go to\n",
+                 epoch, to_send->proposer_id);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_sessions_mutex);
+        m_unsent_contexts.erase(epoch);
+    }
+    LogPrintf("Oracle: Sent the held MuSig2 context proposal epoch=%d proposer=%u to %zu peers\n",
+              epoch, to_send->proposer_id, peers);
+}
+
+void OracleSigningOrchestrator::ResendUnsentPartialSigs(int32_t epoch)
+{
+    std::vector<OracleMusigPartialSigMsg> to_send;
+    {
+        std::lock_guard<std::mutex> lock(m_sessions_mutex);
+        const auto unsent_it = m_unsent_partialsigs.find(epoch);
+        if (unsent_it == m_unsent_partialsigs.end() || unsent_it->second.empty()) return;
+
+        const auto attempt_it = m_epoch_attempts.find(epoch);
+        const uint8_t current_attempt =
+            attempt_it == m_epoch_attempts.end() ? 0 : attempt_it->second;
+
+        for (auto it = unsent_it->second.begin(); it != unsent_it->second.end(); ) {
+            if (it->second.attempt_id != current_attempt) {
+                it = unsent_it->second.erase(it);
+                continue;
+            }
+            to_send.push_back(it->second);
+            ++it;
+        }
+        if (unsent_it->second.empty()) m_unsent_partialsigs.erase(unsent_it);
+    }
+
+    for (const OracleMusigPartialSigMsg& msg : to_send) {
+        const size_t peers = BroadcastMusigPartialSig(msg);
+        if (peers == 0) {
+            LogPrint(BCLog::DIGIDOLLAR,
+                     "Oracle: MuSig2 partial sig for oracle=%d epoch=%d still has no peer to go to\n",
+                     msg.oracle_id, epoch);
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_sessions_mutex);
+            const auto unsent_it = m_unsent_partialsigs.find(epoch);
+            if (unsent_it != m_unsent_partialsigs.end()) {
+                unsent_it->second.erase(msg.oracle_id);
+                if (unsent_it->second.empty()) m_unsent_partialsigs.erase(unsent_it);
+            }
+        }
+        LogPrintf("Oracle: Sent the held MuSig2 partial sig for oracle=%d epoch=%d to %zu peers\n",
+                  msg.oracle_id, epoch, peers);
+    }
+}
+
+size_t OracleSigningOrchestrator::BroadcastMusigNonce(const OracleMusigNonceMsg& msg)
 {
     if (!m_connman) {
         LogPrint(BCLog::DIGIDOLLAR, "Oracle: Cannot broadcast MuSig2 nonce - no P2P\n");
-        return false;
+        return 0;
     }
 
-    m_connman->ForEachNode([this, &msg](CNode* node) {
+    // Count the peers it really went to. With no peer connected the loop below
+    // runs for nobody, and a caller that read that as sent would never send
+    // the message again.
+    size_t peers = 0;
+    m_connman->ForEachNode([this, &msg, &peers](CNode* node) {
         m_connman->PushMessage(node,
             CNetMsgMaker(node->GetCommonVersion()).Make(
                 NetMsgType::ORACLEMUSIGNONCE, msg));
+        ++peers;
     });
 
-    return true;
+    return peers;
 }
 
-bool OracleSigningOrchestrator::BroadcastMusigContext(const OracleMusigContextMsg& msg)
+size_t OracleSigningOrchestrator::BroadcastMusigContext(const OracleMusigContextMsg& msg)
 {
     if (!m_connman) {
         LogPrint(BCLog::DIGIDOLLAR, "Oracle: Cannot broadcast MuSig2 context proposal - no P2P\n");
-        return false;
+        return 0;
     }
 
-    m_connman->ForEachNode([this, &msg](CNode* node) {
+    size_t peers = 0;
+    m_connman->ForEachNode([this, &msg, &peers](CNode* node) {
         m_connman->PushMessage(node,
             CNetMsgMaker(node->GetCommonVersion()).Make(
                 NetMsgType::ORACLEMUSIGCONTEXT, msg));
+        ++peers;
     });
 
-    return true;
+    return peers;
 }
 
-bool OracleSigningOrchestrator::BroadcastMusigPartialSig(const OracleMusigPartialSigMsg& msg)
+size_t OracleSigningOrchestrator::BroadcastMusigPartialSig(const OracleMusigPartialSigMsg& msg)
 {
     if (!m_connman) {
         LogPrint(BCLog::DIGIDOLLAR, "Oracle: Cannot broadcast MuSig2 partial sig - no P2P\n");
-        return false;
+        return 0;
     }
 
-    m_connman->ForEachNode([this, &msg](CNode* node) {
+    size_t peers = 0;
+    m_connman->ForEachNode([this, &msg, &peers](CNode* node) {
         m_connman->PushMessage(node,
             CNetMsgMaker(node->GetCommonVersion()).Make(
                 NetMsgType::ORACLEMUSIGPARTIALSIG, msg));
+        ++peers;
     });
 
-    return true;
+    return peers;
 }
 
 // ============================================================================

@@ -25,6 +25,7 @@
 #include <common/system.h>
 #include <compat/sanity.h>
 #include <consensus/amount.h>
+#include <dbwrapper.h>
 #include <deploymentstatus.h>
 #include <hash.h>
 #include <httprpc.h>
@@ -110,6 +111,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <set>
 #include <stdint.h>
 #include <stdio.h>
@@ -164,7 +166,8 @@ static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
 // anyway.
 #define MIN_CORE_FILEDESCRIPTORS 0
 #else
-#define MIN_CORE_FILEDESCRIPTORS 150
+// Reserve table descriptors for the block index and both normal and snapshot chainstates.
+#define MIN_CORE_FILEDESCRIPTORS (150 + 3 * BUFFERED_DB_TABLE_CACHE_FILES)
 #endif
 
 static const char* DEFAULT_ASMAP_FILENAME="ip_asn.map";
@@ -275,12 +278,29 @@ void Shutdown(NodeContext& node)
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
     if (node.stempool) node.stempool->AddTransactionsUpdated(1);
 
-    // Shut down oracle services before tearing down networking and before
-    // process-exit library cleanup can invalidate libcurl/OpenSSL state.
-    OracleSigningOrchestrator::Shutdown();
-    OracleManager::StopOracleService();
+    // Stop the oracle price threads now. They fetch prices from exchanges over
+    // the network and hand messages to the connection manager, so they have to
+    // be gone before networking is torn down and before the process starts
+    // cleaning up the network and encryption libraries they use.
+    //
+    // Only the threads stop here. The oracles and the manager that holds them
+    // stay alive until the end of this function, because the remote procedure
+    // call server, the peer-to-peer message handler and the block
+    // notifications all look oracles up through that manager and are all still
+    // running at this point.
+    //
+    // The signing orchestrator is likewise only told here to stop listening
+    // for new blocks. Unregistering stops new notifications; it does not wait
+    // for a notification that is already running. Block notifications run on
+    // the scheduler thread and hold a plain pointer to the orchestrator and to
+    // the oracle they sign with, so freeing either one here leaves that thread
+    // reading freed memory. When that happened the scheduler thread waited
+    // forever on a lock inside freed memory, the shutdown thread waited
+    // forever for the scheduler thread, and the node did not finish shutting
+    // down.
+    OracleSigningOrchestrator::StopBlockNotifications();
+    OracleManager::StopOraclePriceThreads();
     g_get_oracle_consensus_price = nullptr;
-    OracleBundleManager::Shutdown();
 
     StopHTTPRPC();
     StopREST();
@@ -308,6 +328,15 @@ void Shutdown(NodeContext& node)
     // destruct and reset all to nullptr.
     node.peerman.reset();
     node.connman.reset();
+    // The signing orchestrator and the bundle manager each hold a plain pointer
+    // to the connection manager. It has just been destroyed, and both objects
+    // live on for the rest of this function, so clear the pointers now rather
+    // than leave them aimed at freed memory. Test each global instead of asking
+    // for it: the accessor for the bundle manager builds one on demand, and
+    // building anything while shutting down would be worse than the dangling
+    // pointer this avoids.
+    if (g_signing_orchestrator) g_signing_orchestrator->SetConnman(nullptr);
+    if (g_oracle_bundle_manager) g_oracle_bundle_manager->SetConnman(nullptr);
     node.banman.reset();
     node.addrman.reset();
     node.netgroupman.reset();
@@ -378,6 +407,18 @@ void Shutdown(NodeContext& node)
 
     node.chain_clients.clear();
     UnregisterAllValidationInterfaces();
+
+    // Destroy the oracle objects only now, when nothing is left that calls into
+    // them. The remote procedure call server, the connection manager, the
+    // scheduler thread, the indexes and the wallets have all stopped, and every
+    // queued block notification has already been run. Destroying them any
+    // earlier leaves another thread holding a pointer into freed memory.
+    //
+    // The oracle manager and the oracles it holds go last, because the signing
+    // orchestrator and the bundle manager both look oracles up through it.
+    OracleSigningOrchestrator::Shutdown();
+    OracleBundleManager::Shutdown();
+    OracleManager::StopOracleService();
     GetMainSignals().UnregisterBackgroundSignalScheduler();
     // init::UnsetGlobals();  // Not needed in v26.2
     node.kernel.reset();
@@ -681,8 +722,9 @@ void SetupServerArgs(ArgsManager& argsman)
 
     // DigiDollar stablecoin options
     // DigiDollar startup options
-    argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (follows BIP9 activation by default)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (activation follows the network's configured block height)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-ddthawdayheight=<n>", "Set the block height at which the DigiDollar Thaw Day rules take effect (regtest only; on any other network this option is a startup error, so keep it under a [regtest] section of the config file). Default: not scheduled.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
 
     // DigiDollar RPC commands (use 'help <command>' in console for details)
     argsman.AddArg("mintdigidollar", "Mint DigiDollars by locking DGB as collateral (RPC/console)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
@@ -1115,19 +1157,20 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     nUserMaxConnections = args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
     nMaxConnections = std::max(nUserMaxConnections, 0);
 
-    nFD = RaiseFileDescriptorLimit(nMaxConnections + MIN_CORE_FILEDESCRIPTORS + MAX_ADDNODE_CONNECTIONS + nBind + NUM_FDS_MESSAGE_CAPTURE);
+    const int reserved_fds = MIN_CORE_FILEDESCRIPTORS + MAX_ADDNODE_CONNECTIONS + nBind + NUM_FDS_MESSAGE_CAPTURE;
+    const int64_t requested_fds = int64_t{nMaxConnections} + reserved_fds;
+    nFD = RaiseFileDescriptorLimit(static_cast<int>(std::min(requested_fds, int64_t{std::numeric_limits<int>::max()})));
 
 #ifdef USE_POLL
     int fd_max = nFD;
 #else
     int fd_max = FD_SETSIZE;
 #endif
-    // Trim requested connection counts, to fit into system limitations
-    // <int> in std::min<int>(...) to work around FreeBSD compilation issue described in #2695
-    nMaxConnections = std::max(std::min<int>(nMaxConnections, fd_max - nBind - MIN_CORE_FILEDESCRIPTORS - MAX_ADDNODE_CONNECTIONS - NUM_FDS_MESSAGE_CAPTURE), 0);
-    if (nFD < MIN_CORE_FILEDESCRIPTORS)
+    // Leave the full reserve available before assigning descriptors to automatic connections.
+    const int available_fds = std::min(nFD, fd_max);
+    if (available_fds < reserved_fds)
         return InitError(_("Not enough file descriptors available."));
-    nMaxConnections = std::min(nFD - MIN_CORE_FILEDESCRIPTORS - MAX_ADDNODE_CONNECTIONS - NUM_FDS_MESSAGE_CAPTURE, nMaxConnections);
+    nMaxConnections = std::min(nMaxConnections, available_fds - reserved_fds);
 
     if (nMaxConnections < nUserMaxConnections)
         InitWarning(strprintf(_("Reducing -maxconnections from %d to %d, because of system limitations."), nUserMaxConnections, nMaxConnections));
@@ -1789,7 +1832,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Initialize DigiByte stempool for Dandelion++ privacy protocol
         CTxMemPool::Options stempool_opts{
             .estimator = nullptr,
-            .check_ratio = 0,
+            // The stempool checks its own bookkeeping as often as the main
+            // mempool does (-checkmempool; regtest and the tests use 1, so
+            // every block and transaction is checked). This used to be
+            // hard-wired to 0, so a corrupted stempool went unnoticed until
+            // the node crashed.
+            .check_ratio = mempool_opts.check_ratio,
             .min_relay_feerate = mempool_opts.min_relay_feerate,  // Use same relay fee as mempool
             .max_datacarrier_bytes = mempool_opts.max_datacarrier_bytes,  // Use same datacarrier settings as mempool
             .is_stempool = true,
@@ -2002,6 +2050,31 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 #endif
 
+    // The signing orchestrator is built, given its connection manager, published
+    // and registered for block notifications here: after the chainstate is
+    // loaded, and before the import thread below starts or networking takes any
+    // peer.
+    //
+    // Eight places read this global pointer without a lock, on several threads:
+    // the peer message handlers, block validation, mining, the command server and
+    // bundle assembly. Publishing it while any of them can already be running is a
+    // race on the pointer itself, and publishing it before its connection manager
+    // arrives leaves it taking block notifications with nowhere to send anything.
+    //
+    // It was moved twice. Putting it before the connection manager starts closed
+    // the peer readers. That was not enough: the import thread below loads the
+    // saved mempool, and a DigiDollar transaction in it reaches this pointer
+    // through the oracle quote check while accepting the transaction. Publishing
+    // above that thread closes the last reader, and closes it by ordering rather
+    // than by putting a lock around eight call sites, two of which are block
+    // validation and mining.
+    //
+    // Configure the bundle manager before signing callbacks or import can use
+    // it. Price reconstruction stays below, after the import thread is started.
+    OracleBundleManager::Initialize();
+    OracleBundleManager::GetInstance().SetConnman(node.connman.get());
+    OracleSigningOrchestrator::Initialize(node.connman.get());
+
     std::vector<fs::path> vImportFiles;
     for (const std::string& strFile : args.GetArgs("-loadblock")) {
         vImportFiles.push_back(fs::PathFromString(strFile));
@@ -2212,32 +2285,41 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         return false;
     }
 
-    // Initialize Oracle Bundle Manager with consensus parameters
-    OracleBundleManager::Initialize();
-    // Initialize MuSig2 signing orchestrator for V1 oracle bundles
-    OracleSigningOrchestrator::Initialize();
-    g_signing_orchestrator->SetConnman(node.connman.get());
-    // Initialize oracle P2P connection for broadcasting
-    OracleBundleManager::GetInstance().SetConnman(node.connman.get());
-    // Load oracle prices from blockchain (must be after chainstate is loaded).
-    // Fail CLOSED on unreadable post-activation blocks: the reconstructed price
-    // history feeds the consensus volatility freeze, and the reconstructed health
-    // metrics feed consensus DCA/ERR. A truncated/partially-restored block file
-    // passes the index-flag startup guard but must never let the node run
-    // DigiDollar validation on partial data.
-    if (!OracleBundleManager::LoadPricesFromChain(chainman)) {
-        return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
-                           "Restart with -reindex to rebuild it (a pruned node will "
-                           "redownload and re-prune)."));
+    // Keep required reconstruction synchronous and publish only a complete scan.
+    OracleBundleManager::LoadCallbacks oracle_load_callbacks;
+    oracle_load_callbacks.cancelled = ShutdownRequested;
+    oracle_load_callbacks.progress = [](uint64_t completed, uint64_t total) {
+        const int percent = total == 0 ? 100 : static_cast<int>(completed * 100 / total);
+        uiInterface.InitMessage(strprintf(_("Reconstructing oracle prices: %u of %u blocks").translated,
+                                          completed, total));
+        uiInterface.ShowProgress(_("Reconstructing oracle prices").translated, percent, false);
+    };
+    const auto oracle_load = OracleBundleManager::LoadPricesFromChain(chainman, oracle_load_callbacks);
+    if (oracle_load.status == OracleBundleManager::LoadStatus::CANCELLED) {
+        return false;
     }
-    // DD-FINAL-003 / AR-CONSENSUS-1: reconstruct cached system-health metrics
-    // (total DD supply + collateral) from the on-chain UTXO set so consensus
-    // DCA/ERR health does not depend on process restart history. No-op until
-    // DigiDollar is active at the tip.
-    if (!DigiDollar::SystemHealthMonitor::ReconstructFromChain(chainman)) {
-        return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
-                           "Restart with -reindex to rebuild it (a pruned node will "
-                           "redownload and re-prune)."));
+    if (oracle_load.status == OracleBundleManager::LoadStatus::READ_ERROR) {
+        return InitError(strprintf(_("Oracle price reconstruction could not read block %s at height %d. "
+                                    "Restore or redownload the required block data before restarting."),
+                                   oracle_load.block_hash.ToString(), oracle_load.height));
+    }
+    // Canonical health was prepared before import. Legacy health still needs
+    // its complete synchronous scan before startup can finish.
+    DigiDollar::HealthScanCallbacks health_callbacks;
+    health_callbacks.cancelled = ShutdownRequested;
+    health_callbacks.progress = [](uint64_t completed, uint64_t total) {
+        uiInterface.InitMessage(strprintf(_("Reconstructing DigiDollar health: %u outputs checked").translated, completed));
+        uiInterface.ShowProgress(_("Reconstructing DigiDollar health").translated,
+                                 total ? static_cast<int>(100 * completed / total) : 0, false);
+    };
+    const auto health_load = DigiDollar::SystemHealthMonitor::ReconstructFromChain(chainman, health_callbacks);
+    uiInterface.ShowProgress("", 100, false);
+    if (health_load.status == DigiDollar::HealthScanResult::Status::CANCELLED) {
+        uiInterface.InitMessage(_("DigiDollar health reconstruction cancelled").translated);
+        return false;
+    }
+    if (health_load.status == DigiDollar::HealthScanResult::Status::READ_ERROR) {
+        return InitError(Untranslated(health_load.error));
     }
 
     // DD-FINAL-005 / AR-0: OP_CHECKPRICE is deterministically DISABLED (it now

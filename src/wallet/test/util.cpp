@@ -141,12 +141,20 @@ bool MockableBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrit
         return false;
     }
     SerializeData key_data{key.begin(), key.end()};
+    // A test can refuse one row, to stand for a wallet file that takes some rows
+    // and then stops taking them.
+    if (m_refuse_write != nullptr && *m_refuse_write &&
+        (*m_refuse_write)(Span{key_data.data(), key_data.size()})) {
+        return false;
+    }
     SerializeData value_data{value.begin(), value.end()};
     auto [it, inserted] = m_records.emplace(key_data, value_data);
     if (!inserted && overwrite) { // Overwrite if requested
         it->second = value_data;
         inserted = true;
     }
+    // Tell a test that asked to know, now the row is stored.
+    if (m_on_write != nullptr && *m_on_write) (*m_on_write)(Span{key_data.data(), key_data.size()});
     return inserted;
 }
 

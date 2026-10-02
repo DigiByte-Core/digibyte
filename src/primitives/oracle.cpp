@@ -432,8 +432,8 @@ bool operator!=(const COracleBundle& a, const COracleBundle& b)
  * OracleNode Implementation
  */
 
-OracleNodeInfo::OracleNodeInfo(uint32_t id_in, const CPubKey& pubkey_in, const std::string& endpoint_in, bool is_active_in)
-    : id(id_in), pubkey(pubkey_in), endpoint(endpoint_in), is_active(is_active_in)
+OracleNodeInfo::OracleNodeInfo(uint32_t id_in, const CPubKey& pubkey_in, const std::string& endpoint_in, bool is_active_in, const std::string& display_name_in)
+    : id(id_in), pubkey(pubkey_in), endpoint(endpoint_in), is_active(is_active_in), display_name(display_name_in)
 {
 }
 

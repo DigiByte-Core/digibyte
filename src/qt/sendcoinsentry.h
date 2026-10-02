@@ -32,7 +32,7 @@ public:
     ~SendCoinsEntry();
 
     void setModel(WalletModel *model);
-    bool validate(interfaces::Node& node);
+    bool validate(interfaces::Node& node, QString& error);
     SendCoinsRecipient getValue();
 
     /** Return whether the entry is still empty and unedited */

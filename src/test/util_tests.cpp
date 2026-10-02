@@ -1136,7 +1136,11 @@ static constexpr char ExitCommand = 'X';
             break;
         case ExitCommand:
             close(fd);
-            exit(0);
+            // This process is a forked copy of the test runner. Ending it with
+            // exit() would run the test runner's own global cleanup a second
+            // time, in a copy that does not own it, and that has crashed this
+            // helper. _exit() ends the process without running any of that.
+            _exit(0);
         default:
             assert(0);
         }

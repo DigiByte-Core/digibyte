@@ -14,7 +14,31 @@
 #include <util/hasher.h>
 
 #include <deque>
+#include <array>
+#include <memory>
+#include <optional>
 #include <vector>
+
+/** The recent history needed to count header work without storing the chain.
+ * Keep the median-time window and the last eligible block for each algorithm.
+ * An algorithm's last block can be much older than the median-time window.
+ */
+class HeadersWorkState {
+public:
+    HeadersWorkState(const Consensus::Params& params, const CBlockIndex& chain_start);
+    /** Reject a header whose required difficulty cannot justify its work. */
+    std::optional<arith_uint256> AddHeader(const CBlockHeader& header);
+    size_t GetHistorySize() const { return m_recent.size(); }
+
+private:
+    const Consensus::Params& m_params;
+    const CBlockIndex& m_chain_start;
+    const size_t m_history_limit;
+    std::deque<CBlockIndex> m_recent;
+    std::array<CBlockIndex, NUM_ALGOS_IMPL> m_previous_algos;
+    std::array<bool, NUM_ALGOS_IMPL> m_initialized{};
+    std::array<bool, NUM_ALGOS_IMPL> m_present{};
+};
 
 // A compressed CBlockHeader, which leaves out the prevhash
 struct CompressedHeader {
@@ -215,6 +239,9 @@ private:
 
     /** Store the last block in our block index that the peer's chain builds from */
     const CBlockIndex* m_chain_start{nullptr};
+
+    /** Bounded difficulty history for the current download pass. */
+    std::unique_ptr<HeadersWorkState> m_header_work;
 
     /** Minimum work that we're looking for on this chain. */
     const arith_uint256 m_minimum_required_work;

@@ -59,9 +59,9 @@ FUZZ_TARGET(pow, .init = initialize_pow)
                 current_block.nBits = fixed_bits;
             }
             if (fuzzed_data_provider.ConsumeBool()) {
-                current_block.nChainWork = previous_block != nullptr ? previous_block->nChainWork + GetBlockProof(*previous_block) : arith_uint256{0};
+                current_block.SetChainWork(previous_block != nullptr ? previous_block->GetChainWork() + GetBlockProof(*previous_block) : arith_uint256{0});
             } else {
-                current_block.nChainWork = ConsumeArithUInt256(fuzzed_data_provider);
+                current_block.SetChainWork(ConsumeArithUInt256(fuzzed_data_provider));
             }
         }
         {

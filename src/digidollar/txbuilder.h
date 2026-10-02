@@ -15,6 +15,7 @@
 #include <kernel/chainparams.h>
 #include <base58.h>
 
+#include <functional>
 #include <vector>
 #include <string>
 #include <utility>
@@ -46,8 +47,10 @@ struct TxBuilderMintParams {
     CAmount feeRate;            // Fee rate in sat/vB
     std::vector<COutPoint> utxos; // Available UTXOs for collateral
 
-    // Optional: Destination for DGB change output. Production wallet/RPC/Qt
-    // paths must set this to a wallet-controlled address.
+    // Where leftover DGB goes. Set this to an address the wallet owns. It must
+    // be an ordinary bech32 address, never taproot: a mint may hold DGB in only
+    // one taproot output, the locked collateral. If a mint would leave change
+    // behind and this is not set, the build fails and no transaction is made.
     std::optional<CTxDestination> dgbChangeDest;
 
     TxBuilderMintParams() : ddAmount(0), lockDays(0), lockTier(0), feeRate(1000) {} // Default 1000 sat/vB
@@ -63,8 +66,9 @@ struct TxBuilderTransferParams {
     std::vector<CAmount> feeAmounts;   // DGB amounts for each fee UTXO (parallel to feeUtxos)
     CKey spenderKey;            // Key for signing DD inputs
 
-    // Optional: Destination for DGB change output (if not set, uses spenderKey pubkey)
-    // CRITICAL: Must be set to a wallet-controlled address to avoid losing DGB!
+    // Where leftover DGB goes. Set this to an address the wallet owns. If a
+    // transfer would leave change behind and this is not set, the build fails
+    // and no transaction is made.
     std::optional<CTxDestination> dgbChangeDest;
 
     TxBuilderTransferParams() : feeRate(1000) {} // Default 1000 sat/vB
@@ -79,17 +83,22 @@ struct TxBuilderRedeemParams {
     CAmount ddToRedeem;             // Amount of DD to burn
     RedemptionPath path;            // Which redemption path to use
     CKey ownerKey;                  // Owner's private key (for signing collateral input)
-    CAmount feeRate;                // Fee rate in sat/vB
+    CAmount feeRate;                // Fee rate in sat/kB
+    CAmount minimumFee{0};          // Fee measured after signing a prior construction attempt
     std::vector<COutPoint> ddUtxos; // DD UTXOs to burn
     std::vector<CAmount> ddAmounts;  // DD amounts for each UTXO (parallel to ddUtxos)
     std::vector<COutPoint> feeUtxos; // DGB UTXOs for fees
     std::vector<CAmount> feeAmounts; // Amounts of fee UTXOs
 
-    // Optional: Destination for returned collateral (if not set, uses ownerKey pubkey)
+    // Where the collateral this redemption unlocks is paid. That is the whole
+    // vault, so it always gets its own output. Set this to an address the
+    // wallet owns, or to the address the user asked for. If it is not set the
+    // build fails and no transaction is made.
     std::optional<CTxDestination> collateralDest;
 
-    // Optional: Destination for DGB change output (if not set, uses collateralDest or ownerKey)
-    // CRITICAL: Must be set to a wallet-controlled address to avoid losing DGB!
+    // Where leftover fee money goes. Set this to an address the wallet owns so
+    // it stays in its own output, separate from the returned collateral. If it
+    // is not set, the collateral address above is used instead.
     std::optional<CTxDestination> dgbChangeDest;
 
     // Optional pre-queried position data (caller can provide to avoid UTXO lookups)
@@ -122,6 +131,7 @@ protected:
     const CChainParams& chainParams;
     int currentHeight;
     CAmount oraclePrice;
+    std::optional<int> candidateHealth;
 
     // Helper functions
     CAmount CalculateFee(const CMutableTransaction& tx, CAmount feeRate) const;
@@ -138,6 +148,9 @@ protected:
 public:
     TxBuilder(const CChainParams& params, int height, CAmount price);
     virtual ~TxBuilder() = default;
+
+    /** Supply health verified for this builder's candidate height and quote. */
+    void SetCandidateHealth(int health) { candidateHealth = health; }
 
     // Validation helpers
     bool ValidateAmount(CAmount amount) const;
@@ -195,7 +208,6 @@ protected:
 private:
     CScript CreateCollateralScript(const TxBuilderMintParams& params) const;
     CScript CreateDDOutputScript(const CKey& owner, CAmount amount) const;
-    CKey GenerateChangeKey() const;
 };
 
 // Transfer transaction builder
@@ -249,6 +261,59 @@ public:
      * @return Transaction builder result with success/error and transaction data
      */
     TxBuilderResult BuildRedemptionTransaction(const TxBuilderRedeemParams& params);
+
+    /**
+     * The size and fee BuildRedemptionTransaction arrives at for exactly
+     * these parameters. It lays out the same inputs (collateral, every DD
+     * token, every fee coin) and the same outputs that exist at the moment
+     * the build fixes its fee (the collateral return, plus the DD change
+     * token and its OP_RETURN record when the DD inputs exceed the burn),
+     * runs them through the same size estimator and applies the same
+     * absolute DD minimum fee. The DGB change output is added after the fee
+     * is fixed and therefore does not count, in the build or here.
+     *
+     * Callers use it to choose fee coins that the build will accept, instead
+     * of guessing a size in advance. A unit test pins it to the build.
+     */
+    struct FeeEstimate {
+        bool ok{false};
+        size_t vsize{0};   // Projected virtual size, safety margin included.
+        CAmount fee{0};    // The fee the build will charge, in satoshis.
+        std::string error; // Why no estimate could be made, when !ok.
+    };
+    FeeEstimate EstimateRedemptionFee(const TxBuilderRedeemParams& params) const;
+
+    /**
+     * Selects DGB coins worth at least `target` satoshis. On success it
+     * fills the coins and their amounts (same order, same length) and their
+     * total; it returns false when the wallet cannot reach the target. The
+     * wallet's own coin selection is passed in this shape so the builder
+     * never needs to know about wallets.
+     */
+    using FeeCoinSelector = std::function<bool(CAmount target,
+                                               std::vector<COutPoint>& utxos,
+                                               std::vector<CAmount>& amounts,
+                                               CAmount& total)>;
+
+    static constexpr int DEFAULT_FEE_SELECTION_ATTEMPTS{12};
+
+    /**
+     * Choose fee coins for a redemption so that the coins actually cover the
+     * fee of the transaction they produce. Every fee coin makes the
+     * transaction bigger and so raises the fee, which is why a single
+     * selection against a guessed size can come up short when a wallet
+     * holds only small DGB coins. Each attempt asks the selector for at
+     * least the fee the previous attempt's real size needs, and for
+     * strictly more than the previous attempt selected, so every attempt
+     * changes the input set until the coins cover the fee or the attempt
+     * budget is spent. On success params.feeUtxos and params.feeAmounts
+     * hold the chosen coins; on failure they are cleared and `error` says
+     * what the caller can do about it.
+     */
+    bool SelectRedemptionFeeInputs(TxBuilderRedeemParams& params,
+                                   const FeeCoinSelector& select_coins,
+                                   std::string& error,
+                                   int max_attempts = DEFAULT_FEE_SELECTION_ATTEMPTS) const;
 
     /**
      * Determine the appropriate redemption path based on current conditions

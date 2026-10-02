@@ -219,8 +219,16 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
                 // Only move from stempool to mempool if we haven't already done so
                 if (!already_in_mempool) {
                     LogPrintf("BroadcastTransaction: Moving transaction %s from stempool to mempool for regular broadcast\n", txid.ToString());
-                    // Remove from stempool and add to mempool for regular broadcast
-                    node.stempool->removeRecursive(*tx, MemPoolRemovalReason::REORG);
+                    // Remove from stempool and add to mempool for regular broadcast.
+                    // This fallback used to run both steps with no lock at all.
+                    // removeRecursive needs the stempool lock (block connect and
+                    // embargo expiry change the stempool from other threads) and
+                    // ProcessTransaction needs cs_main. cs_main is taken first and
+                    // the stempool lock inside it, the same order every other
+                    // stempool writer uses (cs_main, then mempool, then stempool).
+                    // Both are released at the end of this block, before the relay.
+                    LOCK(cs_main);
+                    WITH_LOCK(node.stempool->cs, node.stempool->removeRecursive(*tx, MemPoolRemovalReason::REORG));
                     const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false);
                     if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
                         return HandleATMPError(result.m_state, err_string);

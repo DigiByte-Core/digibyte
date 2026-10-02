@@ -6,3 +6,6 @@ paths-ignore:
   # Archived merge/debug snapshot retained for reference; do not analyze as
   # live release code or executable tests.
   - 'test/test_old_v26.2_mergev1/**'
+  # This retired framework has the same Python package name as the current
+  # test/functional framework. Scanning both resolves calls to the wrong class.
+  - 'qa/rpc-tests/**'

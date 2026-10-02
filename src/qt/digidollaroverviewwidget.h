@@ -118,6 +118,7 @@ private:
     QLabel* m_errLevelLabel;
     QLabel* m_errLevelValue;
     QProgressBar* m_systemHealthBar;
+    QLabel* m_mintStatusLabel;
 
     // Recent transactions section
     QFrame* m_transactionsFrame;

@@ -67,6 +67,12 @@ The DigiByte repo's [root README](/README.md) contains relevant information on t
 - [Dnsseed Policy](dnsseed-policy.md)
 - [Benchmarking](benchmarking.md)
 
+### Release documentation
+
+- [v9.26.4 pruning documentation](v9.26.4/V9.26.4_PRUNING_EXPLAINER.md)
+- [v9.26.2 archived documentation-validation prompt](v9.26.2/Z_DOC_VALIDATION_v9.26.2_PROMPT.md)
+- [Release-note archive](release-notes/), including [v8.26.2](release-notes/RELEASE-NOTES-8.26.2.md), [v9.26.2](release-notes/RELEASE_v9.26.2.md), and [v9.26.5](release-notes/RELEASE_v9.26.5.md)
+
 ### Resources
 * Discuss on the [DigiByteTalk](https://digibytetalk.org/) forums, in the [Development & Technical Discussion board](https://digibytetalk.org/index.php?board=6.0).
 * Discuss project-specific development on #digibyte-core-dev on Libera Chat. If you don't have an IRC client, you can use [web.libera.chat](https://web.libera.chat/#digibyte-core-dev).

@@ -1,0 +1,144 @@
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 69d29e5806..01385c1b75 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -14,6 +14,7 @@
+ #include <util/chaintype.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
++#include <util/thawday_lab.h>
+ 
+ #include <cassert>
+ #include <cstdint>
+@@ -168,6 +169,13 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+ 
+ void SelectParams(const ChainType chain)
+ {
++    // Help setup constructs every network before arguments are parsed. Apply
++    // the guard here, where the node selects its actual network after parsing.
++    if (chain != ChainType::TESTNET || !gArgs.GetBoolArg("-easypow", false)) {
++        throw std::runtime_error("THAW DAY TEST CLIENT: only -testnet -easypow is supported. This client is not for real funds.");
++    }
++    (void)ThawDayLabFeedURL();
++
+     SelectBaseParams(chain);
+     globalChainParams = CreateChainParams(gArgs, chain);
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index 9bb3ffa73e..37fa3c54fc 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -1379,6 +1379,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+         return false;
+     }
+ 
++    LogPrintf("THAW DAY TEST CLIENT: PRIVATE REHEARSAL ONLY. NOT FOR REAL FUNDS. DigiDollar height 600; Thaw Day height 5000.\n");
++
+     LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
+ 
+     // Warn about relative -datadir path.
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index fe0d7cebf5..5fbc6cc86b 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -728,6 +728,13 @@ public:
+ 
+ private:
+     void EnableLocalMiniTestnetMode() {
++        // These settings isolate this rehearsal from every public network.
++        consensus.nDDThawDayHeight = 5000;
++        pchMessageStart = {0xf9, 0xdd, 0xa5, 0x66};
++        nDefaultPort = 28444;
++        vSeeds.clear();
++        vFixedSeeds.clear();
++
+         consensus.fPowAllowMinDifficultyBlocks = true;
+         consensus.fEasyPow = true;
+         digidollarParams.activeOracles = 24;
+diff --git a/src/oracle/exchange.cpp b/src/oracle/exchange.cpp
+index 7a60633476..b96f0c94c7 100644
+--- a/src/oracle/exchange.cpp
++++ b/src/oracle/exchange.cpp
+@@ -15,6 +15,7 @@
+ #include <random.h>
+ #include <util/strencodings.h>
+ #include <util/system.h>
++#include <util/thawday_lab.h>
+ #include <util/time.h>
+ #include <univalue.h>
+ 
+@@ -88,6 +89,8 @@ static int CurlInterruptCallback(void* clientp, double, double, double, double)
+ BaseExchangeFetcher::BaseExchangeFetcher(const std::string& name, const std::string& url)
+     : exchange_name(name), base_url(url)
+ {
++    // Exercise each real parser using only the private fixture server.
++    base_url = ThawDayLabFeedURL() + "/" + exchange_name;
+ #ifdef HAVE_LIBCURL
+     // Ensure curl is globally initialized (safe to call multiple times)
+     static bool curl_initialized = []() {
+@@ -121,6 +124,12 @@ BaseExchangeFetcher::~BaseExchangeFetcher()
+ 
+ std::string BaseExchangeFetcher::HttpGet(const std::string& url)
+ {
++    // A hard-coded or future fallback URL must not escape the fixture server.
++    const std::string fixture_prefix = base_url + "/";
++    if (url.compare(0, fixture_prefix.size(), fixture_prefix) != 0) {
++        LogPrintf("THAW DAY TEST CLIENT: refused an exchange request outside the local fixture.\n");
++        return "";
++    }
+ #ifdef HAVE_LIBCURL
+     if (m_interrupt_callback && m_interrupt_callback()) {
+         LogPrint(BCLog::DIGIDOLLAR, "HttpGet: interrupted before request to %s\n", url);
+@@ -169,13 +178,14 @@ std::string BaseExchangeFetcher::HttpGet(const std::string& url)
+     // Set timeout
+     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeout_seconds));
+ 
+-    // Follow redirects
+-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
++    // The fixture must be reached directly and cannot redirect to the Internet.
++    curl_easy_setopt(curl, CURLOPT_PROXY, "");
++    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
++    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
+ #if CURL_AT_LEAST_VERSION(7, 85, 0)
+-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
++    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http");
+ #else
+-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
++    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP);
+ #endif
+     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+ 
+--- /dev/null
++++ b/src/util/thawday_lab.h
+@@ -0,0 +1,30 @@
++// This file belongs only to the isolated Thaw Day rehearsal client.
++#ifndef DIGIBYTE_UTIL_THAWDAY_LAB_H
++#define DIGIBYTE_UTIL_THAWDAY_LAB_H
++
++#include <util/strencodings.h>
++
++#include <cstdlib>
++#include <stdexcept>
++#include <string>
++
++inline std::string ThawDayLabFeedURL()
++{
++    const char* enabled = std::getenv("THAWDAY_LAB");
++    if (!enabled || std::string{enabled} != "1") {
++        throw std::runtime_error("THAW DAY TEST CLIENT: set THAWDAY_LAB=1. This client is not for real funds.");
++    }
++
++    const char* configured = std::getenv("THAWDAY_FEED_URL");
++    const std::string url = configured ? configured : "";
++    const std::string prefix = "http://127.0.0.1:";
++    uint16_t port{0};
++    const std::string port_text = url.compare(0, prefix.size(), prefix) == 0 ? url.substr(prefix.size()) : "";
++    if (port_text.empty() || port_text.find_first_not_of("0123456789") != std::string::npos ||
++        !ParseUInt16(port_text, &port) || port == 0) {
++        throw std::runtime_error("THAW DAY TEST CLIENT: THAWDAY_FEED_URL must be http://127.0.0.1:<port>. Public exchange access is disabled.");
++    }
++    return url;
++}
++
++#endif // DIGIBYTE_UTIL_THAWDAY_LAB_H

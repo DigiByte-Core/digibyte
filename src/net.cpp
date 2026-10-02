@@ -3392,7 +3392,17 @@ void CConnman::StopNodes()
 
     // Delete peer connections.
     std::vector<CNode*> nodes;
-    WITH_LOCK(m_nodes_mutex, nodes.swap(m_nodes));
+    {
+        LOCK(m_nodes_mutex);
+        // No peer route may survive into finalization. FinalizeNode can inspect
+        // pending stem inventory while peers are deleted one at a time.
+        localDandelionDestination = nullptr;
+        mDandelionRoutes.clear();
+        vDandelionDestination.clear();
+        vDandelionInbound.clear();
+        vDandelionOutbound.clear();
+        nodes.swap(m_nodes);
+    }
     for (CNode* pnode : nodes) {
         pnode->CloseSocketDisconnect();
         DeleteNode(pnode);

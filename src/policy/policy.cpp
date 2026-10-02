@@ -115,17 +115,9 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
     const bool isDigiDollar = hasDigiDollarMarker &&
                               DigiDollar::GetDigiDollarTxType(tx) != DigiDollar::DD_TX_NONE;
 
-    LogPrintf("IsStandardTx: version=%d, isDigiDollar=%d, TX_MAX_STANDARD_VERSION=%d\n",
-              tx.nVersion, isDigiDollar, TX_MAX_STANDARD_VERSION);
-
     if (!isDigiDollar && (tx.nVersion > TX_MAX_STANDARD_VERSION || tx.nVersion < 1)) {
-        LogPrintf("IsStandardTx: REJECTED - version out of range\n");
         reason = "version";
         return false;
-    }
-
-    if (isDigiDollar) {
-        LogPrintf("IsStandardTx: ALLOWED - DigiDollar transaction detected\n");
     }
 
     // Extremely large transactions with lots of inputs can cost the network

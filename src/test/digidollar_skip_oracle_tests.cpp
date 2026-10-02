@@ -27,7 +27,14 @@
 #include <pubkey.h>
 #include <primitives/transaction.h>
 #include <consensus/validation.h>
+#include <chainparams.h>
+#include <common/args.h>
+#include <kernel/chainparams.h>
+#include <util/chaintype.h>
 #include <test/util/setup_common.h>
+
+#include <memory>
+#include <string>
 
 #include <boost/test/unit_test.hpp>
 
@@ -400,6 +407,134 @@ BOOST_FIXTURE_TEST_CASE(non_ibd_err_still_blocks_when_active, BasicTestingSetup)
 
     // Clean up ERR state — reconstruct with healthy system
     DigiDollar::ERR::EmergencyRedemptionRatio::ReconstructERRState(150, currentHeight);
+}
+
+// =============================================================================
+// The oracle bypass must stop reading how far this node has synced once the
+// Thaw Day rules are in force.
+//
+// Two nodes looking at the same block have to reach the same answer. The
+// bypass below is switched on by the node's own position in the chain: a node
+// that is still downloading blocks sets it, a node that is up to date does
+// not. Below the Thaw Day height that behaviour is kept exactly as it has
+// always been, because the blocks already on the chain were accepted under it.
+// From the Thaw Day height on the bypass is ignored, so the answer depends
+// only on the block being checked.
+// =============================================================================
+
+namespace {
+
+// Build regtest chain parameters the way startup does, with the Thaw Day
+// height set by the regtest-only option. An empty string means the option was
+// not given, which is how every shipped network is configured.
+std::unique_ptr<const CChainParams> RegtestParamsWithThawDay(const std::string& thaw_day_height)
+{
+    ArgsManager args;
+    if (!thaw_day_height.empty()) args.ForceSetArg("-ddthawdayheight", thaw_day_height);
+    return CreateChainParams(args, ChainType::REGTEST);
+}
+
+constexpr int THAW_HEIGHT = 100;
+constexpr int BELOW_THAW = 50;
+constexpr int ABOVE_THAW = 200;
+
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(normal_redemption_err_block_ignores_sync_state_from_thaw_day, BasicTestingSetup)
+{
+    // A redemption that burns only the principal is not allowed while system
+    // health is below 100 per cent: the owner has to burn extra DigiDollars
+    // instead. Whether that rule is applied must not depend on how far the
+    // node checking the block has synced.
+    const auto scheduled = RegtestParamsWithThawDay(std::to_string(THAW_HEIGHT));
+    const auto not_scheduled = RegtestParamsWithThawDay("");
+
+    CMutableTransaction mtx;
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(uint256S("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"), 0);
+    mtx.nLockTime = 0;
+    const CTransaction tx(mtx);
+
+    const int unhealthy = 80;  // below 100 per cent, so the emergency rule applies
+
+    // At and above the Thaw Day height both nodes must refuse the redemption.
+    for (const bool still_downloading : {false, true}) {
+        DigiDollar::ValidationContext ctx(ABOVE_THAW, 500000, unhealthy, *scheduled,
+                                          nullptr, still_downloading);
+        TxValidationState state;
+        const bool accepted = DigiDollar::ValidateNormalRedemptionConditions(tx, ctx, state);
+        BOOST_TEST_MESSAGE("above the height, still_downloading=" +
+                           std::to_string(still_downloading) + ": accepted=" +
+                           std::to_string(accepted) + " reason=" + state.GetRejectReason());
+        BOOST_CHECK_MESSAGE(!accepted,
+            "a node that thinks it is still downloading accepted a redemption that a "
+            "node which knows it is up to date refuses, at a height where the Thaw Day "
+            "rules are in force");
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "redemption-err-active");
+    }
+
+    // Below the height nothing moves. A node that is still downloading keeps
+    // the old bypass and accepts; a node that is up to date still refuses.
+    {
+        DigiDollar::ValidationContext ctx(BELOW_THAW, 500000, unhealthy, *scheduled, nullptr, true);
+        TxValidationState state;
+        BOOST_CHECK_MESSAGE(DigiDollar::ValidateNormalRedemptionConditions(tx, ctx, state),
+            "the bypass below the Thaw Day height changed, so blocks already on the chain "
+            "would now be judged differently");
+    }
+    {
+        DigiDollar::ValidationContext ctx(BELOW_THAW, 500000, unhealthy, *scheduled, nullptr, false);
+        TxValidationState state;
+        BOOST_CHECK(!DigiDollar::ValidateNormalRedemptionConditions(tx, ctx, state));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "redemption-err-active");
+    }
+
+    // On a network with no Thaw Day height, which is every network this
+    // release ships with, the old bypass applies at every height.
+    {
+        DigiDollar::ValidationContext ctx(ABOVE_THAW, 500000, unhealthy, *not_scheduled, nullptr, true);
+        TxValidationState state;
+        BOOST_CHECK_MESSAGE(DigiDollar::ValidateNormalRedemptionConditions(tx, ctx, state),
+            "a network without a Thaw Day height lost the old bypass");
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(mint_oracle_price_check_ignores_sync_state, BasicTestingSetup)
+{
+    // A mint can only be judged against the price its own block carries. A
+    // block with no price refuses every mint in it, and that must not change
+    // with how far the node checking it has synced. This holds at every
+    // height, before and after Thaw Day, and it is what stops a node that is
+    // still downloading from accepting a mint that an up-to-date node refuses.
+    CKey key;
+    key.MakeNewKey(true);
+    const XOnlyPubKey ownerKey(key.GetPubKey());
+    DigiDollar::Volatility::VolatilityMonitor::ClearFreeze();
+
+    const auto scheduled = RegtestParamsWithThawDay(std::to_string(THAW_HEIGHT));
+
+    for (const int height : {BELOW_THAW, ABOVE_THAW}) {
+        const CMutableTransaction mtx = BuildMintTx(ownerKey, 100 * COIN, height);
+        const CTransaction tx(mtx);
+        std::string reason[2];
+        for (int i = 0; i < 2; ++i) {
+            const bool still_downloading = (i == 1);
+            DigiDollar::ValidationContext ctx(height, 0 /* the block carries no price */,
+                                              150, *scheduled, nullptr, still_downloading);
+            TxValidationState state;
+            const bool accepted = DigiDollar::ValidateMintTransaction(tx, ctx, state);
+            reason[i] = state.GetRejectReason();
+            BOOST_TEST_MESSAGE("height " + std::to_string(height) + ", still_downloading=" +
+                               std::to_string(still_downloading) + ": accepted=" +
+                               std::to_string(accepted) + " reason=" + reason[i]);
+            BOOST_CHECK_MESSAGE(!accepted, "a mint was accepted from a block that carries no price");
+            BOOST_CHECK_EQUAL(reason[i], "bad-oracle-price");
+        }
+        BOOST_CHECK_MESSAGE(reason[0] == reason[1],
+            "the same mint was judged by a different check depending on how far the node "
+            "had synced: up to date said '" + reason[0] + "', still downloading said '" +
+            reason[1] + "'");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

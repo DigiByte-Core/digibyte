@@ -433,8 +433,7 @@
 - `CalculateNextWorkRequired()` → core difficulty calculation: adjusts target based on actual vs expected timespan
 - `InitialDifficulty()` → returns genesis difficulty target for each algo
 - `CheckProofOfWork()` → validates that a block hash meets the required difficulty target
-- `GetLastBlockIndexForAlgo()` → walks chain backwards to find previous block using same mining algorithm
-- `GetLastBlockIndexForAlgoFast()` → optimized version using cached algo data
+- `GetLastBlockIndexForAlgo()` → walks chain backwards to find previous block using same mining algorithm. This is the only per-algorithm lookup; the second, cache-backed version was removed to save memory
 - `GetPoWAlgoHash()` → hashes block header using the correct algorithm (SHA256d, Scrypt, Groestl, Skein, Qubit/Odocrypt)
 - `PermittedDifficultyTransition()` → validates difficulty change between consecutive blocks is within allowed range
 
@@ -606,7 +605,7 @@
 - `CBlockUndo` (class) → undo data for an entire block: all CTxUndo entries (excluding coinbase)
 
 ### src/validation.cpp / .h
-- ⚠️ ~7060 lines. DigiDollar/oracle-aware: activation gating via `DigiDollar::IsDigiDollarEnabled`, `Consensus::IsOracleActive`, MuSig2 v0x03 bundle extraction in `ConnectBlock` (~lines 3099-3108), `SCRIPT_VERIFY_DIGIDOLLAR` flag set when `DEPLOYMENT_DIGIDOLLAR` is active (`GetBlockScriptFlags` at line 2755, flag set at lines 2795-2798), and incremental DD supply tracking via `DigiDollar::SystemHealthMonitor::OnMint{Connected,Disconnected}` / `OnRedeem{Connected,Disconnected}`.
+- ⚠️ ~7,680 lines. DigiDollar/oracle-aware: activation gating via `DigiDollar::IsDigiDollarEnabled`, `Consensus::IsOracleActive`, MuSig2 v0x03 bundle extraction in `ConnectBlock` (`src/validation.cpp:3402-3440`), `SCRIPT_VERIFY_DIGIDOLLAR` flag set when `DEPLOYMENT_DIGIDOLLAR` is active (`GetBlockScriptFlags` at `src/validation.cpp:3030`, flag set at 3071-3072), and incremental DD supply tracking via `DigiDollar::SystemHealthMonitor::OnMint{Connected,Disconnected}` / `OnRedeem{Connected,Disconnected}`.
 - `Chainstate` (class) → manages a single validated chain state (UTXO set + block index)
   - `ActivateBestChain()` → selects and activates the best valid chain tip, connecting new blocks
   - `ConnectTip()` → connects a single new block to the chain tip, executing all transactions

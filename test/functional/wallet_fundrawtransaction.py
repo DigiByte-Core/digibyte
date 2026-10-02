@@ -1023,8 +1023,8 @@ class RawTransactionsTest(DigiByteTestFramework):
             outputs[recipient.getnewaddress()] = 0.1
         wallet.sendmany("", outputs)
         self.generate(self.nodes[0], 10)
-        assert_raises_rpc_error(-4, "The inputs size exceeds the maximum weight. "
-                                    "Please try sending a smaller amount or manually consolidating your wallet's UTXOs",
+        assert_raises_rpc_error(-4, "This transaction needs too many coins and is too large to send. "
+                                    "Try sending a smaller amount, or combine small coins by sending them to yourself first.",
                                 recipient.fundrawtransaction, rawtx)
         self.nodes[0].unloadwallet("large")
 

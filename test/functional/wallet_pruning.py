@@ -31,6 +31,9 @@ class WalletPruningTest(DigiByteTestFramework):
             [], # node dedicated to mining
             ['-prune=550', '-digidollarstatsindex=0'], # node dedicated to testing pruning
         ]
+        # Keep ordinary wallet pruning outside the DigiDollar retention window.
+        for args in self.extra_args:
+            args.append("-digidollaractivationheight=2147483646")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()

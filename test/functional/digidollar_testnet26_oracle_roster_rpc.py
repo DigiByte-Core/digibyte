@@ -10,9 +10,8 @@ mini-testnet harness uses `-testnet -easypow`, which keeps the testnet26 chain
 identity while swapping to 24 deterministic local oracle keys so the harness
 can exercise quorum behavior without production private keys.
 
-This pins the operator-facing `getoracles` surface against stale 17-oracle
-display assumptions in the local harness. Slots 17-23 must not show up as
-fallback display labels to operators.
+This checks all active slots, their quorum fields, and their local display
+labels. Deterministic local keys must not inherit public operator names.
 """
 
 import os
@@ -86,30 +85,17 @@ class DigiDollarTestnet26OracleRosterRPCTest(DigiByteTestFramework):
         assert_equal(deployment["oracle_consensus_required"], 7)
         assert_equal(deployment["oracle_total_slots"], 35)
 
-        self.log.info("Verify getoracles names all 24 active local mini-testnet slots")
+        self.log.info("Verify getoracles labels all 24 active local test slots")
         active_oracles = node.getoracles(True, 20)
         assert_equal(len(active_oracles), 24)
 
-        expected_names = {
-            17: "digibyte-maxi",
-            18: "Anthony",
-            19: "mbah_jambon",
-            20: "Camden",
-            21: "Twoface123",
-            22: "LivingTheLife",
-            23: "ChozenOne43",
-        }
         for oracle in active_oracles:
             oracle_id = oracle["oracle_id"]
             assert_equal(oracle["is_active"], True)
             assert_equal(oracle["in_consensus"], True)
             assert_equal(oracle["active_oracle_count"], 24)
             assert_equal(oracle["consensus_threshold"], 7)
-            assert not oracle["name"].startswith("Oracle "), (
-                "active oracle slot %d must have an operator display name" % oracle_id
-            )
-            if oracle_id in expected_names:
-                assert_equal(oracle["name"], expected_names[oracle_id])
+            assert_equal(oracle["name"], f"Oracle {oracle_id}")
 
 
 if __name__ == "__main__":

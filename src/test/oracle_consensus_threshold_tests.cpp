@@ -84,6 +84,7 @@ Consensus::Params MakeMuSig2TestParams(int total_oracles, int required)
     params.nOraclePubkeyCount = total_oracles;
     params.nOracleConsensusRequired = required;
     params.vOraclePublicKeys.clear();
+    params.vOracleCompressedPublicKeys.clear();
 
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     BOOST_REQUIRE(ctx != nullptr);
@@ -100,6 +101,11 @@ Consensus::Params MakeMuSig2TestParams(int total_oracles, int required)
         std::array<unsigned char, 32> serialized{};
         BOOST_REQUIRE(secp256k1_xonly_pubkey_serialize(ctx, serialized.data(), &xonly));
         params.vOraclePublicKeys.push_back(HexStr(serialized));
+        std::vector<unsigned char> compressed(CPubKey::COMPRESSED_SIZE);
+        size_t compressed_size = compressed.size();
+        BOOST_REQUIRE(secp256k1_ec_pubkey_serialize(ctx, compressed.data(), &compressed_size,
+                                                  &pubkey, SECP256K1_EC_COMPRESSED));
+        params.vOracleCompressedPublicKeys.push_back(compressed);
     }
 
     secp256k1_context_destroy(ctx);

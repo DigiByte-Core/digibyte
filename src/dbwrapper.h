@@ -23,6 +23,11 @@
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 
+//! Table cache target for buffered block-index and chainstate databases.
+static constexpr int BUFFERED_DB_TABLE_CACHE_FILES{64};
+//! LevelDB subtracts ten non-table files from max_open_files for its table cache.
+static constexpr int BUFFERED_DB_MAX_OPEN_FILES{BUFFERED_DB_TABLE_CACHE_FILES + 10};
+
 //! User-controlled performance and debug options.
 struct DBOptions {
     //! Compact database on startup.
@@ -44,6 +49,10 @@ struct DBParams {
     bool obfuscate = false;
     //! Passed-through options.
     DBOptions options{};
+    //! Allow the disk environment to map whole table files into memory.
+    bool use_mmap = true;
+    //! Override LevelDB's open-file cache target for this database only.
+    std::optional<int> max_open_files{};
 };
 
 class dbwrapper_error : public std::runtime_error
@@ -54,6 +63,10 @@ public:
 
 class CDBWrapper;
 
+namespace leveldb {
+struct Options;
+}
+
 /** These should be considered an implementation detail of the specific database.
  */
 namespace dbwrapper_private {
@@ -63,6 +76,7 @@ namespace dbwrapper_private {
  * specific database.
  */
 const std::vector<unsigned char>& GetObfuscateKey(const CDBWrapper &w);
+const leveldb::Options& GetOptions(const CDBWrapper& wrapper);
 
 }; // namespace dbwrapper_private
 
@@ -142,6 +156,8 @@ public:
     ~CDBIterator();
 
     bool Valid() const;
+    //! Throw on an iterator read error, including an error reported at end of scan.
+    void CheckStatus() const;
 
     void SeekToFirst();
 
@@ -153,6 +169,9 @@ public:
     }
 
     void Next();
+
+    //! Size of the current serialized key in bytes.
+    size_t GetKeySize() const { return GetKeyImpl().size(); }
 
     template<typename K> bool GetKey(K& key) {
         try {
@@ -181,6 +200,7 @@ struct LevelDBContext;
 class CDBWrapper
 {
     friend const std::vector<unsigned char>& dbwrapper_private::GetObfuscateKey(const CDBWrapper &w);
+    friend const leveldb::Options& dbwrapper_private::GetOptions(const CDBWrapper& wrapper);
 private:
     //! holds all leveldb-specific fields of this class
     std::unique_ptr<LevelDBContext> m_db_context;

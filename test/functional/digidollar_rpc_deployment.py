@@ -8,10 +8,20 @@ DigiDollar is a buried deployment (BIP90): the RPC reports the hardcoded
 per-network activation height instead of BIP9 signaling state. On default
 regtest the buried deployment height is 0, so the deployment is active from
 genesis while the static DD/oracle height gates stay at 650.
+
+The RPC also reports Thaw Day, the one block height at which every consensus
+change of the Thaw Day release takes effect. No network schedules it by
+default; on regtest the -ddthawdayheight option schedules it, and the status
+booleans follow the active chain tip through the shared predicate.
 """
 
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import assert_equal, assert_greater_than_or_equal
+
+# Thaw Day height scheduled with the regtest option in the tests below. It is
+# above the default regtest DD/oracle gate (650) so the walk to it crosses
+# nothing else.
+THAW_DAY_HEIGHT = 700
 
 
 class DigiDollarRPCDeploymentTest(DigiByteTestFramework):
@@ -38,6 +48,8 @@ class DigiDollarRPCDeploymentTest(DigiByteTestFramework):
         self.test_deployment_status_values()
         self.test_deployment_after_activation()
         self.test_deployment_info_oracle_activation_fields()
+        self.test_thaw_day_not_scheduled_by_default()
+        self.test_thaw_day_scheduled_with_regtest_option()
 
         self.log.info("All deployment info tests passed!")
 
@@ -160,6 +172,111 @@ class DigiDollarRPCDeploymentTest(DigiByteTestFramework):
             assert_equal(result1['enabled'], result2['enabled'])
 
         self.log.info("Deployment info is consistent across blocks")
+
+    def check_thaw_day(self, node, scheduled_height=None):
+        """Check the thaw_day object against the node's actual tip.
+
+        With scheduled_height None the object must say "not scheduled" and
+        carry no height. Otherwise it must carry exactly that height and the
+        two booleans must follow the tip height, because default regtest has
+        DigiDollar active from genesis so only the Thaw Day height decides.
+        Returns the whole RPC result.
+        """
+        result = node.getdigidollardeploymentinfo()
+        assert 'thaw_day' in result, "Missing 'thaw_day' object"
+        thaw = result['thaw_day']
+        assert isinstance(thaw, dict), "thaw_day should be an object"
+        # bool is a subclass of int in Python, so pin the exact JSON types.
+        for field, expected_type in (('scheduled', bool),
+                                     ('tip_height', int),
+                                     ('next_block_height', int),
+                                     ('active_at_tip', bool),
+                                     ('active_next_block', bool)):
+            assert field in thaw, f"Missing 'thaw_day.{field}'"
+            assert type(thaw[field]) is expected_type, \
+                f"'thaw_day.{field}' should be {expected_type.__name__}, got {type(thaw[field]).__name__}"
+
+        tip = node.getblockcount()
+        assert_equal(thaw['tip_height'], tip)
+        assert_equal(thaw['next_block_height'], tip + 1)
+
+        if scheduled_height is None:
+            assert_equal(thaw['scheduled'], False)
+            assert 'height' not in thaw, "'thaw_day.height' must be absent when not scheduled"
+            assert_equal(thaw['active_at_tip'], False)
+            assert_equal(thaw['active_next_block'], False)
+        else:
+            assert_equal(thaw['scheduled'], True)
+            assert 'height' in thaw, "Missing 'thaw_day.height' although scheduled"
+            assert type(thaw['height']) is int, "'thaw_day.height' should be int"
+            assert_equal(thaw['height'], scheduled_height)
+            assert_equal(thaw['active_at_tip'], tip >= scheduled_height)
+            assert_equal(thaw['active_next_block'], tip + 1 >= scheduled_height)
+        return result
+
+    def test_thaw_day_not_scheduled_by_default(self):
+        self.log.info("Testing thaw_day is reported as not scheduled without the regtest option...")
+        node = self.nodes[0]
+
+        self.check_thaw_day(node)
+        # Still not scheduled, and still tracking the tip, after more blocks.
+        self.generate(node, 1)
+        self.check_thaw_day(node)
+
+        self.log.info("thaw_day present, not scheduled, no height, both actives false")
+
+    def test_thaw_day_scheduled_with_regtest_option(self):
+        self.log.info("Testing thaw_day with -ddthawdayheight=%d..." % THAW_DAY_HEIGHT)
+        node = self.nodes[0]
+
+        before = node.getdigidollardeploymentinfo()
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-ddthawdayheight=%d" % THAW_DAY_HEIGHT])
+        after = self.check_thaw_day(node, THAW_DAY_HEIGHT)
+
+        # Scheduling Thaw Day changes nothing else the RPC reports (the
+        # MuSig2 session object is live operator state, not configuration).
+        for key in before:
+            if key in ('thaw_day', 'musig2_session'):
+                continue
+            assert_equal(before[key], after[key])
+
+        # Walk the tip to the boundary: two below, one below, at, and past.
+        tip = node.getblockcount()
+        assert tip < THAW_DAY_HEIGHT - 2, "test setup mined past the Thaw Day boundary"
+        self.generate(node, THAW_DAY_HEIGHT - 2 - tip)
+        thaw = self.check_thaw_day(node, THAW_DAY_HEIGHT)['thaw_day']
+        assert_equal(thaw['tip_height'], THAW_DAY_HEIGHT - 2)
+        assert_equal(thaw['active_at_tip'], False)
+        assert_equal(thaw['active_next_block'], False)
+
+        # One below: the next block may use the new rules; the tip does not.
+        self.generate(node, 1)
+        thaw = self.check_thaw_day(node, THAW_DAY_HEIGHT)['thaw_day']
+        assert_equal(thaw['tip_height'], THAW_DAY_HEIGHT - 1)
+        assert_equal(thaw['active_at_tip'], False)
+        assert_equal(thaw['active_next_block'], True)
+
+        # At Thaw Day: both.
+        self.generate(node, 1)
+        thaw = self.check_thaw_day(node, THAW_DAY_HEIGHT)['thaw_day']
+        assert_equal(thaw['tip_height'], THAW_DAY_HEIGHT)
+        assert_equal(thaw['active_at_tip'], True)
+        assert_equal(thaw['active_next_block'], True)
+
+        # Past Thaw Day: stays active.
+        self.generate(node, 5)
+        thaw = self.check_thaw_day(node, THAW_DAY_HEIGHT)['thaw_day']
+        assert_equal(thaw['tip_height'], THAW_DAY_HEIGHT + 5)
+        assert_equal(thaw['active_at_tip'], True)
+        assert_equal(thaw['active_next_block'], True)
+
+        # The schedule comes from configuration, not from anything the node
+        # saved: restarting without the option reports "not scheduled" again
+        # even though the chain is past the height.
+        self.restart_node(0, extra_args=self.extra_args[0])
+        self.check_thaw_day(node)
+
+        self.log.info("thaw_day follows the tip: false/false, false/true, true/true, and unscheduled after restart")
 
 
 if __name__ == '__main__':

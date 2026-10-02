@@ -302,7 +302,8 @@ class SendallTest(DigiByteTestFramework):
 
     def sendall_fails_on_automatic_high_fee(self):
         self.log.info("Test sendall fails if automatic fee selection would pay an excessive absolute fee")
-        self.restart_node(0, extra_args=["-dandelion=0", "-maxtxfee=100", "-fallbackfee=1"])
+        # A minimum rate keeps this fee high even when startup restores lower estimates.
+        self.restart_node(0, extra_args=["-dandelion=0", "-maxtxfee=100", "-mintxfee=1"])
         self.reload_test_wallets()
 
         self.nodes[0].createwallet("automatic_high_fee")

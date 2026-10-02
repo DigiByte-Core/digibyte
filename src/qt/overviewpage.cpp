@@ -37,7 +37,7 @@ class TxViewDelegate : public QAbstractItemDelegate
     Q_OBJECT
 public:
     explicit TxViewDelegate(const PlatformStyle* _platformStyle, QObject* parent = nullptr)
-        : QAbstractItemDelegate(parent), unit(DigiByteUnits::Unit::DGB),
+        : QAbstractItemDelegate(parent),
         platformStyle(_platformStyle), isDarkTheme(false)
     {
         connect(this, &TxViewDelegate::width_changed, this, &TxViewDelegate::sizeHintChanged);
@@ -61,7 +61,11 @@ public:
 
         QDateTime date = index.data(TransactionTableModel::DateRole).toDateTime();
         QString address = index.data(Qt::DisplayRole).toString();
-        qint64 amount = index.data(TransactionTableModel::AmountRole).toLongLong();
+        // The one figure this row has: DigiByte, or dollars on a DigiDollar row,
+        // which holds no DigiByte at all. Reading the DigiByte figure on a
+        // DigiDollar row would print a zero DigiByte amount for a payment in
+        // dollars.
+        qint64 amount = index.data(TransactionTableModel::SingleAmountRole).toLongLong();
         bool confirmed = index.data(TransactionTableModel::ConfirmedRole).toBool();
 
         // Get foreground color from model's ForegroundRole
@@ -103,7 +107,7 @@ public:
             foreground = isDarkTheme ? QColor(100, 255, 100) : QColor(0, 150, 0);
         }
         painter->setPen(foreground);
-        QString amountText = DigiByteUnits::formatWithUnit(unit, amount, true, DigiByteUnits::SeparatorStyle::ALWAYS);
+        QString amountText = index.data(TransactionTableModel::FormattedSingleAmountRole).toString();
         if(!confirmed)
         {
             amountText = QString("[") + amountText + QString("]");
@@ -147,7 +151,6 @@ public:
         return {DECORATION_SIZE + 8 + minimum_text_width, DECORATION_SIZE};
     }
 
-    DigiByteUnit unit{DigiByteUnit::DGB};
     bool isDarkTheme;
 
 Q_SIGNALS:
@@ -368,9 +371,8 @@ void OverviewPage::updateDisplayUnit()
             setBalance(balances);
         }
 
-        // Update txdelegate->unit with the current unit
-        txdelegate->unit = walletModel->getOptionsModel()->getDisplayUnit();
-        
+        // The amount text comes from the model, which reads the display unit
+        // itself, so a change of unit only has to force a repaint.
         // Update theme too (empty defaults to dark, matching applyTheme())
         QString currentTheme = walletModel->getOptionsModel()->data(walletModel->getOptionsModel()->index(OptionsModel::Theme), Qt::EditRole).toString();
         txdelegate->isDarkTheme = (currentTheme.isEmpty() || currentTheme == "dark");
