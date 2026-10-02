@@ -147,6 +147,8 @@ class DigiDollarThawDayHeightTest(DigiByteTestFramework):
             self.log.info(f"Check the published Thaw Day schedule on {rpc_chain}")
             index = len(self.nodes)
             datadir = initialize_datadir(self.options.tmpdir, index, "")
+            # These isolated nodes only read settings at genesis. Limit their
+            # disk budget so startup does not warn about room for a full chain.
             node = TestNode(
                 index, datadir, chain=chain_directory, rpchost=None,
                 timewait=self.rpc_timeout, timeout_factor=self.options.timeout_factor,
@@ -155,7 +157,8 @@ class DigiDollarThawDayHeightTest(DigiByteTestFramework):
                 descriptors=None,
                 extra_args=[f"-chain={chain_arg}", f"-rpcport={rpc_port(index)}",
                             f"-port={p2p_port(index)}", "-networkactive=0", "-listen=0",
-                            "-connect=0", "-dnsseed=0", "-fixedseeds=0", "-dbcache=4"],
+                            "-connect=0", "-dnsseed=0", "-fixedseeds=0", "-dbcache=4",
+                            "-prune=550"],
             )
             self.nodes.append(node)
             node.start()
