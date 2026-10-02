@@ -67,6 +67,35 @@ the rules used to accept transactions or blocks.
    **Why:** A clock jump during an unfinished download can disconnect a test
    peer. Production timeouts and all accounting and reorg checks remain intact.
 
+## Verification so far
+
+The Linux checks below used source commit
+`ecdd7cc0a4729f0656ad85d626ae21ab2369a907`.
+
+| Check | Result |
+| --- | --- |
+| Core unit tests | 3,760 cases passed; two existing partial-fixture warnings |
+| Extended functional tests | 405 passed, 17 skipped, none failed |
+| Native Qt tests | 180 reported cases passed, none skipped |
+| Sanitizer fuzz tests | All 256 targets passed, with no reported memory or undefined-behavior errors |
+| Cryptography and supporting libraries | All six test programs passed |
+| Utility and RPC authentication tests | Passed |
+
+The optional script-data unit case also passed with real external test vectors.
+The functional skips require older binaries, tracing support, special network
+interfaces, or unsupported Signet features. A skip is not a pass.
+
+Fuzz testing checked 85,933 saved inputs. The two targets without saved inputs
+each generated new inputs for ten seconds. This was a bounded run, not an
+exhaustive search.
+
+Desktop checks covered the changed tooltip and version display in light and
+dark themes. An unused receive address created in Qt kept its RPC entry and
+label after a wallet restart. These checks used an isolated test wallet.
+
+Release packages have not been built. They still need checks on their target
+systems before publication. These source tests do not replace package testing.
+
 ## Existing limits
 
 - Use `validateddaddress` for DD, TD and RD addresses. `validateaddress`
