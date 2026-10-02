@@ -1287,7 +1287,7 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::NUM, "blocks", "the height of the most-work fully-validated chain. The genesis block has height 0"},
                 {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
                 {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
-                {RPCResult::Type::NUM, "difficulty", "the current difficulty"},
+                {RPCResult::Type::NUM, "difficulty", "difficulty of the tip block, calculated from its proof-of-work target"},
                 {RPCResult::Type::OBJ, "difficulties", "the current difficulty for all active DigiByte algorithms",
                     {
                         {RPCResult::Type::NUM, "sha256d", /*optional=*/true, "SHA256D difficulty"},
@@ -1326,7 +1326,7 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("blocks", height);
     obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
-    obj.pushKV("difficulty", GetDifficulty(&tip, nullptr));
+    obj.pushKV("difficulty", GetDifficulty(nullptr, &tip, GetAlgoForBlockIndex(&tip, chainman.GetConsensus())));
     
     // Add difficulties for all algorithms
     const Consensus::Params& consensusParams = chainman.GetParams().GetConsensus();
@@ -2885,7 +2885,7 @@ static RPCHelpMan loadtxoutset()
 const std::vector<RPCResult> RPCHelpForChainstate{
     {RPCResult::Type::NUM, "blocks", "number of blocks in this chainstate"},
     {RPCResult::Type::STR_HEX, "bestblockhash", "blockhash of the tip"},
-    {RPCResult::Type::NUM, "difficulty", "difficulty of the tip"},
+    {RPCResult::Type::NUM, "difficulty", "difficulty of this chainstate's tip block, calculated from its proof-of-work target"},
     {RPCResult::Type::NUM, "verificationprogress", "progress towards the network tip"},
     {RPCResult::Type::STR_HEX, "snapshot_blockhash", /*optional=*/true, "the base block of the snapshot this chainstate is based on, if any"},
     {RPCResult::Type::NUM, "coins_db_cache_bytes", "size of the coinsdb cache"},
@@ -2927,7 +2927,7 @@ return RPCHelpMan{
 
         data.pushKV("blocks",                (int)chain.Height());
         data.pushKV("bestblockhash",         tip->GetBlockHash().GetHex());
-        data.pushKV("difficulty",            (double)GetDifficulty(tip, nullptr));
+        data.pushKV("difficulty",            GetDifficulty(nullptr, tip, GetAlgoForBlockIndex(tip, chainman.GetConsensus())));
         data.pushKV("verificationprogress",  GuessVerificationProgress(Params().TxData(), tip));
         data.pushKV("coins_db_cache_bytes",  cs.m_coinsdb_cache_size_bytes);
         data.pushKV("coins_tip_cache_bytes", cs.m_coinstip_cache_size_bytes);

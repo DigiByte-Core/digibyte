@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chain.h>
 #include <core_io.h>
 #include <interfaces/chain.h>
 #include <node/context.h>
@@ -12,8 +13,10 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/time.h>
+#include <validation.h>
 
 #include <any>
+#include <array>
 
 #include <boost/test/unit_test.hpp>
 
@@ -42,8 +45,13 @@ private:
 class RPCTestingSetup : public TestingSetup
 {
 public:
+    using TestingSetup::TestingSetup;
     UniValue TransformParams(const UniValue& params, std::vector<std::pair<std::string, bool>> arg_names) const;
     UniValue CallRPC(std::string args);
+};
+
+struct RegtestRPCTestingSetup : RPCTestingSetup {
+    RegtestRPCTestingSetup() : RPCTestingSetup{ChainType::REGTEST} {}
 };
 
 UniValue RPCTestingSetup::TransformParams(const UniValue& params, std::vector<std::pair<std::string, bool>> arg_names) const
@@ -81,6 +89,91 @@ UniValue RPCTestingSetup::CallRPC(std::string args)
 
 
 BOOST_FIXTURE_TEST_SUITE(rpc_tests, RPCTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(rpc_chaininfo_tip_difficulty, RegtestRPCTestingSetup)
+{
+    auto& chainman = *m_node.chainman;
+    auto& background = WITH_LOCK(cs_main, return chainman.ActiveChainstate());
+    CBlockIndex& genesis = *WITH_LOCK(cs_main, return background.m_chain.Tip());
+
+    // Synthetic headers give each relevant tip a distinct difficulty. Regtest
+    // mining would give them all the same target and hide the wrong selection.
+    std::array<CBlockIndex, 603> blocks;
+    std::array<uint256, 603> hashes;
+    struct RestoreChainTips {
+        ChainstateManager& chainman;
+        CBlockIndex& genesis;
+        ~RestoreChainTips()
+        {
+            LOCK(cs_main);
+            for (auto* chainstate : chainman.GetAll()) chainstate->m_chain.SetTip(genesis);
+        }
+    } restore{chainman, genesis};
+
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        auto& block = blocks[i];
+        hashes[i] = ArithToUint256(arith_uint256{i + 1});
+        block.phashBlock = &hashes[i];
+        block.pprev = i == 0 ? &genesis : &blocks[i - 1];
+        block.nHeight = i + 1;
+        block.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SCRYPT;
+        block.nBits = 0x1d00ffff; // difficulty 1
+        block.nTime = block.pprev->nTime + 1;
+        block.nChainTx = i + 2;
+    }
+    auto& groestl = blocks[149];
+    groestl.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_GROESTL;
+    groestl.nBits = 0x1c00ffff; // difficulty 256
+    auto& odo = blocks[600];
+    odo.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_ODO;
+    odo.nBits = 0x1b00ffff; // difficulty 65536
+    auto& delayed_odo = blocks[601];
+    delayed_odo.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_ODO;
+    delayed_odo.nBits = 0x1a00ffff; // difficulty 16777216
+    delayed_odo.nTime = odo.nTime + 121; // skipped by the per-algorithm lookup
+    auto& sha256d = blocks[602];
+    sha256d.nVersion = BLOCK_VERSION_DEFAULT | BLOCK_VERSION_SHA256D;
+    sha256d.nBits = 0x1900ffff; // difficulty 4294967296
+    sha256d.nTime = delayed_odo.nTime + 1;
+
+    const auto check_tip = [&](CBlockIndex& tip, double expected) {
+        WITH_LOCK(cs_main, background.m_chain.SetTip(tip));
+        const auto info = CallRPC("getblockchaininfo");
+        BOOST_CHECK_EQUAL(info["difficulty"].get_real(), expected);
+        const auto states = CallRPC("getchainstates")["chainstates"];
+        BOOST_REQUIRE_EQUAL(states.size(), 1U);
+        BOOST_CHECK_EQUAL(states[0]["difficulty"].get_real(), expected);
+        BOOST_CHECK_EQUAL(blockheaderToJSON(&tip, &tip)["difficulty"].get_real(), expected);
+        return info;
+    };
+
+    check_tip(blocks[0], 1.0); // before MultiAlgo
+    check_tip(groestl, 256.0); // historical Groestl remains supported
+    check_tip(odo, 65536.0);
+    const auto info = check_tip(delayed_odo, 16777216.0);
+    BOOST_CHECK(info["difficulties"]["groestl"].isNull());
+    BOOST_CHECK_EQUAL(info["difficulties"]["scrypt"].get_real(), 1.0);
+    BOOST_CHECK_EQUAL(info["difficulties"]["odo"].get_real(), 65536.0);
+    check_tip(sha256d, 4294967296.0);
+    BOOST_CHECK_EQUAL(blockheaderToJSON(&sha256d, &groestl)["difficulty"].get_real(), 256.0);
+
+    // A background chainstate must report its own tip, not the active tip.
+    {
+        LOCK(cs_main);
+        auto& snapshot = chainman.ActivateExistingSnapshot(delayed_odo.GetBlockHash());
+        snapshot.InitCoinsDB(1 << 20, /*in_memory=*/true, /*should_wipe=*/false);
+        snapshot.InitCoinsCache(1 << 20);
+        snapshot.m_chain.SetTip(delayed_odo);
+        background.m_chain.SetTip(groestl);
+    }
+    BOOST_CHECK_EQUAL(CallRPC("getblockchaininfo")["difficulty"].get_real(), 16777216.0);
+    const auto states = CallRPC("getchainstates")["chainstates"];
+    BOOST_REQUIRE_EQUAL(states.size(), 2U);
+    BOOST_CHECK_EQUAL(states[0]["bestblockhash"].get_str(), groestl.GetBlockHash().GetHex());
+    BOOST_CHECK_EQUAL(states[0]["difficulty"].get_real(), 256.0);
+    BOOST_CHECK_EQUAL(states[1]["bestblockhash"].get_str(), delayed_odo.GetBlockHash().GetHex());
+    BOOST_CHECK_EQUAL(states[1]["difficulty"].get_real(), 16777216.0);
+}
 
 BOOST_AUTO_TEST_CASE(rpc_namedparams)
 {
