@@ -16,6 +16,8 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/walletmodel.h>
 
+#include <clientversion.h>
+
 #include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QDateTime>
@@ -173,6 +175,20 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     txdelegate(new TxViewDelegate(platformStyle, this))
 {
     ui->setupUi(this);
+
+    // Keep the original artwork and draw the version from this build.
+    QPixmap branding(QStringLiteral(":/icons/backg"));
+    {
+        QPainter painter(&branding);
+        QFont font(QStringLiteral("Arial"));
+        font.setBold(true);
+        font.setPixelSize(16);
+        painter.setFont(font);
+        painter.setPen(QColor(0, 102, 204));
+        painter.drawText(QRect(135, 140, 216, 24), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("v%1 DigiDollar").arg(QStringLiteral(PACKAGE_VERSION)));
+    }
+    ui->label_6->setPixmap(branding);
 
     // Install event filter on balance labels for styled tooltips
     ui->frame->installEventFilter(this);
