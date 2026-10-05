@@ -779,6 +779,7 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 
 ### src/index/digidollarstatsindex.cpp
 - Implementation of incremental DD statistics tracking during block processing
+- `SupplyVerification` checks saved supply against chain data. Startup checks can be cancelled; pending block and reorg updates finish during shutdown so a normal stop does not become a fatal index error.
 
 ---
 

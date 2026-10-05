@@ -36,6 +36,7 @@
 #include <test/util/logging.h>
 #include <test/util/index.h>
 #include <test/util/txmempool.h>
+#include <test/util/validation.h>
 #include <timedata.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -1707,6 +1708,51 @@ BOOST_FIXTURE_TEST_CASE(supply_index_cancellation_does_not_publish_a_repair, Sup
     CheckSupply(reopened.index, *tip, 750, 150 * COIN, 1);
 }
 
+BOOST_FIXTURE_TEST_CASE(supply_index_finishes_queued_reorg_during_shutdown, SupplyVerificationSetup)
+{
+    auto* tip = AcceptExtraBurn(ConfirmOpTrueFunding(2 * COIN));
+    auto& chain = m_node.chainman->ActiveChainstate();
+    const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+    SaveIndex();
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+
+        // Deliver the reconnected block ourselves, after the stop request,
+        // to cover a notification still waiting in the shutdown queue.
+        UnregisterValidationInterface(&opened.index);
+        SyncWithValidationInterfaceQueue();
+        BlockValidationState disconnected;
+        BOOST_REQUIRE(chain.InvalidateBlock(disconnected, tip));
+        WITH_LOCK(cs_main, chain.ResetBlockFailureFlags(tip));
+        BlockValidationState reconnected;
+        BOOST_REQUIRE(chain.ActivateBestChain(reconnected));
+        BOOST_REQUIRE(Tip() == tip);
+        SyncWithValidationInterfaceQueue();
+        auto block = std::make_shared<CBlock>();
+        BOOST_REQUIRE(chain.m_blockman.ReadBlockFromDisk(*block, *tip));
+
+        auto& interrupt = const_cast<util::SignalInterrupt&>(m_node.chainman->m_interrupt);
+        struct ResetInterrupt {
+            util::SignalInterrupt& value;
+            ~ResetInterrupt() { value.reset(); }
+        } reset{interrupt};
+        BOOST_REQUIRE_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        interrupt();
+        ValidationInterfaceTest::BlockConnected(ChainstateRole::NORMAL, opened.index, block, tip);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        CheckSupply(opened.index, *tip, 750, 150 * COIN, 1);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+    }
+    OpenRedemptionStatsIndex reopened{m_node};
+    BOOST_REQUIRE(reopened.index.Init());
+    BOOST_REQUIRE(reopened.index.StartBackgroundSync());
+    IndexWaitSynced(reopened.index);
+    CheckSupply(reopened.index, *tip, 750, 150 * COIN, 1);
+}
+
 BOOST_FIXTURE_TEST_CASE(supply_index_verifies_before_first_activated_burn, SupplyVerificationSetup)
 {
     auto& chain = m_node.chainman->ActiveChainstate();
@@ -1727,6 +1773,53 @@ BOOST_FIXTURE_TEST_CASE(supply_index_verifies_before_first_activated_burn, Suppl
     BOOST_REQUIRE_EQUAL(tip->nHeight, THAW_HEIGHT);
     BOOST_REQUIRE(opened.index.BlockUntilSyncedToCurrentChain());
     CheckSupply(opened.index, *tip, 750, 150 * COIN, 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(supply_index_finishes_queued_activation_during_shutdown, SupplyVerificationSetup)
+{
+    auto& chain = m_node.chainman->ActiveChainstate();
+    BlockValidationState disconnected;
+    BOOST_REQUIRE(chain.InvalidateBlock(disconnected, Tip()));
+    const auto funding = ConfirmOpTrueFunding(2 * COIN);
+    auto* prefix = Tip();
+    BOOST_REQUIRE_EQUAL(prefix->nHeight, THAW_HEIGHT - 1);
+    SaveIndex();
+    ChangeSavedSupply(*prefix, 1);
+    {
+        OpenRedemptionStatsIndex opened{m_node};
+        BOOST_REQUIRE(opened.index.Init());
+        CheckSupply(opened.index, *prefix, 1, 450 * COIN, 2);
+        BOOST_REQUIRE(opened.index.StartBackgroundSync());
+        IndexWaitSynced(opened.index);
+        UnregisterValidationInterface(&opened.index);
+        SyncWithValidationInterfaceQueue();
+        auto* tip = AcceptExtraBurn(funding);
+        BOOST_REQUIRE_EQUAL(tip->nHeight, THAW_HEIGHT);
+        SyncWithValidationInterfaceQueue();
+        auto block = std::make_shared<CBlock>();
+        BOOST_REQUIRE(chain.m_blockman.ReadBlockFromDisk(*block, *tip));
+        const auto canonical = WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState());
+
+        // The first activated update must still verify the saved total, even
+        // when shutdown has been requested before this callback is delivered.
+        auto& interrupt = const_cast<util::SignalInterrupt&>(m_node.chainman->m_interrupt);
+        struct ResetInterrupt {
+            util::SignalInterrupt& value;
+            ~ResetInterrupt() { value.reset(); }
+        } reset{interrupt};
+        BOOST_REQUIRE_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        interrupt();
+        ValidationInterfaceTest::BlockConnected(ChainstateRole::NORMAL, opened.index, block, tip);
+        BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_SUCCESS);
+        BOOST_CHECK(opened.index.GetSummary().best_block_hash == tip->GetBlockHash());
+        CheckSupply(opened.index, *tip, 750, 150 * COIN, 1);
+        BOOST_CHECK(WITH_LOCK(cs_main, return chain.CoinsTip().GetDigiDollarState()) == canonical);
+    }
+    OpenRedemptionStatsIndex reopened{m_node};
+    BOOST_REQUIRE(reopened.index.Init());
+    BOOST_REQUIRE(reopened.index.StartBackgroundSync());
+    IndexWaitSynced(reopened.index);
+    CheckSupply(reopened.index, *Tip(), 750, 150 * COIN, 1);
 }
 
 BOOST_FIXTURE_TEST_CASE(supply_index_missing_undo_keeps_the_saved_total_unmodified, SupplyVerificationSetup)

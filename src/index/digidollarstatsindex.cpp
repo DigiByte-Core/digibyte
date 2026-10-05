@@ -110,11 +110,12 @@ struct DBHashKey {
 /** Read supply from chain data without changing either validation health cache. */
 class SupplyVerification {
     Chainstate& m_chainstate;
+    const bool m_allow_interrupt;
     std::map<uint256, CBlock> m_source_blocks;
 
     bool Cancelled(std::string& error) const
     {
-        if (!m_chainstate.m_chainman.m_interrupt) return false;
+        if (!m_allow_interrupt || !m_chainstate.m_chainman.m_interrupt) return false;
         error = "DigiDollar circulating supply verification interrupted";
         return true;
     }
@@ -189,7 +190,10 @@ class SupplyVerification {
     }
 
 public:
-    explicit SupplyVerification(Chainstate& chainstate) : m_chainstate{chainstate} {}
+    // Startup scans may stop early. Pending index updates must finish during
+    // shutdown; cancelling them would be reported as an index failure.
+    SupplyVerification(Chainstate& chainstate, bool allow_interrupt)
+        : m_chainstate{chainstate}, m_allow_interrupt{allow_interrupt} {}
 
     bool Move(const CBlockIndex& from, const CBlockIndex& to, CAmount& supply, bool& known, std::string& error)
     {
@@ -316,7 +320,7 @@ bool DigiDollarStatsIndex::CustomInit(const std::optional<interfaces::BlockKey>&
             bool known{false};
             std::string reason;
             if (!indexed || indexed->nHeight != block->height ||
-                !SupplyVerification{*m_chainstate}.At(*indexed, verified, known, reason))
+                !SupplyVerification{*m_chainstate, /*allow_interrupt=*/true}.At(*indexed, verified, known, reason))
                 return error("DigiDollar stats index: %s", reason);
             if (m_supply_known != known || (known && m_total_dd_supply != verified)) {
                 if (known) read_out.second.total_dd_supply = verified;
@@ -407,7 +411,7 @@ bool DigiDollarStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
             CAmount verified{0};
             bool known{false};
             std::string reason;
-            if (!pindex->pprev || !SupplyVerification{*m_chainstate}.At(*pindex->pprev, verified, known, reason))
+            if (!pindex->pprev || !SupplyVerification{*m_chainstate, /*allow_interrupt=*/false}.At(*pindex->pprev, verified, known, reason))
                 return error("%s: %s", __func__, reason);
             if (known && (!supply_known || supply != verified)) {
                 LogPrintf("DigiDollar circulating supply repaired before block %s: %d -> %d cents\n",
@@ -513,7 +517,7 @@ bool DigiDollarStatsIndex::CustomRewind(const interfaces::BlockKey& current_tip,
         bool known = m_supply_known;
         std::string reason;
         if (!from || !to) return error("DigiDollar stats index rewind: block ancestry is unavailable");
-        SupplyVerification verification{*m_chainstate};
+        SupplyVerification verification{*m_chainstate, /*allow_interrupt=*/false};
         // An unavailable fork may have disappeared from the UTXO set. Rescan
         // then, so readable replacement history can make supply known again.
         if (!(known ? verification.Move(*from, *to, verified, known, reason) :
