@@ -133,20 +133,25 @@ jobs:
           make -j2
 
       - name: Run Unit Tests
-        run: ./src/test/test_digibyte --show_progress
+        shell: bash
+        run: ./src/test/test_digibyte --show_progress 2>&1 | tee "$RUNNER_TEMP/unit-tests.log"
 
       - name: Run Functional Tests
-        run: >-
-          test/functional/test_runner.py
-          --jobs=1
-          --timeout-factor=3
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/functional"
+          test/functional/test_runner.py --jobs=1 --timeout-factor=3 \
+            --tmpdirprefix="$RUNNER_TEMP/functional" 2>&1 | tee "$RUNNER_TEMP/functional-tests.log"
 
-      - name: Upload Test Suite Log
+      - name: Upload Failed Test Logs
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: arm64-test-suite-log
-          path: src/test-suite.log
+          path: |
+            ${{ runner.temp }}/unit-tests.log
+            ${{ runner.temp }}/functional-tests.log
+            ${{ runner.temp }}/functional/**/*.log
 
       - name: Save Ccache cache
         uses: actions/cache/save@v3
@@ -242,17 +247,25 @@ jobs:
           make -j$(nproc)
 
       - name: Run Unit Tests
-        run: ./src/test/test_digibyte --show_progress
+        shell: bash
+        run: ./src/test/test_digibyte --show_progress 2>&1 | tee "$RUNNER_TEMP/unit-tests.log"
 
       - name: Run Functional Tests
-        run: test/functional/test_runner.py --jobs=1 --timeout-factor=2
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/functional"
+          test/functional/test_runner.py --jobs=1 --timeout-factor=2 \
+            --tmpdirprefix="$RUNNER_TEMP/functional" 2>&1 | tee "$RUNNER_TEMP/functional-tests.log"
 
-      - name: Upload Test Suite Log
+      - name: Upload Failed Test Logs
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: linux-test-suite-log
-          path: src/test-suite.log
+          path: |
+            ${{ runner.temp }}/unit-tests.log
+            ${{ runner.temp }}/functional-tests.log
+            ${{ runner.temp }}/functional/**/*.log
 
       - name: Save Ccache cache
         uses: actions/cache/save@v3
