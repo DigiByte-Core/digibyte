@@ -8,6 +8,40 @@ make deploy
 
 When complete, it will have produced `DigiByte-Core.zip`.
 
+## Check the release package on a Mac
+
+The Linux release build produces an **unsigned** app bundle. The executable
+may contain a basic signature added by the linker. That does not sign the
+whole app, including its settings and resources. Changing the ZIP filename
+does not complete this step.
+
+1. Finish signing the whole `DigiByte-Qt.app` after all its files are in place.
+   Use the detached-signature process below for Developer ID signing. Native
+   `make deploy` uses a local, or *ad hoc*, bundle signature. That local
+   signature checks file integrity; it does not identify a trusted publisher
+   or notarize the app with Apple.
+2. On a Mac, extract the exact ZIP intended for publication into a new folder.
+   Run these checks from that folder:
+
+   ```bash
+   test -f DigiByte-Qt.app/Contents/_CodeSignature/CodeResources
+   codesign --verify --deep --strict --verbose=2 DigiByte-Qt.app
+   codesign --display --verbose=4 DigiByte-Qt.app
+   DigiByte-Qt.app/Contents/MacOS/DigiByte-Qt -version
+   ```
+
+3. Check that the displayed version and architecture match the release.
+   Test the final downloaded ZIP on its target Mac. Confirm that the wallet
+   opens through the normal macOS approval process. Use a separate test data
+   directory and test wallet. Do not use a live wallet for this check.
+4. Record the ZIP checksum, macOS version, signature checks and launch result.
+   Generate the published checksums after signing and packaging are complete.
+
+A passing Linux build or checksum comparison does not replace these Mac
+checks. If a signature check or launch fails, keep that package out of the
+release until the cause is fixed. Do not disable Gatekeeper to make the check
+pass. See Apple's [code signing checks](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html).
+
 ## SDK Extraction
 
 ### Step 1: Obtaining `Xcode.app`
