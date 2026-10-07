@@ -136,7 +136,7 @@ unsigned int GetNextWorkRequiredV2(const CBlockIndex* pindexLast, const Consensu
     return bnNew.GetCompact();    
 }
 
-unsigned int GetNextWorkRequiredV3(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo)
+static unsigned int GetNextWorkRequiredV3(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo, const CBlockIndex* pindexPrevAlgo)
 {
     // find first block in averaging interval
     // Go back by what we want to be nAveragingInterval blocks per algo
@@ -145,7 +145,6 @@ unsigned int GetNextWorkRequiredV3(const CBlockIndex* pindexLast, const Consensu
     {
         pindexFirst = pindexFirst->pprev;
     }
-    const CBlockIndex* pindexPrevAlgo = GetLastBlockIndexForAlgo(pindexLast, params, algo);
     if (pindexPrevAlgo == nullptr || pindexFirst == nullptr)
         return InitialDifficulty(params, algo); // not enough blocks available
 
@@ -189,7 +188,7 @@ unsigned int GetNextWorkRequiredV3(const CBlockIndex* pindexLast, const Consensu
     return bnNew.GetCompact();
 }
 
-unsigned int GetNextWorkRequiredV4(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo)
+static unsigned int GetNextWorkRequiredV4(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo, const CBlockIndex* pindexPrevAlgo)
 {
     // find first block in averaging interval
     // Go back by what we want to be nAveragingInterval blocks per algo
@@ -199,7 +198,6 @@ unsigned int GetNextWorkRequiredV4(const CBlockIndex* pindexLast, const Consensu
         pindexFirst = pindexFirst->pprev;
     }
 
-    const CBlockIndex* pindexPrevAlgo = GetLastBlockIndexForAlgoFast(pindexLast, params, algo);
     if (pindexPrevAlgo == nullptr || pindexFirst == nullptr)
     {
         return InitialDifficulty(params, algo);
@@ -253,7 +251,7 @@ unsigned int GetNextWorkRequiredV4(const CBlockIndex* pindexLast, const Consensu
     return bnNew.GetCompact();
 }
 
-unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params, int algo)
+static unsigned int GetNextWorkRequiredImpl(const CBlockIndex* pindexLast, const CBlockHeader* pblock, const Consensus::Params& params, int algo, const PreviousAlgoBlocks* previous_algos)
 {
     // Genesis block
     if (pindexLast == nullptr)
@@ -278,10 +276,24 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         return GetNextWorkRequiredV1(pindexLast, params, algo);
     else if (pindexLast->nHeight < params.alwaysUpdateDiffChangeTarget){
         return GetNextWorkRequiredV2(pindexLast, params, algo);
-    } else if(pindexLast->nHeight < params.workComputationChangeTarget)
-        return GetNextWorkRequiredV3(pindexLast, params, algo);
-    else
-        return GetNextWorkRequiredV4(pindexLast, params, algo);
+    }
+
+    const CBlockIndex* previous_algo = previous_algos && algo >= 0 && algo < NUM_ALGOS_IMPL
+        ? (*previous_algos)[algo]
+        : GetLastBlockIndexForAlgo(pindexLast, params, algo);
+    if (pindexLast->nHeight < params.workComputationChangeTarget)
+        return GetNextWorkRequiredV3(pindexLast, params, algo, previous_algo);
+    return GetNextWorkRequiredV4(pindexLast, params, algo, previous_algo);
+}
+
+unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader* pblock, const Consensus::Params& params, int algo)
+{
+    return GetNextWorkRequiredImpl(pindexLast, pblock, params, algo, nullptr);
+}
+
+unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader* pblock, const Consensus::Params& params, int algo, const PreviousAlgoBlocks& previous_algos)
+{
+    return GetNextWorkRequiredImpl(pindexLast, pblock, params, algo, &previous_algos);
 }
 
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params& params)
@@ -407,31 +419,6 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
         }
         return pindex;
     }
-    return nullptr;
-}
-
-const CBlockIndex* GetLastBlockIndexForAlgoFast(const CBlockIndex* pindex, const Consensus::Params& params, int algo)
-{
-    // DGB-BUG-011 FIX: Check algo bounds before using as array index
-    // If algo is ALGO_UNKNOWN (-1) or out of bounds, fall back to slow iteration
-    if (algo < 0 || algo >= NUM_ALGOS_IMPL) {
-        return GetLastBlockIndexForAlgo(pindex, params, algo);
-    }
-
-    for (; pindex; pindex = pindex->lastAlgoBlocks[algo])
-    {
-        if (pindex->GetAlgo() != algo)
-            continue;
-        if (params.fPowAllowMinDifficultyBlocks &&
-            pindex->pprev &&
-            pindex->nTime > pindex->pprev->nTime + params.nTargetSpacing*2)
-        {
-            pindex = pindex->pprev;
-            continue;
-        }
-        return pindex;
-    }
-
     return nullptr;
 }
 

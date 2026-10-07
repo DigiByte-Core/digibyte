@@ -24,11 +24,11 @@
 #include <oracle/bundle_manager.h>
 #include <primitives/oracle.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <util/time.h>
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -282,13 +282,7 @@ BOOST_FIXTURE_TEST_CASE(wave6_volatility_would_freeze_no_mutation, Wave6Setup)
 
 BOOST_FIXTURE_TEST_CASE(wave6_volatility_consensus_freeze_path_uses_integer_bps, Wave6Setup)
 {
-    std::ifstream in("src/consensus/volatility.cpp");
-    if (!in) {
-        in.open("consensus/volatility.cpp");
-    }
-    BOOST_REQUIRE_MESSAGE(in.is_open(), "could not read volatility.cpp for deterministic math guard");
-    const std::string source((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
+    const std::string source = ReadRepositoryFile("src/consensus/volatility.cpp");
 
     const size_t would_pos = source.find("bool VolatilityMonitor::WouldCandidateFreezeMinting");
     BOOST_REQUIRE_NE(would_pos, std::string::npos);

@@ -238,20 +238,15 @@ BOOST_FIXTURE_TEST_CASE(w18_02_getdigidollarbalance_accepts_minconf_zero,
 }
 
 // =============================================================================
-// W18-03: listdigidollarpositions min_amount silently treats negative as
-// "no filter"
+// W18-03: listdigidollarpositions refuses a negative min_amount
 // =============================================================================
 //
-// Pins the observed behavior at src/rpc/digidollar.cpp:2216:
-//   if (minAmount > 0 && pos.dd_minted < minAmount) continue;
-//
-// A negative min_amount does not raise — the >0 guard means it acts as
-// "filter disabled". This is intentional defense-in-depth (a bogus client
-// underflow returns the full list rather than silently hiding positions),
-// but without a unit pin a future tightening could quietly start dropping
-// the entire result. The pin keeps the all-positions return semantics
-// stable and forces any future change to be explicit.
-BOOST_FIXTURE_TEST_CASE(w18_03_listdigidollarpositions_negative_min_amount_is_no_filter,
+// A negative minimum amount is a mistake in the caller, and there is no
+// reading of it that makes sense. It used to be accepted and then ignored, so
+// the call returned every position and the caller never learned that its
+// filter had been thrown away. It is now refused, like a negative amount
+// anywhere else in the DigiDollar RPCs.
+BOOST_FIXTURE_TEST_CASE(w18_03_listdigidollarpositions_negative_min_amount_is_refused,
                         DigiDollarRPCSchemaSetup)
 {
     wallet::WalletContext context;
@@ -267,9 +262,19 @@ BOOST_FIXTURE_TEST_CASE(w18_03_listdigidollarpositions_negative_min_amount_is_no
     request.params = UniValue(UniValue::VARR);
     request.params.push_back(true);   // active_only
     request.params.push_back(-1);     // tier_filter (no filter)
-    request.params.push_back(-100);   // min_amount: negative -> ignored
+    request.params.push_back(-100);   // min_amount: negative
 
-    UniValue result = listdigidollarpositions().HandleRequest(request);
+    std::string message;
+    BOOST_CHECK(RpcThrows([&] { listdigidollarpositions().HandleRequest(request); }, message));
+    BOOST_CHECK_MESSAGE(message.find("must not be negative") != std::string::npos, message);
+
+    // Leaving the filter out still returns every position.
+    JSONRPCRequest unfiltered;
+    unfiltered.context = &context;
+    unfiltered.strMethod = "listdigidollarpositions";
+    unfiltered.params = UniValue(UniValue::VARR);
+
+    UniValue result = listdigidollarpositions().HandleRequest(unfiltered);
     wallet::RemoveWallet(context, wallet, std::nullopt);
 
     BOOST_REQUIRE(result.isArray());
@@ -365,14 +370,14 @@ BOOST_FIXTURE_TEST_CASE(w18_05_listdigidollarpositions_min_amount_strict_filter_
 }
 
 // =============================================================================
-// W18-06: listdigidollarpositions decimal-dollar string is interpreted as USD
+// W18-06: listdigidollarpositions decimal string is dollars only with amount_unit
 // =============================================================================
 //
-// "50.00" -> 5000 cents (per ParseDigiDollarRpcAmount at
-// src/rpc/digidollar.cpp:226-266). The 100-cent and 5000-cent positions
-// must drop because both are < 5000 cents (note: dd_minted < minAmount,
-// not <=). Only the 1,000,000-cent position survives.
-BOOST_FIXTURE_TEST_CASE(w18_06_listdigidollarpositions_decimal_string_is_dollars,
+// A decimal amount is never guessed to be dollars. Without amount_unit the
+// RPC refuses "50.01" outright; with amount_unit="dollars" it is 5001 cents,
+// so the 100-cent and 5000-cent positions drop (dd_minted < minAmount, not
+// <=) and only the 1,000,000-cent position survives.
+BOOST_FIXTURE_TEST_CASE(w18_06_listdigidollarpositions_decimal_string_requires_dollars_unit,
                         DigiDollarRPCSchemaSetup)
 {
     wallet::WalletContext context;
@@ -382,13 +387,25 @@ BOOST_FIXTURE_TEST_CASE(w18_06_listdigidollarpositions_decimal_string_is_dollars
     auto wallet = CreateWalletWithThreePositions();
     wallet::AddWallet(context, wallet);
 
+    JSONRPCRequest ambiguous;
+    ambiguous.context = &context;
+    ambiguous.strMethod = "listdigidollarpositions";
+    ambiguous.params = UniValue(UniValue::VARR);
+    ambiguous.params.push_back(true);
+    ambiguous.params.push_back(-1);
+    ambiguous.params.push_back("50.01"); // no unit: refused, never read as 5001 or 50 cents
+    BOOST_CHECK_THROW(listdigidollarpositions().HandleRequest(ambiguous), UniValue);
+
     JSONRPCRequest request;
     request.context = &context;
     request.strMethod = "listdigidollarpositions";
     request.params = UniValue(UniValue::VARR);
     request.params.push_back(true);
     request.params.push_back(-1);
-    request.params.push_back("50.01"); // 5001 cents -> 5000-cent position drops
+    request.params.push_back("50.01"); // 5001 cents once the unit says dollars
+    request.params.push_back(UniValue(UniValue::VNULL)); // count
+    request.params.push_back(UniValue(UniValue::VNULL)); // skip
+    request.params.push_back("dollars");
 
     UniValue result = listdigidollarpositions().HandleRequest(request);
     wallet::RemoveWallet(context, wallet, std::nullopt);
@@ -399,15 +416,17 @@ BOOST_FIXTURE_TEST_CASE(w18_06_listdigidollarpositions_decimal_string_is_dollars
 }
 
 // =============================================================================
-// W18-06b: listdigidollarpositions decimal JSON number is interpreted as USD
+// W18-06b: a JSON number with a decimal point is refused the same way a
+// string is
 // =============================================================================
 //
-// JSON-RPC clients can send a numeric token with an explicit decimal point
-// (`50.00`) instead of a string (`"50.00"`). UniValue preserves that numeric
-// token text in getValStr(), so the DigiDollar parser must honor the decimal
-// point there too. Otherwise the same user-visible token is interpreted as
-// 50 cents in JSON-number form but 5000 cents in string form.
-BOOST_FIXTURE_TEST_CASE(w18_06b_listdigidollarpositions_decimal_number_is_dollars,
+// A JSON-RPC client can send the amount as a bare number token with a decimal
+// point (50.00) instead of a string ("50.00"). The node keeps that token text,
+// so both forms must be treated identically: without amount_unit both are
+// refused, and with amount_unit="dollars" both are 5000 cents. If only the
+// string form were refused, the same amount typed two ways would mean two
+// different things.
+BOOST_FIXTURE_TEST_CASE(w18_06b_listdigidollarpositions_decimal_number_needs_dollars_unit,
                         DigiDollarRPCSchemaSetup)
 {
     wallet::WalletContext context;
@@ -420,6 +439,18 @@ BOOST_FIXTURE_TEST_CASE(w18_06b_listdigidollarpositions_decimal_number_is_dollar
     UniValue numeric_decimal;
     numeric_decimal.setNumStr("50.00");
 
+    JSONRPCRequest ambiguous;
+    ambiguous.context = &context;
+    ambiguous.strMethod = "listdigidollarpositions";
+    ambiguous.params = UniValue(UniValue::VARR);
+    ambiguous.params.push_back(true);
+    ambiguous.params.push_back(-1);
+    ambiguous.params.push_back(numeric_decimal); // no unit: refused, not guessed
+
+    std::string message;
+    BOOST_CHECK(RpcThrows([&] { listdigidollarpositions().HandleRequest(ambiguous); }, message));
+    BOOST_CHECK_MESSAGE(message.find("ambiguous amount") != std::string::npos, message);
+
     JSONRPCRequest request;
     request.context = &context;
     request.strMethod = "listdigidollarpositions";
@@ -427,6 +458,9 @@ BOOST_FIXTURE_TEST_CASE(w18_06b_listdigidollarpositions_decimal_number_is_dollar
     request.params.push_back(true);
     request.params.push_back(-1);
     request.params.push_back(numeric_decimal); // 50.00 dollars -> 5000 cents
+    request.params.push_back(UniValue(UniValue::VNULL)); // count
+    request.params.push_back(UniValue(UniValue::VNULL)); // skip
+    request.params.push_back("dollars");
 
     UniValue result = listdigidollarpositions().HandleRequest(request);
     wallet::RemoveWallet(context, wallet, std::nullopt);
@@ -438,12 +472,12 @@ BOOST_FIXTURE_TEST_CASE(w18_06b_listdigidollarpositions_decimal_number_is_dollar
 }
 
 // =============================================================================
-// W18-06c: DigiDollar decimal-dollar amounts reject sub-cent precision
+// W18-06c: dollar amounts below one cent are refused, never rounded
 // =============================================================================
 //
-// Decimal-dollar inputs are accepted for RPC ergonomics, but DD accounting is
-// integer cents. Sub-cent inputs must fail instead of rounding into a different
-// amount than the caller supplied.
+// DigiDollar accounting is whole cents. An amount with a third decimal place
+// must fail rather than be rounded into a different amount than the caller
+// asked for, whether it arrives as a string or as a bare JSON number.
 BOOST_FIXTURE_TEST_CASE(w18_06c_decimal_dollar_amount_rejects_subcent_precision,
                         DigiDollarRPCSchemaSetup)
 {
@@ -466,10 +500,13 @@ BOOST_FIXTURE_TEST_CASE(w18_06c_decimal_dollar_amount_rejects_subcent_precision,
         request.params.push_back(true);
         request.params.push_back(-1);
         request.params.push_back(amount_param);
+        request.params.push_back(UniValue(UniValue::VNULL)); // count
+        request.params.push_back(UniValue(UniValue::VNULL)); // skip
+        request.params.push_back("dollars");
 
         std::string message;
         BOOST_CHECK(RpcThrows([&] { listdigidollarpositions().HandleRequest(request); }, message));
-        BOOST_CHECK(message.find("Amount is not a valid number") != std::string::npos);
+        BOOST_CHECK_MESSAGE(message.find("at most two decimal places") != std::string::npos, message);
     }
 
     wallet::RemoveWallet(context, wallet, std::nullopt);

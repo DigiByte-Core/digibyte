@@ -71,6 +71,12 @@ class DigiDollarActivationTest(DigiByteTestFramework):
         tx.vout = [CTxOut(100000, address_to_scriptpubkey(node.getnewaddress()))]
         return tx
 
+    def confirm_transaction(self, node, txid):
+        block_hash = node.generate(1)[0]
+        assert txid in node.getblock(block_hash)["tx"]
+        # Wallet confirmation updates are delivered asynchronously after mining.
+        node.syncwithvalidationinterfacequeue()
+
     def run_test(self):
         self.log.info("Starting DigiDollar buried-deployment activation tests")
 
@@ -169,7 +175,7 @@ class DigiDollarActivationTest(DigiByteTestFramework):
         assert_equal(mint_result["dd_minted"], 15000)
         unlock_height = mint_result["unlock_height"]
         position_id = mint_result["position_id"]
-        node.generate(1)
+        self.confirm_transaction(node, mint_result["txid"])
         self.log.info(f"  Mint confirmed: txid={mint_result['txid']}, "
                       f"unlock_height={unlock_height}")
 
@@ -182,7 +188,7 @@ class DigiDollarActivationTest(DigiByteTestFramework):
         recv_addr = node.getdigidollaraddress()
         send_result = node.senddigidollar(recv_addr, 1000)  # $10
         assert "txid" in send_result
-        node.generate(1)
+        self.confirm_transaction(node, send_result["txid"])
         balance = node.getdigidollarbalance()
         total = balance["total"] if isinstance(balance, dict) else balance
         assert_equal(total, 15000)  # self-send conserves DD balance
@@ -195,7 +201,7 @@ class DigiDollarActivationTest(DigiByteTestFramework):
         node.setmockoracleprice(500000)
         redeem_result = node.redeemdigidollar(position_id, 15000)
         assert "txid" in redeem_result
-        node.generate(1)
+        self.confirm_transaction(node, redeem_result["txid"])
         self.log.info(f"  Redeem confirmed: txid={redeem_result['txid']}")
 
         active_ids = [p["position_id"] for p in node.listdigidollarpositions()

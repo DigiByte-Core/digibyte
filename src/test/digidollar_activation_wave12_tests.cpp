@@ -759,24 +759,32 @@ BOOST_AUTO_TEST_CASE(wave12_regtest_low_height_vault_detection_consistent_with_b
     BOOST_REQUIRE_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR), 0);
     BOOST_REQUIRE(DigiDollar::IsDigiDollarEnabled(/*pindexPrev=*/nullptr, consensus));
 
-    // Forge a vault script and register it. Real mints would set this in
-    // RegisterScriptMetadata via ConnectBlock; here we register directly so
-    // the test exercises only the SpendsDigiDollarCollateralVault path.
+    // Forge the mint that created the vault. Consensus only trusts the
+    // creating transaction, never the script metadata registry, so the test
+    // hands that transaction to SpendsDigiDollarCollateralVault through the
+    // transaction lookup.
     CScript vault_script;
     vault_script << OP_1 << std::vector<unsigned char>(32, 0xAB);
-    DigiDollar::RegisterScriptMetadata(vault_script,
-                                       DigiDollar::ScriptType::COLLATERAL_LOCK,
-                                       /*ddAmount=*/100'000,
-                                       /*lockHeight=*/200);
-
-    BOOST_REQUIRE(DigiDollar::IsRegisteredCollateralVaultScript(vault_script));
+    CMutableTransaction creating_mint;
+    creating_mint.nVersion = 0x01000770; // DD_TX_MINT
+    creating_mint.vin.emplace_back(COutPoint(uint256::ONE, 1));
+    creating_mint.vout.emplace_back(10 * COIN, vault_script);
+    creating_mint.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                                 << CScriptNum(1) << CScriptNum(100'000)
+                                                 << CScriptNum(200) << CScriptNum(1));
+    const CTransactionRef creating_ref = MakeTransactionRef(creating_mint);
+    const DigiDollar::TxLookupFn lookup = [creating_ref](const uint256& txid, uint32_t, CTransactionRef& out) {
+        if (txid != creating_ref->GetHash()) return false;
+        out = creating_ref;
+        return true;
+    };
 
     constexpr uint32_t COIN_HEIGHT = 100;
     BOOST_REQUIRE_LT(COIN_HEIGHT, static_cast<uint32_t>(consensus.nDDActivationHeight));
 
     CCoinsView dummy;
     CCoinsViewCache coins(&dummy);
-    const COutPoint vault_outpoint(uint256::ONE, 0);
+    const COutPoint vault_outpoint(creating_ref->GetHash(), 0);
     CTxOut vault_out(10 * COIN, vault_script);
     coins.AddCoin(vault_outpoint, Coin(vault_out, COIN_HEIGHT, /*fCoinBaseIn=*/false), false);
 
@@ -792,7 +800,8 @@ BOOST_AUTO_TEST_CASE(wave12_regtest_low_height_vault_detection_consistent_with_b
         /*systemCollateral=*/100,
         chainparams,
         &coins,
-        /*skipOracle=*/true);
+        /*skipOracle=*/true,
+        lookup);
 
     const bool spends_vault = DigiDollar::SpendsDigiDollarCollateralVault(*ref, ctx);
     BOOST_TEST_MESSAGE("  regtest deployment-active vault @ coin.nHeight=" << COIN_HEIGHT
@@ -808,7 +817,7 @@ BOOST_AUTO_TEST_CASE(wave12_regtest_low_height_vault_detection_consistent_with_b
     const bool requires_dd = DigiDollar::RequiresDigiDollarValidation(*ref, ctx);
     BOOST_CHECK_MESSAGE(requires_dd,
         "DD-FA-SEC-010: RequiresDigiDollarValidation must return true for a "
-        "non-DD tx that spends a registered vault, otherwise mempool/miner/"
+        "non-DD tx that spends a real vault, otherwise mempool/miner/"
         "ConnectBlock skip the vault burn-enforcement gate.");
 }
 

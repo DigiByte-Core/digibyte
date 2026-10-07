@@ -7,15 +7,27 @@
 #define DIGIBYTE_POW_H
 
 #include <consensus/params.h>
+#include <primitives/block.h>
 
+#include <array>
 #include <stdint.h>
 
 class CBlockHeader;
 class CBlockIndex;
 class uint256;
 
+/** The latest eligible ancestor of each algorithm, or nullptr if none exists. */
+using PreviousAlgoBlocks = std::array<const CBlockIndex*, NUM_ALGOS_IMPL>;
+
 unsigned int InitialDifficulty(const Consensus::Params& params, int algo);
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&, int algo);
+/**
+ * Use supplied ancestor lookups for V3 and V4. Each entry must match
+ * GetLastBlockIndexForAlgo on the full chain. The linked history must still
+ * contain the averaging window and its median-time ancestors. Earlier
+ * difficulty rules continue to require their full linked history.
+ */
+unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader* pblock, const Consensus::Params&, int algo, const PreviousAlgoBlocks& previous_algos);
 unsigned int GetNextWorkRequiredv1(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&, int algo);
 unsigned int GetNextWorkRequiredv2(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&, int algo);
 unsigned int GetNextWorkRequiredv3(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&, int algo);
@@ -25,7 +37,6 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
 /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
 const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Consensus::Params&, int algo);
-const CBlockIndex* GetLastBlockIndexForAlgoFast(const CBlockIndex* pindex, const Consensus::Params&, int algo);
 uint256 GetPoWAlgoHash(const CBlockHeader& block);
 
 /**

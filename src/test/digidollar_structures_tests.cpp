@@ -13,6 +13,7 @@
 #include <clientversion.h>
 
 #include <boost/test/unit_test.hpp>
+#include <limits>
 #include <set>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_structures_tests, BasicTestingSetup)
@@ -304,25 +305,39 @@ BOOST_AUTO_TEST_CASE(collateral_position_edge_cases)
     BOOST_CHECK_THROW(position.GetRequiredDDForRedemption(0), std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(collateral_position_overflow_protection)
+BOOST_AUTO_TEST_CASE(collateral_position_ratio_never_wraps_round)
 {
     CCollateralPosition position;
 
-    // Test with large values to ensure no overflow
+    // Every DGB there will ever be, locked against one cent of DigiDollar, at
+    // a very high price. Multiplying the locked satoshis by the price does not
+    // fit in a 64-bit money amount, but the ratio itself does, so the exact
+    // answer must come back.
     position.dgbLocked = MAX_MONEY;
-    position.ddMinted = 1; // 1 cent
+    position.ddMinted = 1;
+    const CAmount highPrice = 1000000; // $10,000 per DGB, in cents
 
-    CAmount maxPrice = 1000000; // Very high price
+    const CAmount expectedRatio = (MAX_MONEY / COIN) * highPrice * 100;
+    BOOST_CHECK_EQUAL(position.GetCurrentCollateralRatio(highPrice), expectedRatio);
 
-    // Should not overflow
-    BOOST_CHECK_NO_THROW(position.GetCurrentCollateralRatio(maxPrice));
+    // A thousand times that price puts the true ratio past what a money amount
+    // can hold. The answer is then the largest amount, a ceiling, and never a
+    // wrapped-round or negative number.
+    const CAmount absurdPrice = 1000000000;
+    BOOST_CHECK_EQUAL(position.GetCurrentCollateralRatio(absurdPrice),
+                      std::numeric_limits<CAmount>::max());
 
-    // Test ERR calculation with large values
-    position.ddMinted = MAX_MONEY / 100; // Large DD amount
-    int lowCollateral = 1; // 1% system collateral
+    // Damaged data has no honest ratio, so nothing is reported for it.
+    position.dgbLocked = -1;
+    BOOST_CHECK_EQUAL(position.GetCurrentCollateralRatio(highPrice), 0);
+    position.dgbLocked = MAX_MONEY;
+    BOOST_CHECK_EQUAL(position.GetCurrentCollateralRatio(-1), 0);
+    position.ddMinted = -1;
+    BOOST_CHECK_EQUAL(position.GetCurrentCollateralRatio(highPrice), 0);
 
-    // Should handle large multiplication without overflow
-    BOOST_CHECK_NO_THROW(position.GetRequiredDDForRedemption(lowCollateral));
+    // Redemption with a very large minted amount and 1% system collateral.
+    position.ddMinted = MAX_MONEY / 100;
+    BOOST_CHECK_NO_THROW(position.GetRequiredDDForRedemption(1));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

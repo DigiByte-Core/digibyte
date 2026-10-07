@@ -102,7 +102,9 @@ class InitStressTest(DigiByteTestFramework):
         }
 
         files_to_perturb = {
-            'blocks/index/*.ldb': 'Error loading block database.',
+            # Table errors throw during loading; record decoding errors return
+            # false. Both startup paths must reject the corrupted database.
+            'blocks/index/*.ldb': r'Error (opening|loading) block database\.',
             'chainstate/*.ldb': 'Error opening block database.',
             'blocks/blk*.dat': 'Corrupted block database detected.',
         }
@@ -149,6 +151,9 @@ class InitStressTest(DigiByteTestFramework):
             shutil.rmtree(node.chain_path / "chainstate")
             shutil.move(node.chain_path / "blocks_bak", node.chain_path / "blocks")
             shutil.move(node.chain_path / "chainstate_bak", node.chain_path / "chainstate")
+
+            check_clean_start()
+            self.stop_node(0)
 
 
 if __name__ == '__main__':

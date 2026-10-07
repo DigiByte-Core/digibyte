@@ -20,6 +20,7 @@ TEST_UTIL_H = \
   test/util/random.h \
   test/util/script.h \
   test/util/setup_common.h \
+  test/util/source_root.h \
   test/util/str.h \
   test/util/transaction_utils.h \
   test/util/txmempool.h \

@@ -14,11 +14,15 @@
 #include <wallet/digidollarwallet.h>
 #include <consensus/amount.h>
 #include <consensus/err.h>
+#include <chainparams.h>
+#include <digidollar/digidollar.h>
 #include <univalue.h>
 #include <logging.h>
+#include <node/interface_ui.h>
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -131,6 +135,29 @@ DigiDollarRedeemWidget::DigiDollarRedeemWidget(QWidget *parent) :
 DigiDollarRedeemWidget::~DigiDollarRedeemWidget()
 {
     // Qt will handle cleanup of child widgets
+}
+
+unsigned int DigiDollarRedeemWidget::resultMessageStyle(bool succeeded)
+{
+    // The wallet window opens a real dialog only when the message carries the
+    // modal flag. Without it the words are handed to the desktop notification
+    // service instead, and on a machine with no such service, or with
+    // notifications switched off, the user is told nothing at all. A redemption
+    // moves money, so both the confirmation and the refusal must be a dialog
+    // the user has to close.
+    if (succeeded) {
+        return CClientUIInterface::MSG_INFORMATION | CClientUIInterface::BTN_OK | CClientUIInterface::MODAL;
+    }
+    return CClientUIInterface::MSG_ERROR;
+}
+
+QString DigiDollarRedeemWidget::redemptionBroadcastText(const QString& txid)
+{
+    return tr("Your redemption has been broadcast to the network.\n\n"
+              "Transaction ID:\n%1\n\n"
+              "The vault closes and its locked DGB is released once the "
+              "transaction confirms in a block.")
+        .arg(txid);
 }
 
 void DigiDollarRedeemWidget::setupUI()
@@ -527,7 +554,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
 
     // CRITICAL: Check if user has enough DD balance BEFORE showing confirmation dialog
     if (!m_walletModel) {
-        Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+        Q_EMIT message(tr("Error"), tr("No wallet model available"), resultMessageStyle(false));
         return;
     }
 
@@ -538,27 +565,48 @@ void DigiDollarRedeemWidget::onRedeemClicked()
     // Calculate required DD burn based on system health (ERR check)
     // Need to query system health to determine if ERR is active
     double requiredDDBurn = m_positionDDMinted; // Start with original minted amount
+    const bool candidateHealth = m_clientModel && DigiDollar::IsThawDayActive(
+        Params().GetConsensus(), m_clientModel->getNumBlocks() + 1);
 
     try {
-        // Query system health status via RPC (using getdigidollarstats)
+        // Activated redemption needs canonical health independently of circulating supply.
         UniValue params(UniValue::VARR);
-        UniValue healthResult = m_walletModel->executeRpc("getdigidollarstats", params);
+        UniValue healthResult = m_walletModel->executeRpc(
+            candidateHealth ? "getprotectionstatus" : "getdigidollarstats", params);
+        if (candidateHealth && !healthResult.isObject())
+            throw std::runtime_error("Candidate health is unavailable");
 
         if (healthResult.isObject()) {
-            int systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            int systemHealth;
+            if (candidateHealth) {
+                const UniValue& next = healthResult.find_value("next_block_health");
+                if (!next.isObject() || !next.find_value("ready").get_bool())
+                    throw std::runtime_error("Candidate health is unavailable");
+                systemHealth = next.find_value("health_percentage").getInt<int>();
+            } else {
+                systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            }
 
             // If system health < 100%, ERR is active and we need MORE DD to redeem
             if (systemHealth < 100) {
                 requiredDDBurn = CalculateRequiredDDBurnDisplayAmount(m_positionDDMinted, systemHealth);
 
-                LogPrintf("DigiDollar Qt: ERR active (health: %d%%), required DD burn: %.8f\n",
+                LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: ERR active (health: %d%%), required DD burn: %.8f\n",
                          systemHealth, requiredDDBurn);
             }
         }
     } catch (const UniValue& objError) {
+        if (candidateHealth) {
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), resultMessageStyle(false));
+            return;
+        }
         LogPrintf("DigiDollar Qt: Failed to query system health (RPC error) - assuming normal redemption\n");
         // On error, proceed with normal redemption calculation
     } catch (const std::exception& e) {
+        if (candidateHealth) {
+            Q_EMIT message(tr("Redemption unavailable"), tr("Candidate health is unavailable. Wait for synchronization and retry."), resultMessageStyle(false));
+            return;
+        }
         LogPrintf("DigiDollar Qt: Failed to query system health - %s (assuming normal redemption)\n", e.what());
         // On error, proceed with normal redemption calculation
     }
@@ -587,7 +635,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                 .arg(formatDDAmount(requiredDDBurn - ddBalance));
         }
 
-        Q_EMIT message(tr("Insufficient DigiDollar Balance"), errorMsg, QMessageBox::Warning);
+        Q_EMIT message(tr("Insufficient DigiDollar Balance"), errorMsg, resultMessageStyle(false));
         return; // STOP - Do not show confirmation dialog
     }
 
@@ -617,7 +665,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
 
     if (msgBox.exec() == QMessageBox::Yes) {
         if (!m_walletModel) {
-            Q_EMIT message(tr("Error"), tr("No wallet model available"), QMessageBox::Critical);
+            Q_EMIT message(tr("Error"), tr("No wallet model available"), resultMessageStyle(false));
             return;
         }
 
@@ -635,10 +683,9 @@ void DigiDollarRedeemWidget::onRedeemClicked()
         WalletModel::DigiDollarRedeemResult result = m_walletModel->redeemDigiDollar(m_selectedPositionId, amountCents, "");
 
         if (result.status == WalletModel::OK) {
-            Q_EMIT message(tr("Redeem Transaction Created"),
-                        tr("DigiDollar redeem transaction created successfully!\n\nTransaction ID: %1")
-                        .arg(result.txid),
-                        QMessageBox::Information);
+            Q_EMIT message(tr("Redemption Broadcast"),
+                        redemptionBroadcastText(result.txid),
+                        resultMessageStyle(true));
             Q_EMIT redemptionCompleted(); // Notify other widgets
             onClearClicked();
             updateBalance(); // Refresh balance displays
@@ -665,7 +712,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                 break;
             }
 
-            Q_EMIT message(errorTitle, errorMessage, QMessageBox::Critical);
+            Q_EMIT message(errorTitle, errorMessage, resultMessageStyle(false));
         }
     }
 }
@@ -756,9 +803,17 @@ void DigiDollarRedeemWidget::updateRedeemButtons()
     m_redeemButton->setEnabled(canRedeem);
     if (canRedeem) {
         m_redeemButton->setText(tr("Redeem && Unlock DGB"));
-        const QString readyText = tr("Ready to redeem this DigiDollar vault and release the locked DGB collateral.");
+        QString readyText = tr("Ready to redeem this DigiDollar vault and release the locked DGB collateral.");
+        QString readyLabel = tr("Vault ready to redeem.");
+        // A locked wallet can still redeem. The click asks for the passphrase.
+        // Say so here, so nobody hunts for a separate unlock step first.
+        if (m_walletModel && m_walletModel->getEncryptionStatus() == WalletModel::Locked) {
+            readyText += QLatin1Char('\n') +
+                tr("The wallet is locked: you will be asked for your passphrase when you click Redeem.");
+            readyLabel = tr("Vault ready to redeem. You will be asked for your wallet passphrase.");
+        }
         m_redeemButton->setToolTip(readyText);
-        m_positionValidationLabel->setText(tr("Vault ready to redeem."));
+        m_positionValidationLabel->setText(readyLabel);
         m_positionValidationLabel->setToolTip(readyText);
     } else {
         const QString reason = redeemDisabledReason();
@@ -983,14 +1038,27 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
 
     // Calculate required DD burn based on system health
     double requiredDDBurn = m_positionDDMinted; // Default: normal redemption
+    const bool candidateHealth = m_clientModel && DigiDollar::IsThawDayActive(
+        Params().GetConsensus(), m_clientModel->getNumBlocks() + 1);
 
     try {
-        // Query system health status via RPC (using getdigidollarstats)
+        // Activated redemption needs canonical health independently of circulating supply.
         UniValue params(UniValue::VARR);
-        UniValue healthResult = m_walletModel->executeRpc("getdigidollarstats", params);
+        UniValue healthResult = m_walletModel->executeRpc(
+            candidateHealth ? "getprotectionstatus" : "getdigidollarstats", params);
+        if (candidateHealth && !healthResult.isObject())
+            throw std::runtime_error("Candidate health is unavailable");
 
         if (healthResult.isObject()) {
-            int systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            int systemHealth;
+            if (candidateHealth) {
+                const UniValue& next = healthResult.find_value("next_block_health");
+                if (!next.isObject() || !next.find_value("ready").get_bool())
+                    throw std::runtime_error("Candidate health is unavailable");
+                systemHealth = next.find_value("health_percentage").getInt<int>();
+            } else {
+                systemHealth = healthResult.find_value("health_percentage").getInt<int>();
+            }
 
             // If system health < 100%, ERR is active and we need MORE DD to redeem
             if (systemHealth < 100) {
@@ -998,9 +1066,11 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
             }
         }
     } catch (const UniValue& objError) {
+        if (candidateHealth) return false;
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance (RPC error)\n");
     } catch (const std::exception& e) {
+        if (candidateHealth) return false;
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance - %s\n", e.what());
     }
@@ -1014,13 +1084,12 @@ bool DigiDollarRedeemWidget::canWalletSignRedemption() const
     if (!m_walletModel) {
         return false;
     }
-    if (m_walletModel->wallet().privateKeysDisabled()) {
-        return false;
-    }
-    if (m_walletModel->getEncryptionStatus() == WalletModel::Locked) {
-        return false;
-    }
-    return true;
+    // Only a wallet with no private keys can never sign a redemption.
+    // A locked wallet still holds its keys. When the user clicks Redeem,
+    // onRedeemClicked() asks for the passphrase, the same way the Send tab does.
+    // So a locked wallet must not disable the button. If it did, the passphrase
+    // prompt would never appear, and the console would be the only way to redeem.
+    return !m_walletModel->wallet().privateKeysDisabled();
 }
 
 QString DigiDollarRedeemWidget::redeemDisabledReason() const
@@ -1038,9 +1107,6 @@ QString DigiDollarRedeemWidget::redeemDisabledReason() const
     }
     if (m_walletModel->wallet().privateKeysDisabled()) {
         return tr("Watch-only wallet.\nThis wallet cannot sign DigiDollar redemptions because private keys are disabled.");
-    }
-    if (m_walletModel->getEncryptionStatus() == WalletModel::Locked) {
-        return tr("Wallet is locked.\nUnlock the wallet to redeem this DigiDollar vault.");
     }
     if (!validateAmount()) {
         return tr("Invalid redeem amount.\nDigiDollar redemptions must use the exact vault amount.");
@@ -1110,13 +1176,12 @@ void DigiDollarRedeemWidget::applyTheme()
 
 void DigiDollarRedeemWidget::updateValidationLabels()
 {
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
-    QString infoColor = palette.color(QPalette::Mid).name();
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
+    QString infoColor = palette.color(QPalette::WindowText).name();
 
     // Update position validation styling
     QString validationText = m_positionValidationLabel->text();
@@ -1143,13 +1208,12 @@ void DigiDollarRedeemWidget::updateAmountValidation()
         return;
     }
 
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
     QString errorBg = isDarkTheme ? "#4a2c2c" : "#ffeaea";
     QString warningBg = isDarkTheme ? "#4a3d2a" : "#fff3cd";
 

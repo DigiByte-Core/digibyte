@@ -30,6 +30,9 @@ class GetBlockFromPeerTest(DigiByteTestFramework):
             [],
             ["-fastprune", "-prune=1"]
         ]
+        # Fetching pruned DGB blocks requires history outside DD retention.
+        for args in self.extra_args:
+            args.append("-digidollaractivationheight=2147483646")
 
     def setup_network(self):
         self.setup_nodes()
@@ -95,7 +98,7 @@ class GetBlockFromPeerTest(DigiByteTestFramework):
         self.log.info("Don't fetch blocks while the node has not synced past it yet")
         # For this test we need node 1 in prune mode and as a side effect this also disconnects
         # the nodes which is also necessary for the rest of the test.
-        self.restart_node(1, ["-prune=550"])
+        self.restart_node(1, self.extra_args[1] + ["-prune=550"])
 
         # Generate a block on the disconnected node that the pruning node is not connected to
         blockhash = self.generate(self.nodes[0], 1, sync_fun=self.no_op)[0]

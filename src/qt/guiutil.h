@@ -21,6 +21,7 @@
 #include <QProgressBar>
 #include <QString>
 #include <QTableView>
+#include <QTableWidgetItem>
 
 #include <cassert>
 #include <chrono>
@@ -57,6 +58,18 @@ namespace GUIUtil
 {
     // Use this flags to prevent a "What's This" button in the title bar of the dialog on Windows.
     constexpr auto dialog_flags = Qt::WindowTitleHint | Qt::WindowSystemMenuHint | Qt::WindowCloseButtonHint;
+
+    // Sort dates and amounts by the integer stored in UserRole, regardless of
+    // the text shown to the user.
+    class NumericTableWidgetItem : public QTableWidgetItem
+    {
+    public:
+        using QTableWidgetItem::QTableWidgetItem;
+        bool operator<(const QTableWidgetItem& other) const override
+        {
+            return data(Qt::UserRole).toLongLong() < other.data(Qt::UserRole).toLongLong();
+        }
+    };
 
     // Create human-readable string from date
     QString dateTimeStr(const QDateTime &datetime);

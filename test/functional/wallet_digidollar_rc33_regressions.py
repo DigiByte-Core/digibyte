@@ -87,6 +87,25 @@ class WalletDigiDollarRC33RegressionsTest(DigiByteTestFramework):
         assert "broadcastTransaction" not in redeem_body
         assert "CommitTransaction(redeemTx, {}, {}, &commit_error)" in redeem_body
 
+    def mint_after_merges_confirm(self, wallet):
+        node = self.nodes[0]
+        pending = wallet.mintdigidollar(100000, 0)
+        assert_equal(pending["status"], "consolidation_pending")
+        assert "txid" not in pending
+        assert "position_id" not in pending
+        assert_equal(wallet.listdigidollarpositions(False), [])
+        merge_txids = pending["consolidation_txids"]
+        assert merge_txids
+        for txid in merge_txids:
+            assert txid in node.getrawmempool()
+
+        self.generate(node, 1)
+        for txid in merge_txids:
+            self.assert_confirmed_clean(wallet, txid)
+        mint = wallet.mintdigidollar(100000, 0)
+        assert mint["txid"] in node.getrawmempool()
+        return mint, merge_txids
+
     def test_fragmented_large_mint_consolidates_and_confirms(self):
         self.log.info("Testing fragmented large mint auto-consolidation")
         node = self.nodes[0]
@@ -102,10 +121,7 @@ class WalletDigiDollarRC33RegressionsTest(DigiByteTestFramework):
 
         assert_equal(len(fragmented.listunspent(1)), 450)
 
-        mint = fragmented.mintdigidollar(100000, 0)
-        assert_equal(mint["utxos_consolidated"], True)
-        assert mint["consolidation_txid"] in node.getrawmempool()
-        assert mint["txid"] in node.getrawmempool()
+        mint, merge_txids = self.mint_after_merges_confirm(fragmented)
 
         self.generate(node, 1)
         self.restart_node(0, extra_args=["-digidollar=1", "-txindex=1", "-mocktime=0", "-dandelion=0"])
@@ -114,9 +130,9 @@ class WalletDigiDollarRC33RegressionsTest(DigiByteTestFramework):
         node.setmockoracleprice(ORACLE_PRICE_MICRO_USD)
 
         assert_got_mint = fragmented.gettransaction(mint["txid"])
-        assert_got_consolidation = fragmented.gettransaction(mint["consolidation_txid"])
         assert_got_mint["confirmations"] > 0
-        assert_got_consolidation["confirmations"] > 0
+        for txid in merge_txids:
+            self.assert_confirmed_clean(fragmented, txid)
 
         positions = fragmented.listdigidollarpositions(False)
         matching = [p for p in positions if p["position_id"] == mint["position_id"]]
@@ -139,10 +155,7 @@ class WalletDigiDollarRC33RegressionsTest(DigiByteTestFramework):
 
         assert_equal(len(fragmented.listunspent(1)), 2000)
 
-        mint = fragmented.mintdigidollar(100000, 0)
-        assert_equal(mint["utxos_consolidated"], True)
-        assert mint["consolidation_txid"] in node.getrawmempool()
-        assert mint["txid"] in node.getrawmempool()
+        mint, merge_txids = self.mint_after_merges_confirm(fragmented)
 
         self.generate(node, 1)
         self.restart_node(0, extra_args=["-digidollar=1", "-txindex=1", "-mocktime=0", "-dandelion=0"])
@@ -151,9 +164,9 @@ class WalletDigiDollarRC33RegressionsTest(DigiByteTestFramework):
         node.setmockoracleprice(ORACLE_PRICE_MICRO_USD)
 
         assert_got_mint = fragmented.gettransaction(mint["txid"])
-        assert_got_consolidation = fragmented.gettransaction(mint["consolidation_txid"])
         assert_got_mint["confirmations"] > 0
-        assert_got_consolidation["confirmations"] > 0
+        for txid in merge_txids:
+            self.assert_confirmed_clean(fragmented, txid)
 
         positions = fragmented.listdigidollarpositions(False)
         matching = [p for p in positions if p["position_id"] == mint["position_id"]]

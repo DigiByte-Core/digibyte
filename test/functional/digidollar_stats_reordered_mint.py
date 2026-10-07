@@ -2,16 +2,14 @@
 # Copyright (c) 2026 The DigiByte Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""
-Regression test for DD-RH-059: DigiDollar wallet/index state must account for a
-consensus-valid mint when ordinary DGB change appears before the mint vault
-outputs and DD OP_RETURN.
-"""
+"""Track a reordered mint through pending and confirmed redemption."""
+
+from decimal import Decimal
 
 from test_framework.messages import CTxWitness, tx_from_hex
 from test_framework.script import OP_RETURN
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 class DigiDollarStatsReorderedMintTest(DigiByteTestFramework):
@@ -86,6 +84,54 @@ class DigiDollarStatsReorderedMintTest(DigiByteTestFramework):
 
         positions = node.listdigidollarpositions(False)
         assert_equal(len([p for p in positions if p["position_id"] == reordered_txid]), 1)
+
+        self.log.info("Spend the ordinary DGB change before redeeming the vault")
+        # Output zero must not become a redemption fee input: that would hide a
+        # lookup that mistakes it for the collateral, which is now output one.
+        change_value = node.getrawtransaction(reordered_txid, True)["vout"][0]["value"]
+        spend_change = node.createrawtransaction(
+            [{"txid": reordered_txid, "vout": 0}],
+            {node.getnewaddress(): change_value - Decimal("0.1")},
+        )
+        signed_change = node.signrawtransactionwithwallet(spend_change)
+        assert signed_change["complete"]
+        change_txid = node.sendrawtransaction(signed_change["hex"], maxfeerate=0)
+        change_block = node.generate(1)[0]
+        assert change_txid in node.getblock(change_block)["tx"]
+        assert_equal(node.gettxout(reordered_txid, 0), None)
+
+        unlock_height = node.getredemptioninfo(reordered_txid)["unlock_height"]
+        self.generate(node, unlock_height - node.getblockcount())
+        node.setmockoracleprice(500000)
+        redemption = node.redeemdigidollar(reordered_txid, dd_amount)
+        raw_redemption = node.gettransaction(redemption["txid"])["hex"]
+        inputs = node.decoderawtransaction(raw_redemption)["vin"]
+        assert any(txin["txid"] == reordered_txid and txin["vout"] == 1 for txin in inputs)
+        assert all(txin["txid"] != reordered_txid or txin["vout"] != 0 for txin in inputs)
+        # This wallet creates transactions without relaying them automatically.
+        assert_equal(node.sendrawtransaction(raw_redemption, maxfeerate=0), redemption["txid"])
+        assert redemption["txid"] in node.getrawmempool()
+
+        self.log.info("Report the reordered vault as pending until its redemption confirms")
+        info = node.getredemptioninfo(reordered_txid)
+        assert_equal(info["status"], "pending_redeem")
+        assert_equal(info["can_redeem"], False)
+        position = next(p for p in node.listdigidollarpositions(False) if p["position_id"] == reordered_txid)
+        assert_equal(position["status"], "pending_redeem")
+        assert_raises_rpc_error(
+            -8, "Position already has a pending redemption", node.redeemdigidollar,
+            reordered_txid, dd_amount,
+        )
+
+        redemption_block = node.generate(1)[0]
+        assert redemption["txid"] in node.getblock(redemption_block)["tx"]
+        assert_equal(node.getredemptioninfo(reordered_txid)["status"], "redeemed")
+        position = next(p for p in node.listdigidollarpositions(False) if p["position_id"] == reordered_txid)
+        assert_equal(position["status"], "redeemed")
+        assert_raises_rpc_error(
+            -8, "Position already redeemed", node.redeemdigidollar,
+            reordered_txid, dd_amount,
+        )
 
 
 if __name__ == "__main__":

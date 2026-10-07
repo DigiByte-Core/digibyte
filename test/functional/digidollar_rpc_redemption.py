@@ -145,7 +145,7 @@ class DigiDollarRPCRedemptionTest(DigiByteTestFramework):
         unlock_address = node.getnewaddress("dd-rh-076-requested-unlock", "bech32")
         unlock_script = node.getaddressinfo(unlock_address)["scriptPubKey"]
 
-        redeem = node.redeemdigidollar(self.position_id, "100.00", unlock_address)
+        redeem = node.redeemdigidollar(position_id=self.position_id, dd_amount="100.00", redemption_address=unlock_address, amount_unit="dollars")
         assert_equal(redeem["unlock_address"], unlock_address)
 
         decoded = node.getrawtransaction(redeem["txid"], True)

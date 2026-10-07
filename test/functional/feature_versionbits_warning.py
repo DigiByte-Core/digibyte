@@ -14,11 +14,14 @@ from test_framework.blocktools import create_block, create_coinbase
 from test_framework.messages import msg_block
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import DigiByteTestFramework
+from test_framework.util import assert_equal
 
 VB_PERIOD = 144           # versionbits period length for regtest
 VB_THRESHOLD = 108        # versionbits activation threshold for regtest
 VB_TOP_BITS = 0x20000000
-VB_UNKNOWN_BIT = 27       # Choose a bit unassigned to any deployment
+VB_TOP_MASK = 0xF0000000  # DigiByte uses four prefix bits
+# Bit 27 is testdummy; bit 28 is part of the required versionbits prefix.
+VB_UNKNOWN_BIT = 26
 VB_UNKNOWN_VERSION = VB_TOP_BITS | (1 << VB_UNKNOWN_BIT)
 
 WARN_UNKNOWN_RULES_ACTIVE = f"Unknown new rules activated (versionbit {VB_UNKNOWN_BIT})"
@@ -39,6 +42,7 @@ class VersionBitsWarningTest(DigiByteTestFramework):
 
     def send_blocks_with_version(self, peer, numblocks, version):
         """Send numblocks blocks to peer with version set"""
+        assert_equal(version & VB_TOP_MASK, VB_TOP_BITS)
         tip = self.nodes[0].getbestblockhash()
         height = self.nodes[0].getblockcount()
         block_time = self.nodes[0].getblockheader(tip)["time"] + 1
@@ -52,6 +56,9 @@ class VersionBitsWarningTest(DigiByteTestFramework):
             height += 1
             tip = block.sha256
         peer.sync_with_ping()
+        assert_equal(self.nodes[0].getblockcount(), height)
+        assert_equal(self.nodes[0].getbestblockhash(), f"{tip:064x}")
+        assert_equal(self.nodes[0].getblockheader(f"{tip:064x}")["version"], version)
 
     def versionbits_in_alert_file(self):
         """Test that the versionbits warning has been written to the alert file."""
@@ -66,6 +73,10 @@ class VersionBitsWarningTest(DigiByteTestFramework):
         node_deterministic_address = node.get_deterministic_priv_key().address
         # Mine one period worth of blocks
         self.generatetoaddress(node, VB_PERIOD, node_deterministic_address)
+
+        # Started deployments report their bit. Keep the unknown signal separate.
+        for name, deployment in node.getdeploymentinfo()["deployments"].items():
+            assert deployment.get("bip9", {}).get("bit") != VB_UNKNOWN_BIT, f"Bit {VB_UNKNOWN_BIT} belongs to {name}"
 
         self.log.info("Check that there is no warning if previous VB_BLOCKS have <VB_THRESHOLD blocks with unknown versionbits version.")
         # Build one period of blocks with < VB_THRESHOLD blocks signaling some unknown bit
@@ -95,37 +106,9 @@ class VersionBitsWarningTest(DigiByteTestFramework):
         self.generatetoaddress(node, 1, node_deterministic_address)
         # Check that get*info() shows the versionbits unknown rules warning
         mining_warnings = node.getmininginfo()["warnings"]
-        # DigiByte may not implement version bits warnings the same way as Bitcoin
-        # Check if any warning about unknown rules or version bits exists
-        if WARN_UNKNOWN_RULES_ACTIVE not in mining_warnings:
-            # Look for alternative warning formats
-            alt_warnings = [
-                "Unknown new rules activated",
-                "unknown new rules",
-                "versionbit",
-                "Unknown block versions being mined"
-            ]
-            found_warning = any(alt in mining_warnings for alt in alt_warnings)
-            if not found_warning:
-                self.log.warning(f"Expected warning '{WARN_UNKNOWN_RULES_ACTIVE}' not found. Actual warnings: '{mining_warnings}'")
-                # This might be a DigiByte-specific difference - let's make the test pass for now
-                return
-        assert WARN_UNKNOWN_RULES_ACTIVE in mining_warnings
+        assert WARN_UNKNOWN_RULES_ACTIVE in mining_warnings, f"Missing mining warning; got {mining_warnings!r}"
         network_warnings = node.getnetworkinfo()["warnings"]
-        if WARN_UNKNOWN_RULES_ACTIVE not in network_warnings:
-            # Apply same logic for network warnings
-            alt_warnings = [
-                "Unknown new rules activated",
-                "unknown new rules", 
-                "versionbit",
-                "Unknown block versions being mined"
-            ]
-            found_warning = any(alt in network_warnings for alt in alt_warnings)
-            if not found_warning:
-                self.log.warning(f"Expected network warning '{WARN_UNKNOWN_RULES_ACTIVE}' not found. Actual warnings: '{network_warnings}'")
-                return
-        else:
-            assert WARN_UNKNOWN_RULES_ACTIVE in network_warnings
+        assert WARN_UNKNOWN_RULES_ACTIVE in network_warnings, f"Missing network warning; got {network_warnings!r}"
         # Check that the alert file shows the versionbits unknown rules warning
         self.wait_until(lambda: self.versionbits_in_alert_file())
 

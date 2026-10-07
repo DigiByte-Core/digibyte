@@ -112,39 +112,38 @@ void SendCoinsEntry::useAvailableBalanceClicked()
     Q_EMIT useAvailableBalance(this);
 }
 
-bool SendCoinsEntry::validate(interfaces::Node& node)
+bool SendCoinsEntry::validate(interfaces::Node& node, QString& error)
 {
-    if (!model)
+    error.clear();
+    if (!model) {
+        error = tr("The wallet is not available.");
         return false;
+    }
 
-    // Check input validity
-    bool retval = true;
-
-    if (!model->validateAddress(ui->payTo->text()))
-    {
+    if (!model->validateAddress(ui->payTo->text())) {
         ui->payTo->setValid(false);
-        retval = false;
+        ui->payTo->setFocus();
+        error = ui->payTo->text().trimmed().isEmpty()
+            ? tr("Enter a DigiByte address in Pay To.")
+            : tr("The Pay To field does not contain a valid DigiByte address.");
+        return false;
     }
 
-    if (!ui->payAmount->validate())
-    {
-        retval = false;
-    }
-
-    // Sending a zero amount is invalid
-    if (ui->payAmount->value(nullptr) <= 0)
-    {
+    if (!ui->payAmount->validate() || ui->payAmount->value(nullptr) <= 0) {
         ui->payAmount->setValid(false);
-        retval = false;
+        ui->payAmount->setFocus();
+        error = tr("Enter a valid amount greater than zero.");
+        return false;
     }
 
-    // Reject dust outputs:
-    if (retval && GUIUtil::isDust(node, ui->payTo->text(), ui->payAmount->value())) {
+    if (GUIUtil::isDust(node, ui->payTo->text(), ui->payAmount->value())) {
         ui->payAmount->setValid(false);
-        retval = false;
+        ui->payAmount->setFocus();
+        error = tr("The amount is too small to send. Enter a larger amount.");
+        return false;
     }
 
-    return retval;
+    return true;
 }
 
 SendCoinsRecipient SendCoinsEntry::getValue()

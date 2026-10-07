@@ -10,6 +10,7 @@
 #include <script/script_error.h>
 #include <consensus/validation.h>
 #include <consensus/amount.h>
+#include <consensus/volatility.h>
 #include <consensus/dca.h>
 #include <consensus/digidollar.h>
 #include <primitives/transaction.h>
@@ -17,6 +18,8 @@
 #include <coins.h>
 
 class CTxMemPool;
+class CBlockIndex;
+namespace node { class BlockManager; }
 
 #include <cstdint>
 #include <functional>
@@ -71,16 +74,32 @@ struct ValidationContext {
     bool skipOracleValidation;       // Skip oracle-dependent validation (for historical blocks)
     TxLookupFn txLookup;             // Look up tx from block database (for DD amount extraction)
     const CTxMemPool* mempool;       // Mempool context; DD amount resolution remains confirmed-only
+    const CBlockIndex* candidateParent; // Parent of this candidate, including next-block policy contexts
+    Volatility::MintReference mintReference;
     int64_t nBlockTime;              // Candidate block timestamp for deterministic volatility recording
 
     ValidationContext(int height, CAmount price_micro_usd, int collateral, const CChainParams& chainParams,
                       const CCoinsViewCache* coins_view = nullptr, bool skip_oracle = false,
                       TxLookupFn tx_lookup = nullptr, const CTxMemPool* pool = nullptr,
-                      int64_t block_time = 0)
+                      int64_t block_time = 0, const CBlockIndex* candidate_parent = nullptr)
         : nHeight(height), oraclePriceMicroUSD(price_micro_usd), systemCollateral(collateral),
           params(chainParams), coins(coins_view), skipOracleValidation(skip_oracle),
-          txLookup(std::move(tx_lookup)), mempool(pool), nBlockTime(block_time) {}
+          txLookup(std::move(tx_lookup)), mempool(pool), candidateParent(candidate_parent), nBlockTime(block_time) {}
 };
+
+/** Read the committed reference from this parent's ancestry; unavailable data is not an empty window. */
+Volatility::MintReference GetMintVolatilityReference(const CBlockIndex* parent,
+    const Consensus::Params& params, const node::BlockManager& blockman);
+
+/** Select a checked, fresh quote valid for the next block. Used only by policy and wallet estimates. */
+bool GetNextBlockOracleQuote(const CBlockIndex* parent, const Consensus::Params& params,
+    const node::BlockManager& blockman, CAmount& price, std::string& error);
+
+/** Select canonical health for an activated next block; never reads legacy globals. */
+bool GetChainstateHealthForNextBlock(const CBlockIndex* parent, const Consensus::Params& params,
+    node::BlockManager& blockman, const CCoinsViewCache& coins, CAmount price_micro_usd,
+    int& health, ChainstateHealth& canonical, std::string& error,
+    const std::function<bool()>& interrupted = {});
 
 // ============================================================================
 // Core Validation Functions
@@ -153,13 +172,17 @@ bool RequiresDigiDollarValidation(const CTransaction& tx,
 ScriptType IdentifyScriptType(const CScript& script);
 
 /**
- * Extract DigiDollar amount from script
+ * Read a DigiDollar amount from a script's own data (a mint or redeem OP_RETURN).
+ * A plain token output carries no amount; resolve it through the creating
+ * transaction instead. Consensus never reads the script metadata registry.
  *
  * @param script Script containing DD amount
  * @param amount Output parameter to receive extracted amount
  * @return true if amount successfully extracted, false otherwise
  */
 bool ExtractDDAmount(const CScript& script, CAmount& amount);
+/** Test-only variant: allow_registry=true also consults the script metadata registry. */
+bool ExtractDDAmount(const CScript& script, CAmount& amount, bool allow_registry);
 
 /**
  * Find the index of the DD OP_RETURN output in a transaction.
@@ -206,7 +229,7 @@ bool ExtractDDAmountFromBlockDb(const COutPoint& prevout, uint32_t coinHeight,
  */
 bool ExtractMintAccountingAmounts(const CTransaction& tx,
                                   CAmount& ddAmount,
-                                  CAmount& collateralAmount);
+                                  CAmount& collateralAmount, bool allow_registry = false);
 
 /**
  * Extract actual DD burned and collateral released by a redemption transaction.
@@ -339,7 +362,7 @@ CAmount CalculateRequiredCollateral(CAmount ddAmount, int64_t lockTime,
  * @return Effective ratio after DCA multiplier
  */
 int GetEffectiveCollateralRatio(int baseRatio, int systemCollateral,
-                               const CChainParams& params);
+                               const CChainParams& params, bool canonical_health = false);
 
 // ============================================================================
 // Transaction Type Validation

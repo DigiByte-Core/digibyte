@@ -9,6 +9,7 @@
 #include <kernel/chainparams.h>
 #include <key.h>
 #include <pubkey.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -49,16 +50,14 @@ BOOST_AUTO_TEST_CASE(getoracles_chainparams_has_oracles)
 }
 
 /**
- * Test: Oracle names array covers all configured oracles
+ * Test: Public oracle rosters contain each operator's display name
  *
  * getoracles uses operator display names for active slots. Verify the
  * active launch roster has names for every consensus oracle.
  */
 BOOST_AUTO_TEST_CASE(getoracles_oracle_names_coverage)
 {
-    SelectParams(ChainType::TESTNET);
-    const std::vector<OracleNodeInfo>& oracles = Params().GetOracleNodes();
-    std::vector<std::string> oracle_names = {
+    const std::vector<std::string> oracle_names = {
         "Jared", "Green Candle", "Bastian", "DanGB", "Shenger",
         "Ycagel", "Aussie", "LookInto", "JohnnyLawDGB", "Ogilvie",
         "ChopperBrian", "hallvardo", "DaPunzy", "DigiByteForce",
@@ -70,12 +69,46 @@ BOOST_AUTO_TEST_CASE(getoracles_oracle_names_coverage)
         "LiberatedLark", "Manu_DGB_oracle"
     };
 
-    size_t active_count = 0;
-    for (const auto& oracle : oracles) {
-        if (oracle.is_active) ++active_count;
+    for (const auto network : {ChainType::MAIN, ChainType::TESTNET}) {
+        const auto params = CreateChainParams(*m_node.args, network);
+        const auto& oracles = params->GetOracleNodes();
+        BOOST_REQUIRE_EQUAL(oracles.size(), oracle_names.size());
+        for (const auto& oracle : oracles) {
+            BOOST_REQUIRE_LT(oracle.id, oracle_names.size());
+            std::string expected = oracle_names[oracle.id];
+            if (network == ChainType::MAIN && oracle.id == 0) expected = "DigiByte.Io Oracle";
+            if (network == ChainType::MAIN && oracle.id == 11) expected = "Crypto Corner Shop";
+            BOOST_CHECK_EQUAL(oracle.display_name, expected);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(oracle_display_names_preserve_wire_data_and_selection)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const auto& roster = params->GetOracleNodes();
+    auto renamed_roster = roster;
+    for (auto& oracle : renamed_roster) {
+        const OracleNodeInfo original = oracle;
+        oracle.display_name = "Changed local display name";
+        BOOST_CHECK(oracle == original);
+        BOOST_CHECK_EQUAL(oracle.IsValid(), original.IsValid());
+
+        DataStream legacy_wire, named_wire;
+        legacy_wire << original.id << original.pubkey << original.endpoint << original.is_active;
+        named_wire << oracle;
+        BOOST_CHECK_EQUAL_COLLECTIONS(legacy_wire.begin(), legacy_wire.end(), named_wire.begin(), named_wire.end());
+
+        OracleNodeInfo decoded;
+        named_wire >> decoded;
+        BOOST_CHECK(named_wire.empty());
+        BOOST_CHECK(decoded == original);
+        BOOST_CHECK(decoded.display_name.empty());
     }
 
-    BOOST_CHECK_GE(oracle_names.size(), active_count);
+    for (const int epoch : {0, 1, 1234}) {
+        BOOST_CHECK(SelectOraclesForEpoch(roster, epoch) == SelectOraclesForEpoch(renamed_roster, epoch));
+    }
 }
 
 /**

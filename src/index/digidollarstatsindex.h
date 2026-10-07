@@ -6,6 +6,7 @@
 #define DIGIBYTE_INDEX_DIGIDOLLARSTATSINDEX_H
 
 #include <consensus/amount.h>
+#include <consensus/digidollar_state.h>
 #include <index/base.h>
 #include <uint256.h>
 
@@ -27,6 +28,9 @@ struct DigiDollarStats {
     uint64_t vault_count{0};         //!< Number of active DigiDollar vaults
     int height{0};                   //!< Block height for these statistics
     uint256 block_hash;              //!< Block hash for these statistics
+    //! Available only when the chainstate record represents this exact block.
+    //! Old serialized index rows never supply canonical validation inputs.
+    std::optional<DigiDollar::ChainstateHealth> canonical_health;
 
     DigiDollarStats() = default;
     DigiDollarStats(CAmount dd_supply, CAmount collateral, uint64_t vaults, int block_height, const uint256& hash)
@@ -51,6 +55,9 @@ private:
 
     // Network-wide DigiDollar statistics (incremental state)
     CAmount m_total_dd_supply{0};        //!< Running total of DigiDollar supply
+    bool m_supply_known{true};          //!< False once retained metadata leaves circulation unknown
+    //! A saved baseline is independently checked once the chain reaches Thaw Day.
+    bool m_supply_verified{false};
     CAmount m_total_collateral{0};       //!< Running total of locked collateral
     uint64_t m_vault_count{0};           //!< Running count of active vaults
 
@@ -98,7 +105,8 @@ public:
      * Look up DigiDollar statistics for a specific block.
      *
      * @param block_index The block to query statistics for
-     * @return Optional containing the statistics if available, std::nullopt otherwise
+     * @return Statistics only when circulation is known; otherwise std::nullopt,
+     * including indexed history with an amount absent from retained metadata.
      */
     std::optional<DigiDollarStats> LookUpStats(const CBlockIndex& block_index) const;
 };

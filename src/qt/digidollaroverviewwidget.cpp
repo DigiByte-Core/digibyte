@@ -10,6 +10,7 @@
 #include <qt/digibyteunits.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
+#include <qt/transactiontablemodel.h>
 #include <oracle/mock_oracle.h>
 #include <consensus/dca.h>
 #include <digidollar/health.h>
@@ -52,6 +53,8 @@ static const QString MAX_EXPECTED_BLOCKCHAIN_DGB_LOCKED = QStringLiteral("21,000
 static constexpr int TOTALS_VALUE_HORIZONTAL_PADDING = 36;
 static constexpr int TOTALS_FRAME_HORIZONTAL_PADDING = 72;
 static constexpr int RECENT_TX_AMOUNT_COLUMN_MIN_WIDTH = 128;
+// Wide enough for "Redeem 180-day"; longer names widen it at run time.
+static constexpr int RECENT_TX_CATEGORY_COLUMN_MIN_WIDTH = 130;
 static constexpr int RECENT_TX_COLUMN_SPACING = 16;
 
 enum RecentTransactionRole {
@@ -168,6 +171,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     titleLayout->setObjectName("titleLayout");
 
     QLabel* balanceTitle = new QLabel(tr("DigiDollar Balances"), this);
+    balanceTitle->setObjectName("balanceTitle");
     QFont titleFont = balanceTitle->font();
     titleFont.setBold(true);
     titleFont.setWeight(75); // Match main wallet weight
@@ -186,7 +190,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->setObjectName("balanceGridLayout");
 
     // DD Balance (Available / Confirmed)
-    m_ddBalanceLabel = new QLabel(tr("Available"), this);
+    m_ddBalanceLabel = new QLabel(tr("Available:"), this);
     m_ddBalanceLabel->setObjectName("ddBalanceLabel");
     m_ddBalanceValue = new QLabel("0.00 $DD", this);
     m_ddBalanceValue->setObjectName("ddBalanceValue");
@@ -198,7 +202,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_ddBalanceValue, 1, 1);
 
     // DD Pending (Unconfirmed)
-    m_ddPendingLabel = new QLabel(tr("Pending"), this);
+    m_ddPendingLabel = new QLabel(tr("Pending:"), this);
     m_ddPendingLabel->setObjectName("ddPendingLabel");
     m_ddPendingValue = new QLabel("0.00 $DD", this);
     m_ddPendingValue->setObjectName("ddPendingValue");
@@ -210,7 +214,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_ddPendingValue, 2, 1);
 
     // DGB Collateral (Locked)
-    m_dgbCollateralLabel = new QLabel(tr("Locked Collateral"), this);
+    m_dgbCollateralLabel = new QLabel(tr("Locked Collateral:"), this);
     m_dgbCollateralLabel->setObjectName("dgbCollateralLabel");
     m_dgbCollateralValue = new QLabel("0.00000000 DGB", this);
     m_dgbCollateralValue->setObjectName("dgbCollateralValue");
@@ -411,6 +415,11 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_systemHealthBar->setMinimumHeight(20);
     m_systemHealthBar->setToolTip(tr("Visual indicator of overall blockchain health"));
     frameVLayout->addWidget(m_systemHealthBar);
+
+    m_mintStatusLabel = new QLabel(tr("Checking mint availability..."), this);
+    m_mintStatusLabel->setObjectName("mintStatusLabel");
+    m_mintStatusLabel->setWordWrap(true);
+    frameVLayout->addWidget(m_mintStatusLabel);
 
     // REMOVED: m_mainLayout->addWidget(m_systemHealthFrame);
     // Frame is now added to horizontal layout in setupUI()
@@ -719,6 +728,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 {
     // Skip updates during Initial Block Download - system health only matters when synced
     if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+        m_mintStatusLabel->setText(tr("Minting is unavailable while the wallet synchronizes."));
         return;
     }
 
@@ -726,6 +736,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
     // This ensures Bob and Alice both see identical stats across the chain.
 
     if (!m_clientModel) {
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Connect to the network and try again."));
         m_systemHealthValue->setText("No Connection");
         m_networkTotalDDValue->setText("N/A");
         m_networkTotalCollateralValue->setText("N/A");
@@ -739,6 +750,29 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         // Execute RPC call to get blockchain-wide system health
         UniValue params(UniValue::VARR); // No parameters needed
         UniValue result = m_clientModel->node().executeRpc("getdigidollarstats", params, "");
+
+        // Use the node's next-block decision, including the activation rules.
+        // A missing quote also prevents a health check; name the missing price first.
+        const auto& quote = result.find_value("mint_volatility").find_value("quote_available");
+        const std::string reason = result.find_value("minting_restricted_reason").get_str();
+        if ((quote.isBool() && !quote.get_bool()) || reason == "oracle_unavailable") {
+            m_mintStatusLabel->setText(tr("Minting is paused while waiting for a valid oracle price."));
+        } else if (reason == "legacy_volatility_freeze" || reason == "volatility_pause") {
+            m_mintStatusLabel->setText(tr("Minting is paused by price protection. Check Mint $DD for details."));
+        } else if (reason == "volatility_state_not_ready") {
+            m_mintStatusLabel->setText(tr("Minting is paused because required price history is unavailable."));
+        } else if (reason == "health_state_not_ready") {
+            m_mintStatusLabel->setText(tr("Minting is paused because the network health check is unavailable."));
+        } else if (reason == "err_active") {
+            m_mintStatusLabel->setText(tr("Minting is paused because the network has too little collateral."));
+        } else if (reason == "none" && m_walletModel) {
+            const QString walletError = m_walletModel->getDigiDollarMintWalletError();
+            m_mintStatusLabel->setText(walletError.isEmpty()
+                ? tr("Minting is available. Check collateral and fees on Mint $DD.")
+                : tr("Minting is unavailable: %1").arg(walletError));
+        } else {
+            m_mintStatusLabel->setText(tr("Mint availability is unknown. Check Mint $DD before continuing."));
+        }
 
         // Extract values from RPC result
         int healthPercentage = result.find_value("health_percentage").getInt<int>();
@@ -810,6 +844,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 
     } catch (const UniValue& e) {
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.write());
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         m_systemHealthValue->setText("Loading...");
         m_networkTotalDDValue->setText("Loading...");
         m_networkTotalCollateralValue->setText("Loading...");
@@ -817,6 +852,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         m_errLevelValue->setText("Loading...");
         m_systemHealthBar->setValue(0);
     } catch (const std::exception& e) {
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         m_systemHealthValue->setText("Error");
         m_networkTotalDDValue->setText("Error");
         m_networkTotalCollateralValue->setText("Error");
@@ -875,6 +911,16 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
 
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     QFontMetrics amountMetrics(monospaceFont);
+    // The type column has to fit the longest name a row can carry. Measure it
+    // with the font the row labels really use, which comes from the theme
+    // stylesheet and not from the list.
+    QLabel categoryProbe(this);
+    categoryProbe.setObjectName("recentTxCategoryLabel");
+    categoryProbe.hide();
+    categoryProbe.ensurePolished();
+    const int categoryColumnWidth = std::max(
+        RECENT_TX_CATEGORY_COLUMN_MIN_WIDTH,
+        categoryProbe.fontMetrics().horizontalAdvance(DigiDollarLabels::ChangeReturned()) + 16);
     int amountColumnWidth = RECENT_TX_AMOUNT_COLUMN_MIN_WIDTH;
     int measuredCount = 0;
     for (const auto& tx : transactions) {
@@ -927,7 +973,7 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
             categoryText = lockPeriodStr.isEmpty() ? tr("Redeem") : tr("Redeem %1").arg(lockPeriodStr);
         } else if (tx.category == "redeem_change") {
             icon = "💰";
-            categoryText = tr("Redemption Change");
+            categoryText = DigiDollarLabels::ChangeReturned();
         } else if (tx.category == "send") {
             icon = "📤";
             categoryText = tr("Send");
@@ -947,7 +993,10 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
 
         QLabel* categoryLabel = new QLabel(categoryText);
         categoryLabel->setObjectName("recentTxCategoryLabel");
-        categoryLabel->setFixedWidth(130);  // Wide enough for "Redeem 180-day"
+        categoryLabel->setFixedWidth(categoryColumnWidth);
+        if (tx.category == "redeem_change") {
+            categoryLabel->setToolTip(DigiDollarLabels::ChangeReturnedExplanation());
+        }
         layout->addWidget(categoryLabel);
 
         // Amount — DDTransaction stores unsigned magnitudes, so derive sign from
@@ -960,15 +1009,17 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
         amountLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
         amountLabel->setAlignment(Qt::AlignRight);
         if (tx.amount < 0 || tx.category == "send" || tx.category == "redeem") {
-            amountLabel->setStyleSheet("color: #ff4646;");
+            amountLabel->setProperty("amountDirection", "outgoing");
         } else if (tx.amount > 0 || tx.category == "receive" || tx.category == "mint") {
-            amountLabel->setStyleSheet("color: #64ff64;");
+            amountLabel->setProperty("amountDirection", "incoming");
         }
         layout->addWidget(amountLabel);
 
         // Confirmations - also check for abandoned status
         QString confirmText;
-        if (tx.abandoned) {
+        if (tx.is_expired_mint) {
+            confirmText = tr("Expired mint");
+        } else if (tx.abandoned) {
             confirmText = tr("Abandoned");
         } else if (tx.confirmations < 0) {
             confirmText = tr("Conflicted");
@@ -981,15 +1032,18 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
         }
         QLabel* confirmLabel = new QLabel(confirmText);
         confirmLabel->setObjectName("recentTxStatusLabel");
-        if (tx.is_local) {
+        if (tx.is_expired_mint) {
+            confirmLabel->setToolTip(tr("This mint was not confirmed before its deadline."));
+        } else if (tx.is_local) {
             confirmLabel->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
         }
-        confirmLabel->setFixedWidth(100);
+        confirmLabel->ensurePolished();
+        confirmLabel->setFixedWidth(std::max(100, confirmLabel->fontMetrics().horizontalAdvance(tr("Expired mint")) + 12));
         layout->addWidget(confirmLabel);
 
         // Date/time
         QDateTime dateTime = QDateTime::fromSecsSinceEpoch(tx.timestamp);
-        QLabel* dateLabel = new QLabel(dateTime.toString("MMM dd, yyyy"));
+        QLabel* dateLabel = new QLabel(QLocale::system().toString(dateTime.date(), QLocale::ShortFormat));
         dateLabel->setObjectName("recentTxDateLabel");
         dateLabel->setAlignment(Qt::AlignRight);
         layout->addWidget(dateLabel);

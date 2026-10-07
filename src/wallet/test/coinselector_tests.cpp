@@ -465,7 +465,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
         const auto& no_res = SelectCoinsBnB(GroupCoins(available_coins.All(), /*subtract_fee_outputs*/true),
                                             selection_target, /*cost_of_change=*/0, MAX_STANDARD_TX_WEIGHT);
         BOOST_REQUIRE(!no_res);
-        BOOST_CHECK(util::ErrorString(no_res).original.find("The inputs size exceeds the maximum weight") != std::string::npos);
+        BOOST_CHECK(util::ErrorString(no_res).original.find("This transaction needs too many coins and is too large to send") != std::string::npos);
 
         // Now add same coin value with a good size and check that it gets selected
         add_coin(available_coins, *wallet, 5 * CENT, coin_selection_params_bnb.m_effective_feerate, 6 * 24, false, 0, true);
@@ -1180,7 +1180,7 @@ BOOST_AUTO_TEST_CASE(srd_tests)
             return available_coins;
         });
         BOOST_CHECK(!res);
-        BOOST_CHECK(util::ErrorString(res).original.find("The inputs size exceeds the maximum weight") != std::string::npos);
+        BOOST_CHECK(util::ErrorString(res).original.find("This transaction needs too many coins and is too large to send") != std::string::npos);
     }
 
     {

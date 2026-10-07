@@ -170,7 +170,7 @@ public:
         // Whether to call TestBlockValidity() at the end of CreateNewBlock().
         bool test_block_validity{true};
         // Test hook executed immediately before TestBlockValidity().
-        std::function<void()> on_before_test_block_validity{};
+        std::function<void(CBlock&)> on_before_test_block_validity{};
     };
     static Options DefaultOptions();
 
@@ -197,8 +197,8 @@ private:
     bool LookupPreviousTxForDDValidation(const uint256& txid, uint32_t coinHeight, CTransactionRef& tx_out) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Validate DD collateral/state against the current chain tip for inclusion. */
     bool ValidateDDForBlockInclusion(const CTransaction& tx, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Remove all DigiDollar transactions from current template and rebuild commitments. */
-    bool RemoveDDTransactionsFromBlock(const CBlockIndex* pindexPrev);
+    /** Remove selected price-dependent DigiDollar transactions and descendants, then rebuild commitments. */
+    bool RemoveDDTransactionsFromBlock(const CBlockIndex* pindexPrev, bool mint_only = false);
 
     // Methods for how to add transactions to a block.
     /** Add transactions based on feerate including unconfirmed ancestors

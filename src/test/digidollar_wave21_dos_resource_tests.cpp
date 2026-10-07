@@ -68,12 +68,11 @@
 #include <primitives/oracle.h>
 #include <random.h>
 #include <test/util/setup_common.h>
+#include <test/util/source_root.h>
 #include <util/time.h>
 
 #include <chrono>
 #include <cstdint>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -99,18 +98,6 @@ COraclePriceMessage MakeSignedRegtestMessage(uint32_t oracle_id, uint64_t price,
     BOOST_REQUIRE(msg.SignAttestation(key));
     BOOST_REQUIRE(msg.VerifyAttestation());
     return msg;
-}
-
-std::string ReadFirstExistingTextFile(const std::vector<std::string>& candidates)
-{
-    for (const std::string& path : candidates) {
-        std::ifstream file(path);
-        if (!file.is_open()) continue;
-        std::ostringstream contents;
-        contents << file.rdbuf();
-        if (!contents.str().empty()) return contents.str();
-    }
-    return {};
 }
 
 } // namespace
@@ -232,12 +219,7 @@ BOOST_AUTO_TEST_CASE(update_bundle_prunes_stale_epochs)
 // ============================================================================
 BOOST_AUTO_TEST_CASE(testnet_oracle_deploy_script_does_not_broad_kill_digibyted)
 {
-    const std::string script = ReadFirstExistingTextFile({
-        "deploy_testnet_oracle.sh",
-        "../deploy_testnet_oracle.sh",
-        "../../deploy_testnet_oracle.sh",
-    });
-    BOOST_REQUIRE_MESSAGE(!script.empty(), "could not locate deploy_testnet_oracle.sh");
+    const std::string script = ReadRepositoryFile("contrib/deploy_testnet_oracle.sh");
 
     BOOST_CHECK_MESSAGE(script.find("pkill") == std::string::npos,
                         "deploy_testnet_oracle.sh must not use broad pkill fallbacks");

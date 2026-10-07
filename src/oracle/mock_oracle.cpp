@@ -25,6 +25,7 @@
 #include <array>
 #include <cstring>
 #include <vector>
+#include <mutex>
 
 // Global instance pointer
 MockOracleManager* MockOracleManager::instance = nullptr;
@@ -157,7 +158,7 @@ void MockOracleManager::InitTestKeys()
         key.Set(hash.begin(), hash.end(), true);
         if (key.IsValid()) {
             testOracleKeys[i] = key;
-            LogPrintf("MockOracleManager: Initialized test key for oracle %d (pubkey=%s)\n",
+            LogPrint(BCLog::DIGIDOLLAR, "MockOracleManager: Initialized test key for oracle %d (pubkey=%s)\n",
                      i, HexStr(key.GetPubKey()));
         } else {
             LogPrintf("MockOracleManager: WARNING - Failed to create test key for oracle %d\n", i);
@@ -177,6 +178,13 @@ CKey MockOracleManager::GetTestKey(uint32_t oracle_id) const
 
 MockOracleManager& MockOracleManager::GetInstance()
 {
+    // Two callers arriving together both used to see no manager and both build one.
+    // Nothing is ever deleted here, so the loser keeps a usable pointer rather than a
+    // freed one, but the two would then hold different managers and disagree about the
+    // mock price. Build it once. This is the same shape that had to be fixed in the
+    // real oracle manager, where it was a use-after-free rather than a leak.
+    static std::mutex creation;
+    std::lock_guard<std::mutex> lock(creation);
     if (!instance) {
         instance = new MockOracleManager();
     }
@@ -231,7 +239,7 @@ void MockOracleManager::SetMockPrice(CAmount price_micro_usd, int64_t update_hei
         lastUpdateHeight = update_height;
     }
 
-    LogPrintf("MockOracleManager: Price updated to %lld micro-USD ($%.6f per DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "MockOracleManager: Price updated to %lld micro-USD ($%.6f per DGB)\n",
               mockPriceMicroUSD, static_cast<double>(mockPriceMicroUSD) / 1000000.0);
 }
 
@@ -277,7 +285,7 @@ COracleBundle MockOracleManager::CreateMockMuSig2Bundle(int height, int64_t bloc
         return COracleBundle(GetCurrentEpoch(height));
     }
 
-    LogPrintf("MockOracleManager: Created regtest MuSig2 bundle for height %d epoch %d with %zu signers, price %lld micro-USD\n",
+    LogPrint(BCLog::DIGIDOLLAR, "MockOracleManager: Created regtest MuSig2 bundle for height %d epoch %d with %zu signers, price %lld micro-USD\n",
               height, bundle.epoch, oracle_ids.size(), mockPriceMicroUSD);
     return bundle;
 }
@@ -312,7 +320,7 @@ void MockOracleManager::SimulateVolatility(int percentChange, int64_t update_hei
         lastUpdateHeight = update_height;
     }
 
-    LogPrintf("MockOracleManager: Simulated %d%% volatility: %lld -> %lld micro-USD ($%.6f -> $%.6f per DGB)\n",
+    LogPrint(BCLog::DIGIDOLLAR, "MockOracleManager: Simulated %d%% volatility: %lld -> %lld micro-USD ($%.6f -> $%.6f per DGB)\n",
               percentChange, oldPrice, mockPriceMicroUSD,
               static_cast<double>(oldPrice) / 1000000.0, static_cast<double>(mockPriceMicroUSD) / 1000000.0);
 }

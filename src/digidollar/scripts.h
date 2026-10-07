@@ -77,7 +77,7 @@ struct MintParams {
  * @param params Parameters including DD amount, lock period, keys, etc.
  * @return CScript P2TR script (OP_1 + 32-byte taproot output)
  */
-CScript CreateCollateralP2TR(const MintParams& params);
+CScript CreateCollateralP2TR(const MintParams& params, bool register_metadata = true);
 
 /**
  * Create simple P2TR script for DigiDollar token outputs

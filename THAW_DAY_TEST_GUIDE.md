@@ -1,0 +1,305 @@
+# Thaw Day test guide
+
+`thawDay.sh` runs the same core DigiDollar checks before Thaw Day and after it
+on a private network on this computer. It opens separate Qt wallets and uses
+a separate test client. The main test is that the intended rules change at the
+boundary while mint, send, receive, redeem, and wallet recovery still work.
+
+- Eight Qt nodes host eight new wallets and 24 test oracle identities.
+- Local price responses pass through real parsers, signing, bundles, and validation.
+- The lab activates Thaw Day at 5,000; the release's public heights stay unchanged.
+- Windows and the local price server stay open by default for inspection.
+- The execution section separates earlier RC2 results from final-release testing.
+
+## How the test works
+
+An oracle is a signer that helps agree on a DGB price. MuSig2 combines the chosen
+signers' signatures into one. A bundle is the signed price record put in a block.
+The lab supplies prices; the client must still parse, sign, include, and validate them.
+
+```mermaid
+flowchart TD
+    F["One local HTTP server<br/>Six exchange response formats"]
+    Q["Eight Qt nodes and separate wallets<br/>Real exchange fetchers and parsers"]
+    O["24 test oracle identities<br/>Real MuSig2 signing"]
+    B["Real signed oracle bundle<br/>Included in a mined block"]
+    V["Normal block and DigiDollar validation<br/>Same block hash on the test nodes"]
+    T["Shared core tests<br/>Before H and after H"]
+    F --> Q --> O --> B --> V --> T
+```
+
+The server returns the JSON formats used by Binance, CoinGecko, KuCoin, Gate.io,
+HTX, and Crypto.com. These are six local routes, not real exchange connections.
+Its log records the routes actually requested. A feed response, signed heartbeat,
+and signed price in a mined block are separate evidence.
+
+Bob, Alice, Charlie, Dave, Eve, Frank, Grace, and Heidi are the eight starting
+wallets. The 24 oracle identities are spread across their Qt processes. A later
+fresh-sync check opens a ninth Qt node with empty data and no assigned oracle.
+
+## The lab and release settings
+
+`H` is the first block height that uses the new Thaw Day rules. The private lab
+uses H=5,000 and DigiDollar activation at 600 in the existing `-easypow` test mode.
+The release values remain mainnet **24,490,000** and testnet26 **432,100**.
+The lab's P2P network marker is `f9 dd a5 66`; it connects only to local peers.
+
+The separate client is in `builds/thawday-client`. The build uses the current
+release commit by default. Pass a commit or tag to test a specific candidate.
+Its patch changes lab network settings, startup guards/banner, and exchange URL routing. DigiDollar validation,
+accounting, C1/C2/C3, exchange parsers, aggregation, signing, and signature checks
+remain in place. There is no validation bypass. Easy test mining does not prove
+public-network difficulty behavior.
+
+Startup requires testnet, `-easypow`, `THAWDAY_LAB=1`, and an exact feed URL of
+`http://127.0.0.1:<port>`. The script supplies them. Feed requests disable public
+fallback, proxies, and redirects. An unavailable local server means a failed fetch.
+Each node uses local RPC/P2P bindings, its own ports, disabled public discovery,
+a new data folder, and private Qt preferences. The nested folder name `testnet26`
+does not make these fresh private data folders public-chain data.
+
+Oracle keys are known test keys; wallets are new and their mined coins have no
+public-chain value. Do not put real funds, keys, or public-chain data in this client.
+The old script, existing wallets, release binaries, live nodes, and running
+mainnet/testnet reindexes remain separate and untouched.
+
+## Build, run, inspect, and stop
+
+Use a Linux desktop with a working `DISPLAY`, Python 3, the project's Qt 5 build
+dependencies, and enough free memory/disk for the small nodes. Process checks use
+Linux `/proc`. Run these commands from the release checkout:
+
+```sh
+cd /path/to/digibyte
+```
+
+Build the separate client only if its worktree does not already exist:
+
+```sh
+./thawDay.sh build
+# Or choose an exact candidate:
+./thawDay.sh build <commit-or-tag>
+```
+
+This creates a **fresh** `builds/thawday-client`, applies
+`contrib/thawday/client.patch`, and builds daemon, CLI, and Qt with `make -j8`.
+It refuses to overwrite an existing worktree. Before using an existing build,
+check that `base_commit` in `builds/thawday-client/THAWDAY_BUILD.json` is the
+exact commit you intend to test. The runner checks the build against its own
+record; it does not require that record to match the current release checkout.
+After the run, verify the same commit in its `run.json`. Keep the source commit
+and hashes of the test helpers with the evidence. The build does not run the full test suites.
+Keep one heavy job at a time and leave existing builds/reindexes alone.
+
+Check the script's price-wait logic without starting any nodes:
+
+```sh
+python3 contrib/thawday/test_rehearsal.py
+```
+
+These seven small checks cover the last allowed block, changing oracle rounds,
+wrong prices, and a completed quote. They do not replace the full rehearsal.
+
+Start a new run:
+
+```sh
+./thawDay.sh run
+```
+
+The default is a new timestamp folder under `builds/thawday-runs/`. Save the exact
+path printed by the script. It refuses to reuse an existing folder. To choose one:
+
+```sh
+./thawDay.sh run --run-dir builds/thawday-runs/my-new-run
+```
+
+The script checks its client build record, patch, source, and binary hashes before
+launch. Review any mismatch; do not edit hashes to get past the check. Wallets
+are named `thaw-test-bob`, `thaw-test-alice`, and so on. Files and Qt preferences
+stay inside the private run folders rather than your normal wallet/settings paths.
+
+By default, Qt and the price server stay open when the command ends, including
+after a failed check. To close only this run's processes automatically, use:
+
+```sh
+./thawDay.sh run --close-after
+```
+
+From another terminal, inspect or stop the run using its actual path:
+
+```sh
+./thawDay.sh status --run-dir builds/thawday-runs/20260914-143000
+./thawDay.sh stop --run-dir builds/thawday-runs/20260914-143000
+```
+
+Replace the example timestamp. `status` prints saved `run.json`; it does not run
+a fresh health check. `stop` uses the saved process IDs, start times, and private
+RPC ports. It does not stop processes by a broad name match. Evidence and test
+wallets stay on disk after stopping.
+
+## The shared before/after checks
+
+The workflow follows `test_multi_oracle_testnet.sh` but does not run that script.
+One shared `core_suite` runs on each side of H. The script mines to 3,000, funds
+fee balances, starts the oracles, and waits for signed heartbeats before the first
+group. Mining limits and actual confirmation heights keep that group below H.
+
+Each group confirms twelve 100-DD mints: one at each of the ten lock tiers plus
+two more tier-0 vaults for later checks. It first tries an early tier-0 redemption.
+For valid redemptions it waits until one block beyond the greatest **returned
+unlock height** of the needed vaults, rather than assuming a fixed block count.
+
+Transfers run Bob → Alice → Charlie → Bob, with each balance checked. The group
+rejects partial redemption, confirms a whole-vault redemption, rejects a second
+spend of that vault, and exercises an extra burn. It then checks accounting and
+restarts, backs up, restores, and rescans Bob and Alice's wallets.
+
+For the extra burn, the script builds a normal redemption and keeps it off the
+network. It reduces the returned token change by 25 DD, then signs the changed
+transaction again with the correct test keys. Only that replacement is sent.
+Closing a 100-DD vault burns 125 DD but removes only 100 DD of open principal.
+The script checks that the replacement confirms and the original cannot spend
+the same vault afterward. It does this once before H and once after H.
+
+Bob is the miner, and the extra-burn step restarts Bob. A restarted miner starts
+its oracle signing session over, and a block that carries a mint or redemption
+must include a fresh signed price. So after any restart of Bob, the script only
+calls the price ready once a block mined after that restart carries a signed
+price. The first full rehearsal stopped here because it mined twelve blocks in
+twenty seconds while Bob's signers were still starting, and Bob left the
+redemption out of every block. Before the replacement is sent, an ordinary DGB
+payment confirms as a control, and the script records Bob's block template to
+show the replacement is in it.
+
+After the pre-Thaw group, Bob reindexes with its wallet loaded and must reach
+the same block hash with the same DD balance. Bob's wallet holds addresses that
+received change after a mint, which is the case that broke the rc1 reindex on
+mainnet. Bob reindexes again at the end of the run, before Heidi.
+
+Circulating DD means issuance minus the DD actually burned. Open-vault principal
+means the original DD minted against vaults still open. An extra burn reduces
+circulation by more than the principal removed; those totals can validly differ.
+Below H the legacy health denominator remains selected. At/after H, health uses
+open-vault principal, without recreating the extra tokens burned.
+
+The ledger checks the saved transaction bytes and asks which token and vault
+outputs remain unspent. It independently totals token amounts, original principal,
+collateral, and vault count before comparing them with node reports. Post-H it
+also checks the saved health record's block hash/readiness, matches records
+across nodes, requires a ready candidate view, and checks its health calculation.
+
+## Activation, replacement branches, and price limits
+
+The price starts at $0.030000 per DGB, then rises to $0.045000. Prices are stored
+in micro-USD, one millionth of a dollar: 30,000 and 45,000. The script checks that
+a fresh signed quote still hits the old freeze, then mines signed ancestor samples.
+At tip H-2 the next block is still pre-H. At tip H-1 the next block is H and uses
+new rules. At H the script checks that activation is selected. It then waits
+for a fresh signed quote before checking the 15-sample reference and cleared
+old freeze. That wait can advance the chain beyond H. The after-H core group
+must then actually confirm its eligible mints. Exact-boundary transaction
+checks also run in the separate `digidollar_thawday_reference_reorg.py` test.
+
+When a price wait has a height limit, the script keeps the last block available
+until that round finishes signing. At an oracle-round boundary, the status RPC
+still describes the old round, so the script allows the new boundary block.
+Signing status alone never proves success: the mined block must carry the
+expected signed price and all test nodes must accept it. If the height limit is
+already exhausted without that proof, the script fails instead of waiting for
+an already-mined block to change.
+
+A reorg replaces part of the active chain with another branch. The boundary test
+rewinds a follower below H, restarts it, and reconnects the original blocks. It checks
+the restored UTXO MuHash, a compact digest of all unspent outputs. It then creates
+a short replacement branch with more work and submits its real block bytes to
+the other nodes through normal validation. Nodes must choose the replacement
+branch and agree on accounting. This short reorg does **not** replace the older
+price-sample ancestors and does not prove deep sample-changing reorg behavior.
+It runs before the after-H transaction group, so it also does not undo that
+group's mints, transfers, or redemptions. The separate Thaw Day functional
+tests cover ancestor-changing reorgs and undoing transaction accounting.
+
+With the reference held at 45,000 micro-USD, the price checks use 54,000 and
+36,000: exactly 20% above and below. Mints must reject at both edges, while an
+otherwise valid send and eligible ordinary redemption must confirm. At 53,999
+and 36,001, just inside those edges, actual mints must confirm. The script checks
+that the reference stayed fixed, then restores the 45,000 price.
+
+Heidi finally reindexes the small lab chain; a ninth node syncs from empty data.
+The nodes must reach the same block hash and satisfy the ledger checks. Alternating
+starting nodes have the DD stats index on/off. This is not every index/pruning mode.
+
+## Execution status
+
+The final-release run `thaw-final-03` passed on October 1, 2026. It used source
+commit `86c81769024a47f332228700a1ff7c9203c8a1ef` with the recorded lab patch.
+It finished at height **5,686**, with all nine nodes on block
+`0000040c0d0dcbd4be1b05dee7c9ea36ad2204d99a9b64382abb921b9b789e6b`.
+The run recorded **144 checkpoints**, no failed check, and a successful process
+exit. All private test processes then stopped normally.
+
+The evidence is in `builds/final-verification/thaw-final-03/`. The adjacent
+`thaw-final-03-build.json` and `thaw-final-03-helpers.json` record the client and
+helper hashes. The production source matches the separately tested source at
+`a96e6b10b6`; the later commit changes only the rehearsal wait and its tests.
+
+The previous final run, `thaw-final-02`, stopped because the script consumed its
+last permitted block before a signed price was ready. Its logs are preserved.
+The corrected script passed seven regression checks and independent review
+before this fresh full run. A failed or incomplete run is not counted as a pass.
+
+The table below describes the completed final-release run. It does not replace
+public-network observation, an older-binary comparison, a full mainnet history
+reindex, or native Windows/macOS package checks.
+
+| Check | Before H | At/after H |
+| --- | --- | --- |
+| Twelve mints covering all ten tiers | PASS | PASS |
+| Early/partial/repeated redemption rejection | PASS | PASS |
+| Confirmed send/receive and exact balances | PASS | PASS |
+| Whole-vault redemption and extra burn | PASS | PASS |
+| Direct token/vault ledger and selected health rules | PASS | PASS |
+| Bob/Alice restart, backup, restore and rescan | PASS | PASS |
+| Bob reindex with its wallet loaded, same hash and balance | PASS | PASS |
+| Legacy freeze and H-1/H rule selection | PASS | PASS |
+| Boundary rewind, restart, reconnect and replacement branch | PASS | PASS |
+| Both exact 20% mint rejections; send/redeem stay usable | Not a pre-H C1 rule | PASS |
+| Actual mints just inside both price edges | Not a pre-H C1 rule | PASS |
+| Lab reindex and fresh sync to the same hash | Separate end-of-run check | PASS |
+
+For historical comparison, run `rc2-rehearsal-09` completed the whole integrated harness with no failed
+check. It used the test client built from the v9.26.6rc2 commit `e3ad0a4522`
+(daemon sha256 `16e127189d75`), reached final height **5,658** with tip hash
+`0000073bc7d85ac72c80328c6e17ba26aabd9cc2d4f907c94cba6c4113e5856c`, and recorded
+143 recorded checkpoints with zero failures. The evidence is under
+`builds/thawday-runs/rc2-rehearsal-09/`. A pass here is the lab exercise only; it
+does not replace the separate audit, public testnet activation and observation,
+the older-binary comparison, or the full mainnet history reindex.
+
+## Qt inspection, evidence, and limits
+
+Automation uses RPC, the program interface, while real Qt wallets run. It does
+not click every GUI form. Inspect balances, positions, transaction history, fees,
+collateral, and error/status messages during the printed `before` and `after`
+phases. Manual flows and screenshots are separate evidence: record the run,
+build, phase, and transaction. There is no automatic pause for every screen.
+
+Keep the whole run folder. `run.json` records the build, ports, processes, status,
+and final hash/height if completed; `results.jsonl` records individual checks.
+Also keep `test-client.patch`, `ancestor-samples.json`, `feed-requests.jsonl`,
+`price-micro-usd.txt`, console/node logs, test wallets and backups. The separate
+client has `THAWDAY_BUILD.json`. The run records the old script's hash without
+executing it. A missing later check record is not a PASS.
+
+Preserve errors and logs. A failed check may be a harness defect, missing
+prerequisite, timeout, or product defect; the message alone does not decide which.
+Use the run's `stop` command for cleanup and a new folder for another attempt.
+Do not weaken validation or change an expected answer to make a check pass.
+
+Even a complete lab PASS does not replace the separate audit, full current test
+suites, real older-binary comparison, full historical mainnet/testnet reindex,
+public testnet observation periods, or operator coordination. It does not cover
+every attack, crash, storage fault, deep reorg, platform, or resource limit.
+The same client before/after H is not a mixed-version test; lab reindex is not
+public-history reindex; heartbeats alone do not prove every signer joined mined
+bundles; and open Qt windows do not prove every GUI action was used.

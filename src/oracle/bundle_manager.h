@@ -7,9 +7,11 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <protocol.h>
 #include <set>
 #include <unordered_map>
@@ -55,7 +57,7 @@ private:
     int32_t cached_epoch{-1};
     int64_t last_update_time{0};
 
-    // Configuration
+    // Configuration is protected by mtx_messages.
     bool enabled{true};
     int32_t min_oracle_count{ORACLE_CONSENSUS_REQUIRED};
     int32_t total_oracle_count{ORACLE_ACTIVE_COUNT};
@@ -70,10 +72,26 @@ public:
     ~OracleBundleManager();
 
     //! Configuration
-    void SetEnabled(bool enable) { enabled = enable; }
-    bool IsEnabled() const { return enabled; }
-    void SetMinOracleCount(int32_t min_count) { min_oracle_count = min_count; }
-    int32_t GetMinOracleCount() const { return min_oracle_count; }
+    void SetEnabled(bool enable)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        enabled = enable;
+    }
+    bool IsEnabled() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        return enabled;
+    }
+    void SetMinOracleCount(int32_t min_count)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        min_oracle_count = min_count;
+    }
+    int32_t GetMinOracleCount() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_messages);
+        return min_oracle_count;
+    }
 
     //! Message management
     bool AddOracleMessage(const COraclePriceMessage& message);
@@ -141,6 +159,7 @@ public:
     //! V0x03 script format validation
     bool ValidateV03BundleFormat(const CScript& script, uint8_t& version);
 
+    /** Validate against the supplied epoch settings, genesis, quorum, and full compressed oracle keys. */
     static bool ValidateMuSig2Bundle(const COracleBundle& bundle, int32_t block_height, const Consensus::Params& params, std::string& error);
     static bool ValidateBundle(const COracleBundle& bundle, int block_height, const Consensus::Params& params);
     static int GetRequiredConsensus(int block_height, const Consensus::Params& params);
@@ -217,6 +236,21 @@ public:
     //! not be read (incomplete/damaged block data) — the caller must abort
     //! startup rather than reconstruct price/volatility state from partial data.
     static bool LoadPricesFromChain(ChainstateManager& chainman);
+
+    enum class LoadStatus { COMPLETE, CANCELLED, READ_ERROR };
+    struct LoadResult {
+        LoadStatus status{LoadStatus::COMPLETE};
+        int height{-1};
+        uint256 block_hash;
+    };
+    struct LoadCallbacks {
+        std::function<bool()> cancelled;
+        std::function<void(uint64_t completed, uint64_t total)> progress;
+    };
+
+    //! Callbacks run under cs_main and must not block or acquire validation locks.
+    //! Cancellation and read errors do not publish reconstructed state.
+    static LoadResult LoadPricesFromChain(ChainstateManager& chainman, const LoadCallbacks& callbacks);
     //! Startup price-scan per-block gate = the BIP9 DigiDollar-activation predicate for
     //! block_index. Production uses the ChainstateManager overload (shared, memoized
     //! versionbits cache — O(1) amortized, the fix for the ~15-minute startup hang); the
@@ -289,7 +323,8 @@ class OracleDataValidator
 {
 public:
     //! Block validation
-    static bool ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state);
+    //! The optional output is cleared on entry and populated only after all checks.
+    static bool ValidateBlockOracleData(const CBlock& block, const CBlockIndex* pindex_prev, const Consensus::Params& params, BlockValidationState& state, std::optional<COracleBundle>* validated_bundle = nullptr);
 
     //! Transaction validation for DigiDollar operations
     static bool ValidateOraclePriceForTx(const CTransaction& tx, CAmount oracle_price, int32_t block_height);

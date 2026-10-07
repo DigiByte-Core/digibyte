@@ -97,18 +97,35 @@ class DigiDollarRPCAmountFiltersTest(DigiByteTestFramework):
             tier0_mint["position_id"],
             5000,
         )
+        # A decimal amount is only read as dollars when the caller says so;
+        # without amount_unit it is refused before the position is consulted.
+        assert_raises_rpc_error(
+            -8,
+            "ambiguous amount: pass amount_unit=cents or amount_unit=dollars",
+            node0.getredemptioninfo,
+            tier0_mint["position_id"],
+            "50.00",
+        )
         assert_raises_rpc_error(
             -8,
             "Exact-amount redemption required",
             node0.getredemptioninfo,
             tier0_mint["position_id"],
             "50.00",
+            "dollars",
         )
 
-        self.log.info("DD-RH-022: integral decimal strings are decimal dollars, not cents")
+        self.log.info("DD-RH-022: decimal strings are dollars only with amount_unit=dollars, never guessed")
         node1_addr = node1.getdigidollaraddress()
         before_node1 = Decimal(node1.getdigidollarbalance()["total"])
-        send_result = node0.senddigidollar(node1_addr, "50.00")
+        assert_raises_rpc_error(
+            -8,
+            "ambiguous amount: pass amount_unit=cents or amount_unit=dollars",
+            node0.senddigidollar,
+            node1_addr,
+            "50.00",
+        )
+        send_result = node0.senddigidollar(address=node1_addr, amount="50.00", amount_unit="dollars")
         assert "txid" in send_result
         self.generate(node0, 1)
         self.sync_all()
@@ -127,7 +144,16 @@ class DigiDollarRPCAmountFiltersTest(DigiByteTestFramework):
 
         node2_addr = node2.getdigidollaraddress()
         before_node2 = Decimal(node2.getdigidollarbalance()["total"])
-        sendmany_result = node0.sendmanydigidollar("", {node2_addr: "25.00"}, "decimal string regression")
+        assert_raises_rpc_error(
+            -8,
+            "ambiguous amount: pass amount_unit=cents or amount_unit=dollars",
+            node0.sendmanydigidollar,
+            "",
+            {node2_addr: "25.00"},
+        )
+        sendmany_result = node0.sendmanydigidollar(
+            dummy="", amounts={node2_addr: "25.00"}, comment="decimal string regression", amount_unit="dollars"
+        )
         assert_equal(sendmany_result["total_amount"], 2500)
         assert_equal(sendmany_result["amounts"][node2_addr], 2500)
         self.generate(node0, 1)

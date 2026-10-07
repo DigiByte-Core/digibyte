@@ -22,6 +22,9 @@ public:
 
 private Q_SLOTS:
     void overviewWidgetTests();
+    void failedMintsKeepTheirWalletStatus();
+    void digiDollarControlsStayReadableInBothThemes();
+    void overviewExplainsMintAvailability();
     void watchOnlyDigiDollarBalanceHiddenInWalletModel();
     void privateKeyDisabledWalletCannotGenerateDigiDollarAddress();
     void mintWidgetTests();
@@ -43,6 +46,7 @@ private Q_SLOTS:
     void addressBookTests();
     void transactionsWidgetTests();
     void transactionsWidgetExportTests();
+    void datesFollowComputerLocale();
     void privacyTabSetPrivacySlotTests();
     void privacyOverviewMaskTests();
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();
@@ -95,20 +99,29 @@ private Q_SLOTS:
     void positionsWidgetInitialLoadNotThrottled();
     void positionsWidgetHealthUsesMicroUsdOraclePrice();
     void positionsWidgetDisablesRedeemForPrivateKeyDisabledWallet();
-    void positionsWidgetDisablesRedeemForLockedEncryptedWallet();
+    void positionsWidgetEnablesRedeemForLockedEncryptedWallet();
     void redeemWidgetButtonStateNoSelection();
     void redeemWidgetButtonStateTimelockActive();
     void redeemWidgetButtonStateInvalidAmount();
     void redeemWidgetButtonStateInsufficientDDBalance();
     void redeemWidgetButtonStatePrivateKeyDisabledWallet();
     void redeemWidgetButtonStateLockedWallet();
+    void redeemWidgetLockedWalletClickRequestsUnlock();
+    void redeemWidgetCancelledUnlockLeavesFormUnchanged();
     void redeemWidgetRefreshesWhenWalletUnlocks();
     void redeemWidgetButtonStateReady();
+    void redeemWidgetCanonicalHealthDoesNotRequireCirculatingSupply();
     void positionsWidgetLockedTooltipShowsRemainingBlocksAndTime();
     void positionsWidgetPendingMintButtonNotRedeemed();
     void positionsWidgetPendingRedeemButtonNotRedeemed();
     void redeemWidgetKeepsTimelockedPositionDisabled();
     void mintDigiDollarRejectsPrivateKeyDisabledWallet();
+    void mintWidgetRejectsUnsupportedWalletBeforeConfirmation_data();
+    void mintWidgetRejectsUnsupportedWalletBeforeConfirmation();
+    void mintWidgetPreservesEncryptedWalletUnlockFlow();
+    void redeemResultAlwaysReachesTheUser();
+    void transactionsConfirmationsColumnIsAlwaysACount();
+    void sendWidgetSaysWhyAnAmountIsRefused();
 };
 
 #endif // DIGIBYTE_QT_TEST_DIGIDOLLARWIDGETTESTS_H

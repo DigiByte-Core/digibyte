@@ -22,6 +22,7 @@ from test_framework.script import (
 )
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
+    append_config,
     assert_equal,
     assert_greater_than,
     assert_raises_rpc_error,
@@ -31,6 +32,16 @@ from test_framework.util import (
 # the manual prune RPC avoids pruning blocks in the same window to be
 # compatible with pruning based on key creation time.
 TIMESTAMP_WINDOW = 2 * 60 * 60
+
+# Regtest turns DigiDollar on at the genesis block. A node that has DigiDollar
+# keeps every block from the DigiDollar activation height upwards, so that it
+# can always read the block that created a DigiDollar coin. On regtest that
+# would mean keeping the whole chain, and then this test has no history it is
+# allowed to delete. So set DigiDollar activation to a height this test never
+# reaches. Every block it mines is then ordinary history that a pruned node may
+# delete, which is what this test is here to check.
+DIGIDOLLAR_NEVER_ACTIVATES = 2147483646
+
 
 def mine_large_blocks(node, n):
     # Make a large scriptPubKey for the coinbase transaction. This is OP_RETURN
@@ -102,6 +113,12 @@ class PruneTest(DigiByteTestFramework):
 
     def setup_nodes(self):
         self.add_nodes(self.num_nodes, self.extra_args)
+        # Written into each node's config file rather than passed on the
+        # command line. This test restarts its nodes many times with fresh
+        # argument lists, and a config file setting survives all of them.
+        for node in self.nodes:
+            append_config(node.datadir_path,
+                          [f"digidollaractivationheight={DIGIDOLLAR_NEVER_ACTIVATES}"])
         self.start_nodes()
         if self.is_wallet_compiled():
             self.import_deterministic_coinbase_privkeys()

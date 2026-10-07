@@ -21,11 +21,17 @@
 // startup gate tracks that predicate exactly, on a real connected chain.
 
 #include <chain.h>
+#include <chainparams.h>
 #include <consensus/params.h>
+#include <consensus/volatility.h>
 #include <digidollar/digidollar.h>
 #include <oracle/bundle_manager.h>
 #include <sync.h>
+#include <util/time.h>
 #include <validation.h>
+
+#include <limits>
+#include <vector>
 
 #include <test/util/setup_common.h>
 
@@ -84,6 +90,115 @@ BOOST_AUTO_TEST_CASE(should_load_startup_matches_bip9_predicate)
             "ShouldLoadStartupOraclePriceForBlock diverged from the BIP9 predicate at height "
             << h << " (gate=" << gate << " predicate=" << predicate << ")");
     }
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+namespace {
+struct RetainedOracleHistorySetup : TestChain100Setup {
+    RetainedOracleHistorySetup()
+        : TestChain100Setup(ChainType::REGTEST, {"-digidollaractivationheight=1"}) {}
+
+    ~RetainedOracleHistorySetup()
+    {
+        OracleBundleManager::GetInstance().Clear();
+        DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    }
+};
+
+struct UnreadableOracleBlock {
+    unsigned int& position;
+    const unsigned int saved;
+    explicit UnreadableOracleBlock(unsigned int& value) : position(value), saved(value)
+    {
+        AssertLockHeld(cs_main);
+        position = std::numeric_limits<unsigned int>::max();
+    }
+    ~UnreadableOracleBlock()
+    {
+        AssertLockHeld(cs_main);
+        position = saved;
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(digidollar_oracle_reconstruction_tests, RetainedOracleHistorySetup)
+
+BOOST_AUTO_TEST_CASE(required_block_read_failure_keeps_state_and_retry_succeeds)
+{
+    LOCK(cs_main);
+    auto& manager = OracleBundleManager::GetInstance();
+    manager.Clear();
+    manager.UpdatePriceCache(100, 70000, GetTime());
+    DigiDollar::Volatility::VolatilityMonitor::ReconstructFromBlockData({{70000, GetTime(), 100}}, 100);
+    const auto saved = manager.GetStats();
+    const auto history = DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory();
+    BOOST_REQUIRE_EQUAL(history.size(), 1U);
+    const uint256 tip = m_node.chainman->ActiveChain().Tip()->GetBlockHash();
+    CBlockIndex* unreadable = m_node.chainman->ActiveChain()[50];
+    BOOST_REQUIRE(unreadable);
+    std::vector<std::pair<uint64_t, uint64_t>> updates;
+    OracleBundleManager::LoadCallbacks callbacks;
+    callbacks.progress = [&](uint64_t complete, uint64_t total) { updates.emplace_back(complete, total); };
+    {
+        UnreadableOracleBlock unavailable(unreadable->nDataPos);
+        const auto result = OracleBundleManager::LoadPricesFromChain(*m_node.chainman, callbacks);
+        BOOST_CHECK(result.status == OracleBundleManager::LoadStatus::READ_ERROR);
+        BOOST_CHECK_EQUAL(result.height, 50);
+        BOOST_CHECK(result.block_hash == unreadable->GetBlockHash());
+        BOOST_CHECK_EQUAL(manager.GetOraclePriceForHeight(100), 70000U);
+        BOOST_CHECK_EQUAL(manager.GetStats().latest_price, saved.latest_price);
+        BOOST_CHECK_EQUAL(manager.GetStats().last_update, saved.last_update);
+        const auto unchanged = DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory();
+        BOOST_REQUIRE_EQUAL(unchanged.size(), history.size());
+        BOOST_CHECK_EQUAL(unchanged[0].price, history[0].price);
+        BOOST_CHECK_EQUAL(unchanged[0].timestamp, history[0].timestamp);
+        BOOST_CHECK_EQUAL(unchanged[0].height, history[0].height);
+        BOOST_REQUIRE(!updates.empty());
+        BOOST_CHECK_LT(updates.back().first, updates.back().second);
+    }
+    updates.clear();
+    const auto complete = OracleBundleManager::LoadPricesFromChain(*m_node.chainman, callbacks);
+    BOOST_CHECK(complete.status == OracleBundleManager::LoadStatus::COMPLETE);
+    BOOST_CHECK(m_node.chainman->ActiveChain().Tip()->GetBlockHash() == tip);
+    BOOST_CHECK(DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory().empty());
+    BOOST_REQUIRE(!updates.empty());
+    BOOST_CHECK_EQUAL(updates.front().first, 0U);
+    BOOST_CHECK_EQUAL(updates.back().first, 100U);
+    BOOST_CHECK_EQUAL(updates.back().second, 100U);
+    BOOST_CHECK_LE(updates.size(), 102U);
+    uint64_t previous = 0;
+    for (const auto& [processed, total] : updates) {
+        BOOST_CHECK_GE(processed, previous);
+        BOOST_CHECK_EQUAL(total, 100U);
+        previous = processed;
+    }
+    manager.Clear();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+}
+
+BOOST_AUTO_TEST_CASE(cancel_before_reading_and_mid_scan_never_reports_completion)
+{
+    auto& manager = OracleBundleManager::GetInstance();
+    for (const int cancel_after : {0, 50}) {
+        manager.Clear();
+        manager.UpdatePriceCache(100, 70000, GetTime());
+        const auto saved = manager.GetStats();
+        int polls = 0;
+        std::vector<std::pair<uint64_t, uint64_t>> updates;
+        OracleBundleManager::LoadCallbacks callbacks;
+        callbacks.cancelled = [&] { return polls++ == cancel_after; };
+        callbacks.progress = [&](uint64_t complete, uint64_t total) { updates.emplace_back(complete, total); };
+        const auto result = OracleBundleManager::LoadPricesFromChain(*m_node.chainman, callbacks);
+        BOOST_CHECK(result.status == OracleBundleManager::LoadStatus::CANCELLED);
+        BOOST_CHECK_EQUAL(polls, cancel_after + 1);
+        BOOST_CHECK_EQUAL(manager.GetStats().latest_price, saved.latest_price);
+        BOOST_CHECK_EQUAL(manager.GetStats().last_update, saved.last_update);
+        BOOST_REQUIRE(!updates.empty());
+        BOOST_CHECK_EQUAL(updates.front().first, 0U);
+        BOOST_CHECK_LT(updates.back().first, 100U);
+    }
+    manager.Clear();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

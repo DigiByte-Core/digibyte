@@ -28,7 +28,8 @@ static RPCHelpMan validateaddress()
 {
     return RPCHelpMan{
         "validateaddress",
-        "\nReturn information about the given digibyte address.\n",
+        "\nReturn information about the given digibyte address.\n"
+        "For DigiDollar addresses (DD, TD or RD), use validateddaddress in a wallet context.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The digibyte address to validate"},
         },

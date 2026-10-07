@@ -54,8 +54,11 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
     }
     entry.pushKV("bip125-replaceable", rbfStatus);
 
-    for (const std::pair<const std::string, std::string>& item : wtx.mapValue)
+    for (const std::pair<const std::string, std::string>& item : wtx.mapValue) {
+        // Coin merge state belongs to the wallet, not the public transaction response.
+        if (item.first == "digidollar_mint_consolidation") continue;
         entry.pushKV(item.first, item.second);
+    }
 }
 
 struct tallyitem
@@ -854,7 +857,20 @@ RPCHelpMan abandontransaction()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
     }
     if (!pwallet->AbandonTransaction(hash)) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not eligible for abandonment");
+        // Abandoning failed. Ask why, and only then choose the words. Asking before
+        // abandoning would change what this command does: a transaction that is
+        // already abandoned is refused by the eligibility check but accepted by the
+        // abandon itself, which does nothing and reports success. That success is
+        // kept exactly as it was.
+        if (!pwallet->TransactionCanBeAbandoned(hash)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not eligible for abandonment");
+        }
+        // Eligible, so what failed was saving the change to the wallet file. Say
+        // that, rather than blaming the transaction for something it did not do, and
+        // say what it means for the coins.
+        throw JSONRPCError(RPC_WALLET_ERROR, "Could not save the abandoned state to the wallet. "
+                                            "The transaction is unchanged and the coins it spends "
+                                            "are still committed to it.");
     }
 
     return UniValue::VNULL;

@@ -62,8 +62,9 @@ public:
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
+    std::optional<DigiDollar::ChainstateHealth> GetDigiDollarState() const override;
     std::vector<uint256> GetHeadBlocks() const override;
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true) override;
+    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true, const std::optional<DigiDollar::ChainstateHealth>& dd_state = std::nullopt) override;
     std::unique_ptr<CCoinsViewCursor> Cursor() const override;
 
     //! Whether an unsupported database format is used.
