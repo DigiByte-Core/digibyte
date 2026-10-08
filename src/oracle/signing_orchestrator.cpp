@@ -863,6 +863,13 @@ void OracleSigningOrchestrator::Shutdown()
         // Stop() is normally already done by StopBlockNotifications(). Repeat it
         // here so a caller that only calls Shutdown() still unsubscribes first.
         g_signing_orchestrator->Stop();
+        // Stop() only unregisters, which is non-blocking and can return while a
+        // notification is still in flight on the scheduler thread. Drain the
+        // queue before destroying the object that callback is about to touch,
+        // otherwise it locks m_sessions_mutex on freed memory: the scheduler
+        // thread then blocks forever (and Shutdown() blocks behind it in
+        // CScheduler::stop) or aborts, depending on the C++ runtime.
+        SyncWithValidationInterfaceQueue();
         g_signing_orchestrator.reset();
     }
 }
