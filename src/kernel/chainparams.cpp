@@ -579,6 +579,7 @@ public:
         vSeeds.emplace_back("testnetseed.digibyte.io"); // Jared Tate @JaredTate
         vSeeds.emplace_back("testnetseed.digibyte.link"); // Bastian Driessen @bastiandriessen
         vSeeds.emplace_back("testnetseed.digibyte.services"); // Craig Donnachie @cdonnachie
+        vSeeds.emplace_back("testnetseed.diginode.tools"); // Olly Stedall @saltedlolly
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,126);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,140);
